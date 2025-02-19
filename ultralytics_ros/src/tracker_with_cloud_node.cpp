@@ -11,7 +11,7 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU Affero General Public License for more details.
- *
+ *0000000000000
  * You should have received a copy of the GNU Affero General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  */
@@ -34,10 +34,10 @@ TrackerWithCloudNode::TrackerWithCloudNode() : pnh_("~")
   marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("detection_marker", 1);
   raw_point_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("point_test", 1);
 
-  camera_info_sub_.subscribe(nh_, camera_info_topic_, 1);
-  lidar_sub_.subscribe(nh_, lidar_topic_, 1);
-  yolo_result_sub_.subscribe(nh_, yolo_result_topic_, 1);
-  sync_ = boost::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(100);
+  camera_info_sub_.subscribe(nh_, camera_info_topic_, 10);
+  lidar_sub_.subscribe(nh_, lidar_topic_, 10);
+  yolo_result_sub_.subscribe(nh_, yolo_result_topic_, 10);
+  sync_ = boost::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(10);
   sync_->connectInput(camera_info_sub_, lidar_sub_, yolo_result_sub_);
   sync_->registerCallback(boost::bind(&TrackerWithCloudNode::syncCallback, this, _1, _2, _3));
 
@@ -49,6 +49,7 @@ void TrackerWithCloudNode::syncCallback(const sensor_msgs::CameraInfo::ConstPtr&
                                         const sensor_msgs::PointCloud2ConstPtr& cloud_msg,
                                         const ultralytics_ros::YoloResultConstPtr& yolo_result_msg)
 {
+  ROS_INFO("test");
   ros::Time current_call_time = ros::Time::now();
   ros::Duration callback_interval = current_call_time - last_call_time_;
   last_call_time_ = current_call_time;
@@ -77,7 +78,6 @@ void TrackerWithCloudNode::projectCloud(const pcl::PointCloud<pcl::PointXYZ>::Pt
                                         const std_msgs::Header& header, vision_msgs::Detection3DArray& detections3d_msg,
                                         sensor_msgs::PointCloud2& combine_detection_cloud_msg)
 {
-  printf("Testtttttttttttt");
   pcl::PointCloud<pcl::PointXYZ> combine_detection_cloud;
   detections3d_msg.header = header;
   detections3d_msg.header.stamp = yolo_result_msg->header.stamp;
