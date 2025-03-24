@@ -238,7 +238,7 @@ void publish_cloud(ros::Publisher &pub,
                    pcl::PointCloud<pcl::PointXYZ>::Ptr cluster) {
   sensor_msgs::PointCloud2::Ptr clustermsg(new sensor_msgs::PointCloud2);
   pcl::toROSMsg(*cluster, *clustermsg);
-  clustermsg->header.frame_id = "map";
+  clustermsg->header.frame_id = "base_link";
   clustermsg->header.stamp = ros::Time::now();
   pub.publish(*clustermsg);
 }
