@@ -38,9 +38,6 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
-#include <nav_msgs/Odometry.h> 
-#include <tf2_geometry_msgs/tf2_geometry_msgs.h> 
-
 using namespace std;
 using namespace cv;
 
@@ -65,19 +62,6 @@ ros::Publisher pub_cluster4;
 ros::Publisher pub_cluster5;
 
 ros::Publisher markerPub;
-
-// Odometry publishers (객체별)
-ros::Publisher odom_pub0;
-ros::Publisher odom_pub1;
-ros::Publisher odom_pub2;
-ros::Publisher odom_pub3;
-ros::Publisher odom_pub4;
-ros::Publisher odom_pub5;
-
-// Velocity arrow marker publisher
-ros::Publisher vel_arrow_pub;
-
-nav_msgs::Odometry current_vehicle_odom;
 
 std::vector<geometry_msgs::Point> prevClusterCenters;
 
@@ -117,10 +101,6 @@ access iterators (like vector's)
 objID: vector containing the IDs of the clusters that should be associated with
 each KF_Tracker objID[0] corresponds to KFT0, objID[1] corresponds to KFT1 etc.
 */
-void vehicleOdomCallback(const nav_msgs::Odometry::ConstPtr& msg)
-{
-    current_vehicle_odom = *msg;
-}
 
 std::pair<int, int> findIndexOfMin(std::vector<std::vector<float>> distMat) {
   cout << "findIndexOfMin cALLED\n";
@@ -328,268 +308,6 @@ void KFT(const std_msgs::Float32MultiArray ccs) {
   // cout<<"estimate="<<estimated.at<float>(0)<<","<<estimated.at<float>(1)<<"\n";
   // Point statePt(estimated.at<float>(0),estimated.at<float>(1));
   // cout<<"DONE KF_TRACKER\n";
-  //=========================
-  // (1) 6개의 Kalman Filter에서 [x, y, v_x, v_y] 추출
-  //=========================
-  float x0  = KF0.statePost.at<float>(0);
-  float y0  = KF0.statePost.at<float>(1);
-  float vx0 = KF0.statePost.at<float>(2);
-  float vy0 = KF0.statePost.at<float>(3);
-
-  float x1  = KF1.statePost.at<float>(0);
-  float y1  = KF1.statePost.at<float>(1);
-  float vx1 = KF1.statePost.at<float>(2);
-  float vy1 = KF1.statePost.at<float>(3);
-
-  float x2  = KF2.statePost.at<float>(0);
-  float y2  = KF2.statePost.at<float>(1);
-  float vx2 = KF2.statePost.at<float>(2);
-  float vy2 = KF2.statePost.at<float>(3);
-
-  float x3  = KF3.statePost.at<float>(0);
-  float y3  = KF3.statePost.at<float>(1);
-  float vx3 = KF3.statePost.at<float>(2);
-  float vy3 = KF3.statePost.at<float>(3);
-
-  float x4  = KF4.statePost.at<float>(0);
-  float y4  = KF4.statePost.at<float>(1);
-  float vx4 = KF4.statePost.at<float>(2);
-  float vy4 = KF4.statePost.at<float>(3);
-
-  float x5  = KF5.statePost.at<float>(0);
-  float y5  = KF5.statePost.at<float>(1);
-  float vx5 = KF5.statePost.at<float>(2);
-  float vy5 = KF5.statePost.at<float>(3);
-
-  //=========================
-  // (2) Odometry 메시지 6개 작성 & 퍼블리시
-  //=========================
-  // cluster 0
-  {
-    nav_msgs::Odometry odom0;
-    odom0.header.stamp = ros::Time::now();
-    odom0.header.frame_id = "base_link"; // 적절한 frame (예: "map" 등)
-
-    // 위치
-    odom0.pose.pose.position.x = x0;
-    odom0.pose.pose.position.y = y0;
-    odom0.pose.pose.position.z = 0.0;
-
-    // 속도
-    odom0.twist.twist.linear.x = vx0;
-    odom0.twist.twist.linear.y = vy0;
-    odom0.twist.twist.linear.z = 0.0;
-
-    // 방향(orientation)은 yaw = atan2(vy, vx)를 쿼터니언화
-    double yaw0 = std::atan2(vy0, vx0);
-    tf2::Quaternion q0;
-    q0.setRPY(0, 0, yaw0); // (roll=0, pitch=0, yaw=yaw0)
-    odom0.pose.pose.orientation = tf2::toMsg(q0);
-
-    // 퍼블리시
-    odom_pub0.publish(odom0);
-  }
-
-  // cluster 1
-  {
-    nav_msgs::Odometry odom1;
-    odom1.header.stamp = ros::Time::now();
-    odom1.header.frame_id = "base_link";
-
-    odom1.pose.pose.position.x = x1;
-    odom1.pose.pose.position.y = y1;
-    odom1.pose.pose.position.z = 0.0;
-
-    odom1.twist.twist.linear.x = vx1;
-    odom1.twist.twist.linear.y = vy1;
-    odom1.twist.twist.linear.z = 0.0;
-
-    double yaw1 = std::atan2(vy1, vx1);
-    tf2::Quaternion q1;
-    q1.setRPY(0, 0, yaw1);
-    odom1.pose.pose.orientation = tf2::toMsg(q1);
-
-    odom_pub1.publish(odom1);
-  }
-
-  // cluster 2
-  {
-    nav_msgs::Odometry odom2;
-    odom2.header.stamp = ros::Time::now();
-    odom2.header.frame_id = "base_link";
-
-    odom2.pose.pose.position.x = x2;
-    odom2.pose.pose.position.y = y2;
-    odom2.pose.pose.position.z = 0.0;
-
-    odom2.twist.twist.linear.x = vx2;
-    odom2.twist.twist.linear.y = vy2;
-    odom2.twist.twist.linear.z = 0.0;
-
-    double yaw2 = std::atan2(vy2, vx2);
-    tf2::Quaternion q2;
-    q2.setRPY(0, 0, yaw2);
-    odom2.pose.pose.orientation = tf2::toMsg(q2);
-
-    odom_pub2.publish(odom2);
-  }
-
-  // cluster 3
-  {
-    nav_msgs::Odometry odom3;
-    odom3.header.stamp = ros::Time::now();
-    odom3.header.frame_id = "base_link";
-
-    odom3.pose.pose.position.x = x3;
-    odom3.pose.pose.position.y = y3;
-    odom3.pose.pose.position.z = 0.0;
-
-    odom3.twist.twist.linear.x = vx3;
-    odom3.twist.twist.linear.y = vy3;
-    odom3.twist.twist.linear.z = 0.0;
-
-    double yaw3 = std::atan2(vy3, vx3);
-    tf2::Quaternion q3;
-    q3.setRPY(0, 0, yaw3);
-    odom3.pose.pose.orientation = tf2::toMsg(q3);
-
-    odom_pub3.publish(odom3);
-  }
-
-  // cluster 4
-  {
-    nav_msgs::Odometry odom4;
-    odom4.header.stamp = ros::Time::now();
-    odom4.header.frame_id = "base_link";
-
-    odom4.pose.pose.position.x = x4;
-    odom4.pose.pose.position.y = y4;
-    odom4.pose.pose.position.z = 0.0;
-
-    odom4.twist.twist.linear.x = vx4;
-    odom4.twist.twist.linear.y = vy4;
-    odom4.twist.twist.linear.z = 0.0;
-
-    double yaw4 = std::atan2(vy4, vx4);
-    tf2::Quaternion q4;
-    q4.setRPY(0, 0, yaw4);
-    odom4.pose.pose.orientation = tf2::toMsg(q4);
-
-    odom_pub4.publish(odom4);
-  }
-
-  // cluster 5
-  {
-    nav_msgs::Odometry odom5;
-    odom5.header.stamp = ros::Time::now();
-    odom5.header.frame_id = "base_link";
-
-    odom5.pose.pose.position.x = x5;
-    odom5.pose.pose.position.y = y5;
-    odom5.pose.pose.position.z = 0.0;
-
-    odom5.twist.twist.linear.x = vx5;
-    odom5.twist.twist.linear.y = vy5;
-    odom5.twist.twist.linear.z = 0.0;
-
-    double yaw5 = std::atan2(vy5, vx5);
-    tf2::Quaternion q5;
-    q5.setRPY(0, 0, yaw5);
-    odom5.pose.pose.orientation = tf2::toMsg(q5);
-
-    odom_pub5.publish(odom5);
-  }
-
-  //=========================
-  // (3) 속도 화살표 MarkerArray 발행
-  //=========================
-  visualization_msgs::MarkerArray arrowArray;
-  arrowArray.markers.reserve(6);
-
-  // 6개의 (x,y,vx,vy) 정보를 배열로 처리
-  std::vector<float> xList {x0, x1, x2, x3, x4, x5};
-  std::vector<float> yList {y0, y1, y2, y3, y4, y5};
-  std::vector<float> vxList{vx0, vx1, vx2, vx3, vx4, vx5};
-  std::vector<float> vyList{vy0, vy1, vy2, vy3, vy4, vy5};
-
-  // 상대 속도 기준값 (예: 0.1 m/s)
-  const double RELATIVE_SPEED_THRESHOLD = 0.1;
-
-  for(int i = 0; i < 6; i++){
-    visualization_msgs::Marker arrow;
-    arrow.header.stamp = ros::Time::now();
-    arrow.header.frame_id = "base_link";
-    arrow.ns = "velocity_arrows";
-    
-    // 안정적인 추적을 위해 화살표 id는 칼만 필터 번호(i) 사용
-    arrow.id = i;
-    arrow.type = visualization_msgs::Marker::ARROW;
-    arrow.action = visualization_msgs::Marker::ADD;
-
-    // 화살표의 위치 = 클러스터 위치 (KF 예측 결과)
-    arrow.pose.position.x = xList[i];
-    arrow.pose.position.y = yList[i];
-    arrow.pose.position.z = 0.0;
-
-    // 화살표 방향 (KF 속도 방향)
-    double yaw = std::atan2(vyList[i], vxList[i]);
-    tf2::Quaternion q;
-    q.setRPY(0, 0, yaw);
-    arrow.pose.orientation = tf2::toMsg(q);
-
-    // KF에서 계산된 클러스터 속력
-    double cluster_speed = std::sqrt(vxList[i]*vxList[i] + vyList[i]*vyList[i]);
-
-    // 차량 odom의 선형 속도 (현재 저장된 최신 값 사용)
-    double vehicle_vx = current_vehicle_odom.twist.twist.linear.x;
-    double vehicle_vy = current_vehicle_odom.twist.twist.linear.y;
-
-    // 상대 속도 계산
-    double relative_vx = vxList[i] - vehicle_vx;
-    double relative_vy = vyList[i] - vehicle_vy;
-    double relative_speed = std::sqrt(relative_vx*relative_vx + relative_vy*relative_vy);
-
-    // 화살표 길이(예: 0.3m 기본 + cluster_speed에 비례)
-    double arrow_length = 0.3 + cluster_speed * 100; 
-
-    // ARROW Marker에서 points를 설정하여 원하는 길이로 만듭니다.
-    geometry_msgs::Point p_start, p_end;
-    p_start.x = 0.0; p_start.y = 0.0; p_start.z = 0.0;
-    p_end.x = arrow_length; p_end.y = 0.0; p_end.z = 0.0;
-    arrow.points.clear();
-    arrow.points.push_back(p_start);
-    arrow.points.push_back(p_end);
-
-    // scale은 화살표 두께/화살촉 크기 설정 (여기서는 고정)
-    arrow.scale.x = 1;  // 몸통 직경
-    arrow.scale.y = 0.1;   // 화살촉 직경
-    arrow.scale.z = 0.2;   // 화살촉 길이
-
-    // 상대 속도에 따라 색상 결정:
-    // 동적 객체 (상대 속도 >= threshold): 녹색, 정적 객체: 빨간색
-    if(relative_speed >= RELATIVE_SPEED_THRESHOLD){
-      // 동적: 녹색
-      arrow.color.r = 0.0;
-      arrow.color.g = 1.0;
-      arrow.color.b = 0.0;
-    } else {
-      // 정적: 빨간색
-      arrow.color.r = 1.0;
-      arrow.color.g = 0.0;
-      arrow.color.b = 0.0;
-    }
-    arrow.color.a = 1.0; // 불투명
-
-    // Marker lifetime (필요에 따라 조정)
-    arrow.lifetime = ros::Duration(0.1);
-
-    arrowArray.markers.push_back(arrow);
-  }
-
-  // 토픽 발행
-  vel_arrow_pub.publish(arrowArray);
-
-  
 }
 void publish_cloud(ros::Publisher &pub,
                    pcl::PointCloud<pcl::PointXYZ>::Ptr cluster) {
@@ -986,16 +704,5 @@ int main(int argc, char **argv) {
   /* Point cloud clustering
    */
 
-  // odometry 퍼블리셔들 (객체별)
-  odom_pub0 = nh.advertise<nav_msgs::Odometry>("cluster0_odom", 1);
-  odom_pub1 = nh.advertise<nav_msgs::Odometry>("cluster1_odom", 1);
-  odom_pub2 = nh.advertise<nav_msgs::Odometry>("cluster2_odom", 1);
-  odom_pub3 = nh.advertise<nav_msgs::Odometry>("cluster3_odom", 1);
-  odom_pub4 = nh.advertise<nav_msgs::Odometry>("cluster4_odom", 1);
-  odom_pub5 = nh.advertise<nav_msgs::Odometry>("cluster5_odom", 1);
-  
-  // velocity arrow marker 퍼블리셔
-  vel_arrow_pub = nh.advertise<visualization_msgs::MarkerArray>("velocity_arrows", 1);
-  ros::Subscriber vehicleOdomSub = nh.subscribe("/odom/coordinate/gps", 1, vehicleOdomCallback);
   ros::spin();
 }
