@@ -40,16 +40,23 @@
 
 #include <nav_msgs/Odometry.h> 
 #include <tf2_geometry_msgs/tf2_geometry_msgs.h> 
+#include <tf2/LinearMath/Matrix3x3.h>
 
 using namespace std;
 using namespace cv;
 
+// 전방 선언: publish_cloud 함수
+void publish_cloud(ros::Publisher &pub, pcl::PointCloud<pcl::PointXYZ>::Ptr cluster);
+
+// -------------------- 글로벌 변수 --------------------
 ros::Publisher objID_pub;
+double integrated_vehicle_vx = 0.0;
+double integrated_vehicle_vy = 0.0;
 
 // KF init
-int stateDim = 4; // [x,y,v_x,v_y]//,w,h]
-int measDim = 2;  // [z_x,z_y,z_w,z_h]
-int ctrlDim = 0;
+int stateDim = 4; // [x, y, v_x, v_y]
+int measDim  = 2;  // [z_x, z_y]
+int ctrlDim  = 0;
 cv::KalmanFilter KF0(stateDim, measDim, ctrlDim, CV_32F);
 cv::KalmanFilter KF1(stateDim, measDim, ctrlDim, CV_32F);
 cv::KalmanFilter KF2(stateDim, measDim, ctrlDim, CV_32F);
@@ -77,522 +84,280 @@ ros::Publisher odom_pub5;
 // Velocity arrow marker publisher
 ros::Publisher vel_arrow_pub;
 
-nav_msgs::Odometry current_vehicle_odom;
-
-std::vector<geometry_msgs::Point> prevClusterCenters;
+std::vector<geometry_msgs::Point> prevClusterCenters;  // 이전 프레임 클러스터 중심 (6개)
+bool havePrevCenters = false;  // prevClusterCenters가 유효한지
 
 cv::Mat state(stateDim, 1, CV_32F);
 cv::Mat_<float> measurement(2, 1);
 
-std::vector<int> objID; // Output of the data association using KF
-                        // measurement.setTo(Scalar(0));
-
+std::vector<int> objID; // KF와 클러스터 매칭 결과 (크기 6)
 bool firstFrame = true;
 
-// calculate euclidean distance of two points
-double euclidean_distance(geometry_msgs::Point &p1, geometry_msgs::Point &p2) {
-  return sqrt((p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y) +
-              (p1.z - p2.z) * (p1.z - p2.z));
-}
-/*
-//Count unique object IDs. just to make sure same ID has not been assigned to
-two KF_Trackers. int countIDs(vector<int> v)
-{
-    transform(v.begin(), v.end(), v.begin(), abs); // O(n) where n =
-distance(v.end(), v.begin()) sort(v.begin(), v.end()); // Average case O(n log
-n), worst case O(n^2) (usually implemented as quicksort.
-    // To guarantee worst case O(n log n) replace with make_heap, then
-sort_heap.
-
-    // Unique will take a sorted range, and move things around to get duplicated
-    // items to the back and returns an iterator to the end of the unique
-section of the range auto unique_end = unique(v.begin(), v.end()); // Again n
-comparisons return distance(unique_end, v.begin()); // Constant time for random
-access iterators (like vector's)
-}
-*/
-
-/*
-
-objID: vector containing the IDs of the clusters that should be associated with
-each KF_Tracker objID[0] corresponds to KFT0, objID[1] corresponds to KFT1 etc.
-*/
-void vehicleOdomCallback(const nav_msgs::Odometry::ConstPtr& msg)
-{
-    current_vehicle_odom = *msg;
+// -------------------- 유틸 함수 --------------------
+double euclidean_distance(const geometry_msgs::Point &p1, const geometry_msgs::Point &p2) {
+  return sqrt((p1.x - p2.x)*(p1.x - p2.x) +
+              (p1.y - p2.y)*(p1.y - p2.y) +
+              (p1.z - p2.z)*(p1.z - p2.z));
 }
 
-std::pair<int, int> findIndexOfMin(std::vector<std::vector<float>> distMat) {
-  cout << "findIndexOfMin cALLED\n";
-  std::pair<int, int> minIndex;
+std::pair<int,int> findIndexOfMin(std::vector<std::vector<float>> distMat) {
   float minEl = std::numeric_limits<float>::max();
-  cout << "minEl=" << minEl << "\n";
-  for (int i = 0; i < distMat.size(); i++)
-    for (int j = 0; j < distMat.at(0).size(); j++) {
+  std::pair<int,int> minIndex(0,0);
+  for (int i = 0; i < (int)distMat.size(); i++) {
+    for (int j = 0; j < (int)distMat[0].size(); j++) {
       if (distMat[i][j] < minEl) {
         minEl = distMat[i][j];
         minIndex = std::make_pair(i, j);
       }
     }
-  cout << "minIndex=" << minIndex.first << "," << minIndex.second << "\n";
+  }
   return minIndex;
 }
-void KFT(const std_msgs::Float32MultiArray ccs) {
 
-  // First predict, to update the internal statePre variable
+// -------------------- (1) 차량 Odometry 콜백 --------------------
+// odom의 pose.orientation에서 yaw를 직접 추출하여 forward_speed와 함께 vx, vy 계산
+void vehicleOdomCallback(const nav_msgs::Odometry::ConstPtr& msg) {
+  static ros::Time prev_time;
+  static bool firstOdom = true;
+  if (firstOdom) {
+    prev_time = msg->header.stamp;
+    firstOdom = false;
+  }
+  ros::Time current_time = msg->header.stamp;
+  double dt = (current_time - prev_time).toSec();
+  prev_time = current_time;
 
-  std::vector<cv::Mat> pred{KF0.predict(), KF1.predict(), KF2.predict(),
-                            KF3.predict(), KF4.predict(), KF5.predict()};
-  // cout<<"Pred successfull\n";
+  tf2::Quaternion q;
+  tf2::fromMsg(msg->pose.pose.orientation, q);
+  double roll, pitch, yaw;
+  tf2::Matrix3x3(q).getRPY(roll, pitch, yaw);
 
-  // cv::Point predictPt(prediction.at<float>(0),prediction.at<float>(1));
-  // cout<<"Prediction 1
-  // ="<<prediction.at<float>(0)<<","<<prediction.at<float>(1)<<"\n";
+  double forward_speed = msg->twist.twist.linear.x;
+  integrated_vehicle_vx = forward_speed * std::cos(yaw);
+  integrated_vehicle_vy = forward_speed * std::sin(yaw);
 
-  // Get measurements
-  // Extract the position of the clusters forom the multiArray. To check if the
-  // data coming in, check the .z (every third) coordinate and that will be 0.0
-  std::vector<geometry_msgs::Point> clusterCenters; // clusterCenters
+  double speed = sqrt(integrated_vehicle_vx * integrated_vehicle_vx +
+                      integrated_vehicle_vy * integrated_vehicle_vy);
+  ROS_INFO("[vehicleOdomCB] yaw=%.3f, forward=%.3f -> vx=%.3f, vy=%.3f, speed=%.3f",
+           yaw, forward_speed, integrated_vehicle_vx, integrated_vehicle_vy, speed);
+}
 
-  int i = 0;
-  for (std::vector<float>::const_iterator it = ccs.data.begin();
-       it != ccs.data.end(); it += 3) {
+// -------------------- (2) KFT 함수 --------------------
+// KF predict, 헝가리안 매칭, KF correct 및 클러스터 중심 추출 후
+// 이전 프레임과의 좌표 차이를 이용하여 클러스터 속도를 계산하고,
+// Odometry와 화살표 Marker로 퍼블리시한다.
+void KFT(const std_msgs::Float32MultiArray &ccs, double dt) {
+  // 1) KF predict
+  std::vector<cv::Mat> pred {
+    KF0.predict(), KF1.predict(), KF2.predict(),
+    KF3.predict(), KF4.predict(), KF5.predict()
+  };
+
+  // 2) ccs → clusterCenters (6개)
+  std::vector<geometry_msgs::Point> clusterCenters;
+  clusterCenters.reserve(6);
+  for (size_t i = 0; i < ccs.data.size(); i += 3) {
     geometry_msgs::Point pt;
-    pt.x = *it;
-    pt.y = *(it + 1);
-    pt.z = *(it + 2);
-
+    pt.x = ccs.data[i + 0];
+    pt.y = ccs.data[i + 1];
+    pt.z = ccs.data[i + 2];
     clusterCenters.push_back(pt);
   }
 
-  //  cout<<"CLusterCenters Obtained"<<"\n";
-  std::vector<geometry_msgs::Point> KFpredictions;
-  i = 0;
-  for (auto it = pred.begin(); it != pred.end(); it++) {
-    geometry_msgs::Point pt;
-    pt.x = (*it).at<float>(0);
-    pt.y = (*it).at<float>(1);
-    pt.z = (*it).at<float>(2);
-
-    KFpredictions.push_back(pt);
-  }
-  // cout<<"Got predictions"<<"\n";
-
-  // Find the cluster that is more probable to be belonging to a given KF.
-  objID.clear();   // Clear the objID vector
-  objID.resize(6); // Allocate default elements so that [i] doesnt segfault.
-                   // Should be done better
-  // Copy clusterCentres for modifying it and preventing multiple assignments of
-  // the same ID
-  std::vector<geometry_msgs::Point> copyOfClusterCenters(clusterCenters);
-  std::vector<std::vector<float>> distMat;
-
-  for (int filterN = 0; filterN < 6; filterN++) {
-    std::vector<float> distVec;
-    for (int n = 0; n < 6; n++) {
-      distVec.push_back(
-          euclidean_distance(KFpredictions[filterN], copyOfClusterCenters[n]));
-    }
-
-    distMat.push_back(distVec);
-    /*// Based on distVec instead of distMat (global min). Has problems with the
-    person's leg going out of scope int
-    ID=std::distance(distVec.begin(),min_element(distVec.begin(),distVec.end()));
-     //cout<<"finterlN="<<filterN<<"   minID="<<ID
-     objID.push_back(ID);
-    // Prevent assignment of the same object ID to multiple clusters
-     copyOfClusterCenters[ID].x=100000;// A large value so that this center is
-    not assigned to another cluster copyOfClusterCenters[ID].y=10000;
-     copyOfClusterCenters[ID].z=10000;
-    */
-    cout << "filterN=" << filterN << "\n";
-  }
-
-  cout << "distMat.size()" << distMat.size() << "\n";
-  cout << "distMat[0].size()" << distMat.at(0).size() << "\n";
-  // DEBUG: print the distMat
-  for (const auto &row : distMat) {
-    for (const auto &s : row)
-      std::cout << s << ' ';
-    std::cout << std::endl;
-  }
-
-  for (int clusterCount = 0; clusterCount < 6; clusterCount++) {
-    // 1. Find min(distMax)==> (i,j);
-    std::pair<int, int> minIndex(findIndexOfMin(distMat));
-    cout << "Received minIndex=" << minIndex.first << "," << minIndex.second
-         << "\n";
-    // 2. objID[i]=clusterCenters[j]; counter++
-    objID[minIndex.first] = minIndex.second;
-
-    // 3. distMat[i,:]=10000; distMat[:,j]=10000
-    distMat[minIndex.first] =
-        std::vector<float>(6, 10000.0); // Set the row to a high number.
-    for (int row = 0; row < distMat.size();
-         row++) // set the column to a high number
-    {
-      distMat[row][minIndex.second] = 10000.0;
-    }
-    // 4. if(counter<6) got to 1.
-    cout << "clusterCount=" << clusterCount << "\n";
-  }
-
-  // cout<<"Got object IDs"<<"\n";
-  // countIDs(objID);// for verif/corner cases
-
-  // display objIDs
-  /* DEBUG
-    cout<<"objID= ";
-    for(auto it=objID.begin();it!=objID.end();it++)
-        cout<<*it<<" ,";
-    cout<<"\n";
-    */
-
-  visualization_msgs::MarkerArray clusterMarkers;
-
+  // 3) KF 예측값 저장
+  std::vector<geometry_msgs::Point> KFpredictions(6);
   for (int i = 0; i < 6; i++) {
-    visualization_msgs::Marker m;
-
-    m.id = i;
-    m.type = visualization_msgs::Marker::CUBE;
-    m.header.frame_id = "base_link";
-    m.scale.x = 0.3;
-    m.scale.y = 0.3;
-    m.scale.z = 0.3;
-    m.action = visualization_msgs::Marker::ADD;
-    m.color.a = 1.0;
-    m.color.r = i % 2 ? 1 : 0;
-    m.color.g = i % 3 ? 1 : 0;
-    m.color.b = i % 4 ? 1 : 0;
-
-    // geometry_msgs::Point clusterC(clusterCenters.at(objID[i]));
-    geometry_msgs::Point clusterC(KFpredictions[i]);
-    m.pose.position.x = clusterC.x;
-    m.pose.position.y = clusterC.y;
-    m.pose.position.z = clusterC.z;
-
-    clusterMarkers.markers.push_back(m);
+    KFpredictions[i].x = pred[i].at<float>(0);
+    KFpredictions[i].y = pred[i].at<float>(1);
+    KFpredictions[i].z = pred[i].at<float>(2);
   }
 
-  prevClusterCenters = clusterCenters;
+  // 4) distMat (6x6) 계산: KFpredictions와 clusterCenters 간 거리
+  std::vector<std::vector<float>> distMat(6, std::vector<float>(6, 0.f));
+  for (int i = 0; i < 6; i++) {
+    for (int j = 0; j < 6; j++) {
+      distMat[i][j] = euclidean_distance(KFpredictions[i], clusterCenters[j]);
+    }
+  }
 
+  // 5) 헝가리안 방식(그리디) 매칭
+  objID.clear();
+  objID.resize(6);
+  for (int count = 0; count < 6; count++) {
+    auto minIdx = findIndexOfMin(distMat);
+    int i_kf = minIdx.first;
+    int j_cl = minIdx.second;
+    objID[i_kf] = j_cl;
+    for (int c = 0; c < 6; c++) {
+      distMat[i_kf][c] = 999999.f;
+    }
+    for (int r = 0; r < 6; r++) {
+      distMat[r][j_cl] = 999999.f;
+    }
+  }
+
+  // 6) Marker (KF 예측 위치) 퍼블리시
+  visualization_msgs::MarkerArray clusterMarkers;
+  clusterMarkers.markers.reserve(6);
+  for (int i = 0; i < 6; i++) {
+    visualization_msgs::Marker mk;
+    mk.header.frame_id = "base_link";
+    mk.header.stamp = ros::Time::now();
+    mk.ns = "clusters";
+    mk.id = i;
+    mk.type = visualization_msgs::Marker::CUBE;
+    mk.action = visualization_msgs::Marker::ADD;
+    mk.scale.x = 0.3;
+    mk.scale.y = 0.3;
+    mk.scale.z = 0.3;
+    mk.color.a = 1.0;
+    mk.color.r = (i % 2) ? 1.0 : 0.0;
+    mk.color.g = (i % 3) ? 1.0 : 0.0;
+    mk.color.b = (i % 4) ? 1.0 : 0.0;
+    mk.pose.position.x = KFpredictions[i].x;
+    mk.pose.position.y = KFpredictions[i].y;
+    mk.pose.position.z = KFpredictions[i].z;
+    clusterMarkers.markers.push_back(mk);
+  }
   markerPub.publish(clusterMarkers);
 
+  // 7) objID 퍼블리시
   std_msgs::Int32MultiArray obj_id;
-  for (auto it = objID.begin(); it != objID.end(); it++)
-    obj_id.data.push_back(*it);
-  // Publish the object IDs
-  objID_pub.publish(obj_id);
-  // convert clusterCenters from geometry_msgs::Point to floats
-  std::vector<std::vector<float>> cc;
   for (int i = 0; i < 6; i++) {
-    vector<float> pt;
-    pt.push_back(clusterCenters[objID[i]].x);
-    pt.push_back(clusterCenters[objID[i]].y);
-    pt.push_back(clusterCenters[objID[i]].z);
-
-    cc.push_back(pt);
+    obj_id.data.push_back(objID[i]);
   }
-  // cout<<"cc[5][0]="<<cc[5].at(0)<<"cc[5][1]="<<cc[5].at(1)<<"cc[5][2]="<<cc[5].at(2)<<"\n";
-  float meas0[2] = {cc[0].at(0), cc[0].at(1)};
-  float meas1[2] = {cc[1].at(0), cc[1].at(1)};
-  float meas2[2] = {cc[2].at(0), cc[2].at(1)};
-  float meas3[2] = {cc[3].at(0), cc[3].at(1)};
-  float meas4[2] = {cc[4].at(0), cc[4].at(1)};
-  float meas5[2] = {cc[5].at(0), cc[5].at(1)};
+  objID_pub.publish(obj_id);
 
-  // The update phase
-  cv::Mat meas0Mat = cv::Mat(2, 1, CV_32F, meas0);
-  cv::Mat meas1Mat = cv::Mat(2, 1, CV_32F, meas1);
-  cv::Mat meas2Mat = cv::Mat(2, 1, CV_32F, meas2);
-  cv::Mat meas3Mat = cv::Mat(2, 1, CV_32F, meas3);
-  cv::Mat meas4Mat = cv::Mat(2, 1, CV_32F, meas4);
-  cv::Mat meas5Mat = cv::Mat(2, 1, CV_32F, meas5);
+  // 8) KF correct
+  float meas0[2] = { static_cast<float>(clusterCenters[objID[0]].x),
+                     static_cast<float>(clusterCenters[objID[0]].y) };
+  float meas1[2] = { static_cast<float>(clusterCenters[objID[1]].x),
+                     static_cast<float>(clusterCenters[objID[1]].y) };
+  float meas2[2] = { static_cast<float>(clusterCenters[objID[2]].x),
+                     static_cast<float>(clusterCenters[objID[2]].y) };
+  float meas3[2] = { static_cast<float>(clusterCenters[objID[3]].x),
+                     static_cast<float>(clusterCenters[objID[3]].y) };
+  float meas4[2] = { static_cast<float>(clusterCenters[objID[4]].x),
+                     static_cast<float>(clusterCenters[objID[4]].y) };
+  float meas5[2] = { static_cast<float>(clusterCenters[objID[5]].x),
+                     static_cast<float>(clusterCenters[objID[5]].y) };
 
-  // cout<<"meas0Mat"<<meas0Mat<<"\n";
-  if (!(meas0Mat.at<float>(0, 0) == 0.0f || meas0Mat.at<float>(1, 0) == 0.0f))
-    Mat estimated0 = KF0.correct(meas0Mat);
-  if (!(meas1[0] == 0.0f || meas1[1] == 0.0f))
-    Mat estimated1 = KF1.correct(meas1Mat);
-  if (!(meas2[0] == 0.0f || meas2[1] == 0.0f))
-    Mat estimated2 = KF2.correct(meas2Mat);
-  if (!(meas3[0] == 0.0f || meas3[1] == 0.0f))
-    Mat estimated3 = KF3.correct(meas3Mat);
-  if (!(meas4[0] == 0.0f || meas4[1] == 0.0f))
-    Mat estimated4 = KF4.correct(meas4Mat);
-  if (!(meas5[0] == 0.0f || meas5[1] == 0.0f))
-    Mat estimated5 = KF5.correct(meas5Mat);
+  cv::Mat meas0Mat(2, 1, CV_32F, meas0);
+  cv::Mat meas1Mat(2, 1, CV_32F, meas1);
+  cv::Mat meas2Mat(2, 1, CV_32F, meas2);
+  cv::Mat meas3Mat(2, 1, CV_32F, meas3);
+  cv::Mat meas4Mat(2, 1, CV_32F, meas4);
+  cv::Mat meas5Mat(2, 1, CV_32F, meas5);
 
-  // Publish the point clouds belonging to each clusters
+  if (!(meas0[0] == 0.0f && meas0[1] == 0.0f)) KF0.correct(meas0Mat);
+  if (!(meas1[0] == 0.0f && meas1[1] == 0.0f)) KF1.correct(meas1Mat);
+  if (!(meas2[0] == 0.0f && meas2[1] == 0.0f)) KF2.correct(meas2Mat);
+  if (!(meas3[0] == 0.0f && meas3[1] == 0.0f)) KF3.correct(meas3Mat);
+  if (!(meas4[0] == 0.0f && meas4[1] == 0.0f)) KF4.correct(meas4Mat);
+  if (!(meas5[0] == 0.0f && meas5[1] == 0.0f)) KF5.correct(meas5Mat);
 
-  // cout<<"estimate="<<estimated.at<float>(0)<<","<<estimated.at<float>(1)<<"\n";
-  // Point statePt(estimated.at<float>(0),estimated.at<float>(1));
-  // cout<<"DONE KF_TRACKER\n";
-  //=========================
-  // (1) 6개의 Kalman Filter에서 [x, y, v_x, v_y] 추출
-  //=========================
-  float x0  = KF0.statePost.at<float>(0);
-  float y0  = KF0.statePost.at<float>(1);
-  float vx0 = KF0.statePost.at<float>(2);
-  float vy0 = KF0.statePost.at<float>(3);
-
-  float x1  = KF1.statePost.at<float>(0);
-  float y1  = KF1.statePost.at<float>(1);
-  float vx1 = KF1.statePost.at<float>(2);
-  float vy1 = KF1.statePost.at<float>(3);
-
-  float x2  = KF2.statePost.at<float>(0);
-  float y2  = KF2.statePost.at<float>(1);
-  float vx2 = KF2.statePost.at<float>(2);
-  float vy2 = KF2.statePost.at<float>(3);
-
-  float x3  = KF3.statePost.at<float>(0);
-  float y3  = KF3.statePost.at<float>(1);
-  float vx3 = KF3.statePost.at<float>(2);
-  float vy3 = KF3.statePost.at<float>(3);
-
-  float x4  = KF4.statePost.at<float>(0);
-  float y4  = KF4.statePost.at<float>(1);
-  float vx4 = KF4.statePost.at<float>(2);
-  float vy4 = KF4.statePost.at<float>(3);
-
-  float x5  = KF5.statePost.at<float>(0);
-  float y5  = KF5.statePost.at<float>(1);
-  float vx5 = KF5.statePost.at<float>(2);
-  float vy5 = KF5.statePost.at<float>(3);
-
-  //=========================
-  // (2) Odometry 메시지 6개 작성 & 퍼블리시
-  //=========================
-  // cluster 0
-  {
-    nav_msgs::Odometry odom0;
-    odom0.header.stamp = ros::Time::now();
-    odom0.header.frame_id = "base_link"; // 적절한 frame (예: "map" 등)
-
-    // 위치
-    odom0.pose.pose.position.x = x0;
-    odom0.pose.pose.position.y = y0;
-    odom0.pose.pose.position.z = 0.0;
-
-    // 속도
-    odom0.twist.twist.linear.x = vx0;
-    odom0.twist.twist.linear.y = vy0;
-    odom0.twist.twist.linear.z = 0.0;
-
-    // 방향(orientation)은 yaw = atan2(vy, vx)를 쿼터니언화
-    double yaw0 = std::atan2(vy0, vx0);
-    tf2::Quaternion q0;
-    q0.setRPY(0, 0, yaw0); // (roll=0, pitch=0, yaw=yaw0)
-    odom0.pose.pose.orientation = tf2::toMsg(q0);
-
-    // 퍼블리시
-    odom_pub0.publish(odom0);
+  // 9) 클러스터 속도 계산 (KF 보정된 위치 대신, 이전 프레임과 비교)
+  std::vector<geometry_msgs::Point> currentCenters(6);
+  for (int i = 0; i < 6; i++) {
+    int idx = objID[i];
+    currentCenters[i] = clusterCenters[idx];
   }
 
-  // cluster 1
-  {
-    nav_msgs::Odometry odom1;
-    odom1.header.stamp = ros::Time::now();
-    odom1.header.frame_id = "base_link";
-
-    odom1.pose.pose.position.x = x1;
-    odom1.pose.pose.position.y = y1;
-    odom1.pose.pose.position.z = 0.0;
-
-    odom1.twist.twist.linear.x = vx1;
-    odom1.twist.twist.linear.y = vy1;
-    odom1.twist.twist.linear.z = 0.0;
-
-    double yaw1 = std::atan2(vy1, vx1);
-    tf2::Quaternion q1;
-    q1.setRPY(0, 0, yaw1);
-    odom1.pose.pose.orientation = tf2::toMsg(q1);
-
-    odom_pub1.publish(odom1);
+  // 첫 프레임은 속도 계산 없이 저장
+  if (!havePrevCenters) {
+    prevClusterCenters = currentCenters;
+    havePrevCenters = true;
+    ROS_WARN("First velocity calculation unavailable. Storing current centers...");
+    return;
   }
 
-  // cluster 2
-  {
-    nav_msgs::Odometry odom2;
-    odom2.header.stamp = ros::Time::now();
-    odom2.header.frame_id = "base_link";
-
-    odom2.pose.pose.position.x = x2;
-    odom2.pose.pose.position.y = y2;
-    odom2.pose.pose.position.z = 0.0;
-
-    odom2.twist.twist.linear.x = vx2;
-    odom2.twist.twist.linear.y = vy2;
-    odom2.twist.twist.linear.z = 0.0;
-
-    double yaw2 = std::atan2(vy2, vx2);
-    tf2::Quaternion q2;
-    q2.setRPY(0, 0, yaw2);
-    odom2.pose.pose.orientation = tf2::toMsg(q2);
-
-    odom_pub2.publish(odom2);
+  std::vector<double> vx(6, 0.0), vy(6, 0.0);
+  for (int i = 0; i < 6; i++) {
+    double dx = currentCenters[i].x - prevClusterCenters[i].x;
+    double dy = currentCenters[i].y - prevClusterCenters[i].y;
+    if (dt > 1e-5) {
+      vx[i] = dx / dt;
+      vy[i] = dy / dt;
+    }
   }
 
-  // cluster 3
-  {
-    nav_msgs::Odometry odom3;
-    odom3.header.stamp = ros::Time::now();
-    odom3.header.frame_id = "base_link";
+  // Odometry 퍼블리시 (각 클러스터의 속도)
+  auto pubOdom = [&](ros::Publisher &pub, int iKF) {
+    nav_msgs::Odometry odom;
+    odom.header.stamp = ros::Time::now();
+    odom.header.frame_id = "base_link";
+    odom.pose.pose.position.x = currentCenters[iKF].x;
+    odom.pose.pose.position.y = currentCenters[iKF].y;
+    odom.pose.pose.position.z = 0.0;
+    odom.twist.twist.linear.x = vx[iKF];
+    odom.twist.twist.linear.y = vy[iKF];
+    odom.twist.twist.linear.z = 0.0;
+    double marker_yaw = std::atan2(vy[iKF], vx[iKF]);
+    tf2::Quaternion qq;
+    qq.setRPY(0, 0, marker_yaw);
+    odom.pose.pose.orientation = tf2::toMsg(qq);
+    pub.publish(odom);
+  };
 
-    odom3.pose.pose.position.x = x3;
-    odom3.pose.pose.position.y = y3;
-    odom3.pose.pose.position.z = 0.0;
+  pubOdom(odom_pub0, 0);
+  pubOdom(odom_pub1, 1);
+  pubOdom(odom_pub2, 2);
+  pubOdom(odom_pub3, 3);
+  pubOdom(odom_pub4, 4);
+  pubOdom(odom_pub5, 5);
 
-    odom3.twist.twist.linear.x = vx3;
-    odom3.twist.twist.linear.y = vy3;
-    odom3.twist.twist.linear.z = 0.0;
-
-    double yaw3 = std::atan2(vy3, vx3);
-    tf2::Quaternion q3;
-    q3.setRPY(0, 0, yaw3);
-    odom3.pose.pose.orientation = tf2::toMsg(q3);
-
-    odom_pub3.publish(odom3);
-  }
-
-  // cluster 4
-  {
-    nav_msgs::Odometry odom4;
-    odom4.header.stamp = ros::Time::now();
-    odom4.header.frame_id = "base_link";
-
-    odom4.pose.pose.position.x = x4;
-    odom4.pose.pose.position.y = y4;
-    odom4.pose.pose.position.z = 0.0;
-
-    odom4.twist.twist.linear.x = vx4;
-    odom4.twist.twist.linear.y = vy4;
-    odom4.twist.twist.linear.z = 0.0;
-
-    double yaw4 = std::atan2(vy4, vx4);
-    tf2::Quaternion q4;
-    q4.setRPY(0, 0, yaw4);
-    odom4.pose.pose.orientation = tf2::toMsg(q4);
-
-    odom_pub4.publish(odom4);
-  }
-
-  // cluster 5
-  {
-    nav_msgs::Odometry odom5;
-    odom5.header.stamp = ros::Time::now();
-    odom5.header.frame_id = "base_link";
-
-    odom5.pose.pose.position.x = x5;
-    odom5.pose.pose.position.y = y5;
-    odom5.pose.pose.position.z = 0.0;
-
-    odom5.twist.twist.linear.x = vx5;
-    odom5.twist.twist.linear.y = vy5;
-    odom5.twist.twist.linear.z = 0.0;
-
-    double yaw5 = std::atan2(vy5, vx5);
-    tf2::Quaternion q5;
-    q5.setRPY(0, 0, yaw5);
-    odom5.pose.pose.orientation = tf2::toMsg(q5);
-
-    odom_pub5.publish(odom5);
-  }
-
-  //=========================
-  // (3) 속도 화살표 MarkerArray 발행
-  //=========================
+  // 속도 화살표 MarkerArray 퍼블리시
   visualization_msgs::MarkerArray arrowArray;
   arrowArray.markers.reserve(6);
-
-  // 6개의 (x,y,vx,vy) 정보를 배열로 처리
-  std::vector<float> xList {x0, x1, x2, x3, x4, x5};
-  std::vector<float> yList {y0, y1, y2, y3, y4, y5};
-  std::vector<float> vxList{vx0, vx1, vx2, vx3, vx4, vx5};
-  std::vector<float> vyList{vy0, vy1, vy2, vy3, vy4, vy5};
-
-  // 상대 속도 기준값 (예: 0.1 m/s)
-  const double RELATIVE_SPEED_THRESHOLD = 0.1;
-
-  for(int i = 0; i < 6; i++){
+  const double REL_SPEED_THRESHOLD = 0.5;
+  for (int i = 0; i < 6; i++) {
     visualization_msgs::Marker arrow;
     arrow.header.stamp = ros::Time::now();
     arrow.header.frame_id = "base_link";
     arrow.ns = "velocity_arrows";
-    
-    // 안정적인 추적을 위해 화살표 id는 칼만 필터 번호(i) 사용
     arrow.id = i;
     arrow.type = visualization_msgs::Marker::ARROW;
     arrow.action = visualization_msgs::Marker::ADD;
-
-    // 화살표의 위치 = 클러스터 위치 (KF 예측 결과)
-    arrow.pose.position.x = xList[i];
-    arrow.pose.position.y = yList[i];
+    arrow.pose.position.x = currentCenters[i].x;
+    arrow.pose.position.y = currentCenters[i].y;
     arrow.pose.position.z = 0.0;
-
-    // 화살표 방향 (KF 속도 방향)
-    double yaw = std::atan2(vyList[i], vxList[i]);
+    double arrow_yaw = std::atan2(vy[i], vx[i]);
     tf2::Quaternion q;
-    q.setRPY(0, 0, yaw);
+    q.setRPY(0, 0, arrow_yaw);
     arrow.pose.orientation = tf2::toMsg(q);
-
-    // KF에서 계산된 클러스터 속력
-    double cluster_speed = std::sqrt(vxList[i]*vxList[i] + vyList[i]*vyList[i]);
-
-    // 차량 odom의 선형 속도 (현재 저장된 최신 값 사용)
-    double vehicle_vx = current_vehicle_odom.twist.twist.linear.x;
-    double vehicle_vy = current_vehicle_odom.twist.twist.linear.y;
-
-    // 상대 속도 계산
-    double relative_vx = vxList[i] - vehicle_vx;
-    double relative_vy = vyList[i] - vehicle_vy;
-    double relative_speed = std::sqrt(relative_vx*relative_vx + relative_vy*relative_vy);
-
-    // 화살표 길이(예: 0.3m 기본 + cluster_speed에 비례)
-    double arrow_length = 0.3 + cluster_speed * 100; 
-
-    // ARROW Marker에서 points를 설정하여 원하는 길이로 만듭니다.
-    geometry_msgs::Point p_start, p_end;
-    p_start.x = 0.0; p_start.y = 0.0; p_start.z = 0.0;
-    p_end.x = arrow_length; p_end.y = 0.0; p_end.z = 0.0;
-    arrow.points.clear();
-    arrow.points.push_back(p_start);
-    arrow.points.push_back(p_end);
-
-    // scale은 화살표 두께/화살촉 크기 설정 (여기서는 고정)
-    arrow.scale.x = 1;  // 몸통 직경
-    arrow.scale.y = 0.1;   // 화살촉 직경
-    arrow.scale.z = 0.2;   // 화살촉 길이
-
-    // 상대 속도에 따라 색상 결정:
-    // 동적 객체 (상대 속도 >= threshold): 녹색, 정적 객체: 빨간색
-    if(relative_speed >= RELATIVE_SPEED_THRESHOLD){
-      // 동적: 녹색
+    double cluster_speed = sqrt(vx[i]*vx[i] + vy[i]*vy[i]);
+    // 차량 속도 (오도메트리)
+    double vehicle_vx = integrated_vehicle_vx;
+    double vehicle_vy = integrated_vehicle_vy;
+    double rel_vx = vx[i] - vehicle_vx;
+    double rel_vy = vy[i] - vehicle_vy;
+    double rel_speed = sqrt(rel_vx*rel_vx + rel_vy*rel_vy);
+    ROS_INFO("[Cluster %d] speed=%.2f, relative=%.2f", i, cluster_speed, rel_speed);
+    arrow.scale.x = 1.0;
+    arrow.scale.y = 0.1;
+    arrow.scale.z = 0.2;
+    if (rel_speed >= REL_SPEED_THRESHOLD) {
       arrow.color.r = 0.0;
       arrow.color.g = 1.0;
       arrow.color.b = 0.0;
     } else {
-      // 정적: 빨간색
       arrow.color.r = 1.0;
       arrow.color.g = 0.0;
       arrow.color.b = 0.0;
     }
-    arrow.color.a = 1.0; // 불투명
-
-    // Marker lifetime (필요에 따라 조정)
-    arrow.lifetime = ros::Duration(0.1);
-
+    arrow.color.a = 1.0;
+    arrow.lifetime = ros::Duration(0.3);
     arrowArray.markers.push_back(arrow);
   }
-
-  // 토픽 발행
   vel_arrow_pub.publish(arrowArray);
 
-  
+  // 업데이트: 현재 클러스터 중심을 prevClusterCenters로 저장
+  prevClusterCenters = currentCenters;
+  havePrevCenters = true;
 }
-void publish_cloud(ros::Publisher &pub,
-                   pcl::PointCloud<pcl::PointXYZ>::Ptr cluster) {
+
+// -------------------- (3) publish_cloud 함수 --------------------
+void publish_cloud(ros::Publisher &pub, pcl::PointCloud<pcl::PointXYZ>::Ptr cluster) {
   sensor_msgs::PointCloud2::Ptr clustermsg(new sensor_msgs::PointCloud2);
   pcl::toROSMsg(*cluster, *clustermsg);
   clustermsg->header.frame_id = "base_link";
@@ -600,33 +365,46 @@ void publish_cloud(ros::Publisher &pub,
   pub.publish(*clustermsg);
 }
 
-void cloud_cb(const sensor_msgs::PointCloud2ConstPtr &input)
+// -------------------- (4) PointCloud 콜백 --------------------
+void cloud_cb(const sensor_msgs::PointCloud2ConstPtr &input) {
+  static ros::Time last_time;
+  ros::Time current_time = ros::Time::now();
+  double dt = 0.0;
+  if(last_time.isZero()){
+    last_time = current_time;
+  }
+  dt = (current_time - last_time).toSec();
+  last_time = current_time;
 
-{
-  // cout<<"IF firstFrame="<<firstFrame<<"\n";
-  // If this is the first frame, initialize kalman filters for the clustered
-  // objects
-  if (firstFrame) {
-    // Initialize 6 Kalman Filters; Assuming 6 max objects in the dataset.
-    // Could be made generic by creating a Kalman Filter only when a new object
-    // is detected
+  // 전이행렬 업데이트
+  cv::Mat transMat = (cv::Mat_<float>(4,4) <<
+                      1, 0, dt, 0,
+                      0, 1, 0,  dt,
+                      0, 0, 1,  0,
+                      0, 0, 0,  1);
+  KF0.transitionMatrix = transMat.clone();
+  KF1.transitionMatrix = transMat.clone();
+  KF2.transitionMatrix = transMat.clone();
+  KF3.transitionMatrix = transMat.clone();
+  KF4.transitionMatrix = transMat.clone();
+  KF5.transitionMatrix = transMat.clone();
 
-    float dvx = 0.01f; // 1.0
-    float dvy = 0.01f; // 1.0
-    float dx = 1.0f;
-    float dy = 1.0f;
-    KF0.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0,
-                            dvx, 0, 0, 0, 0, dvy);
-    KF1.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0,
-                            dvx, 0, 0, 0, 0, dvy);
-    KF2.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0,
-                            dvx, 0, 0, 0, 0, dvy);
-    KF3.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0,
-                            dvx, 0, 0, 0, 0, dvy);
-    KF4.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0,
-                            dvx, 0, 0, 0, 0, dvy);
-    KF5.transitionMatrix = (Mat_<float>(4, 4) << dx, 0, 1, 0, 0, dy, 0, 1, 0, 0,
-                            dvx, 0, 0, 0, 0, dvy);
+  if(firstFrame) {
+    // KF 초기화 및 첫 클러스터링
+    float dvx = 0.01f;
+    float dvy = 0.01f;
+    float dx  = 1.0f;
+    float dy  = 1.0f;
+    KF0.transitionMatrix = (Mat_<float>(4,4) <<
+      dx, 0, 1, 0,
+      0, dy, 0, 1,
+      0, 0, dvx, 0,
+      0, 0, 0, dvy);
+    KF1.transitionMatrix = KF0.transitionMatrix.clone();
+    KF2.transitionMatrix = KF0.transitionMatrix.clone();
+    KF3.transitionMatrix = KF0.transitionMatrix.clone();
+    KF4.transitionMatrix = KF0.transitionMatrix.clone();
+    KF5.transitionMatrix = KF0.transitionMatrix.clone();
 
     cv::setIdentity(KF0.measurementMatrix);
     cv::setIdentity(KF1.measurementMatrix);
@@ -634,13 +412,7 @@ void cloud_cb(const sensor_msgs::PointCloud2ConstPtr &input)
     cv::setIdentity(KF3.measurementMatrix);
     cv::setIdentity(KF4.measurementMatrix);
     cv::setIdentity(KF5.measurementMatrix);
-    // Process Noise Covariance Matrix Q
-    // [ Ex 0  0    0 0    0 ]
-    // [ 0  Ey 0    0 0    0 ]
-    // [ 0  0  Ev_x 0 0    0 ]
-    // [ 0  0  0    1 Ev_y 0 ]
-    //// [ 0  0  0    0 1    Ew ]
-    //// [ 0  0  0    0 0    Eh ]
+
     float sigmaP = 0.01;
     float sigmaQ = 0.1;
     setIdentity(KF0.processNoiseCov, Scalar::all(sigmaP));
@@ -649,27 +421,19 @@ void cloud_cb(const sensor_msgs::PointCloud2ConstPtr &input)
     setIdentity(KF3.processNoiseCov, Scalar::all(sigmaP));
     setIdentity(KF4.processNoiseCov, Scalar::all(sigmaP));
     setIdentity(KF5.processNoiseCov, Scalar::all(sigmaP));
-    // Meas noise cov matrix R
-    cv::setIdentity(KF0.measurementNoiseCov, cv::Scalar(sigmaQ)); // 1e-1
+
+    cv::setIdentity(KF0.measurementNoiseCov, cv::Scalar(sigmaQ));
     cv::setIdentity(KF1.measurementNoiseCov, cv::Scalar(sigmaQ));
     cv::setIdentity(KF2.measurementNoiseCov, cv::Scalar(sigmaQ));
     cv::setIdentity(KF3.measurementNoiseCov, cv::Scalar(sigmaQ));
     cv::setIdentity(KF4.measurementNoiseCov, cv::Scalar(sigmaQ));
     cv::setIdentity(KF5.measurementNoiseCov, cv::Scalar(sigmaQ));
 
-    // Process the point cloud
-    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    /* Creating the KdTree from input point cloud*/
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(
-        new pcl::search::KdTree<pcl::PointXYZ>);
-
+    // 첫 클러스터링 수행
+    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::fromROSMsg(*input, *input_cloud);
-
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
     tree->setInputCloud(input_cloud);
-
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
     ec.setClusterTolerance(0.08);
@@ -677,141 +441,80 @@ void cloud_cb(const sensor_msgs::PointCloud2ConstPtr &input)
     ec.setMaxClusterSize(600);
     ec.setSearchMethod(tree);
     ec.setInputCloud(input_cloud);
-    /* Extract the clusters out of pc and save indices in cluster_indices.*/
     ec.extract(cluster_indices);
 
-    std::vector<pcl::PointIndices>::const_iterator it;
-    std::vector<int>::const_iterator pit;
-    // Vector of cluster pointclouds
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> cluster_vec;
-    // Cluster centroids
     std::vector<pcl::PointXYZ> clusterCentroids;
-
-    for (it = cluster_indices.begin(); it != cluster_indices.end(); ++it) {
-
-      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(
-          new pcl::PointCloud<pcl::PointXYZ>);
-      float x = 0.0;
-      float y = 0.0;
-      int numPts = 0;
-      for (pit = it->indices.begin(); pit != it->indices.end(); pit++) {
-
-        cloud_cluster->points.push_back(input_cloud->points[*pit]);
-        x += input_cloud->points[*pit].x;
-        y += input_cloud->points[*pit].y;
-        numPts++;
-
-        // dist_this_point = pcl::geometry::distance(input_cloud->points[*pit],
-        //                                          origin);
-        // mindist_this_cluster = std::min(dist_this_point,
-        // mindist_this_cluster);
+    for (auto &inds : cluster_indices) {
+      pcl::PointCloud<pcl::PointXYZ>::Ptr cCluster(new pcl::PointCloud<pcl::PointXYZ>);
+      float sumx = 0, sumy = 0;
+      int count = 0;
+      for (auto idx : inds.indices) {
+        cCluster->points.push_back(input_cloud->points[idx]);
+        sumx += input_cloud->points[idx].x;
+        sumy += input_cloud->points[idx].y;
+        count++;
       }
-
-      pcl::PointXYZ centroid;
-      centroid.x = x / numPts;
-      centroid.y = y / numPts;
-      centroid.z = 0.0;
-
-      cluster_vec.push_back(cloud_cluster);
-
-      // Get the centroid of the cluster
-      clusterCentroids.push_back(centroid);
+      pcl::PointXYZ c;
+      if(count > 0) {
+        c.x = sumx / count;
+        c.y = sumy / count;
+      }
+      c.z = 0.0;
+      cluster_vec.push_back(cCluster);
+      clusterCentroids.push_back(c);
     }
-
-    // Ensure at least 6 clusters exist to publish (later clusters may be empty)
     while (cluster_vec.size() < 6) {
-      pcl::PointCloud<pcl::PointXYZ>::Ptr empty_cluster(
-          new pcl::PointCloud<pcl::PointXYZ>);
+      pcl::PointCloud<pcl::PointXYZ>::Ptr empty_cluster(new pcl::PointCloud<pcl::PointXYZ>);
       empty_cluster->points.push_back(pcl::PointXYZ(0, 0, 0));
       cluster_vec.push_back(empty_cluster);
     }
-
     while (clusterCentroids.size() < 6) {
-      pcl::PointXYZ centroid;
-      centroid.x = 0.0;
-      centroid.y = 0.0;
-      centroid.z = 0.0;
-
-      clusterCentroids.push_back(centroid);
+      pcl::PointXYZ dummy; dummy.x = 0; dummy.y = 0; dummy.z = 0;
+      clusterCentroids.push_back(dummy);
     }
-
-    // Set initial state
+    // KF 초기 statePre
     KF0.statePre.at<float>(0) = clusterCentroids.at(0).x;
     KF0.statePre.at<float>(1) = clusterCentroids.at(0).y;
-    KF0.statePre.at<float>(2) = 0; // initial v_x
-    KF0.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
+    KF0.statePre.at<float>(2) = 0;
+    KF0.statePre.at<float>(3) = 0;
     KF1.statePre.at<float>(0) = clusterCentroids.at(1).x;
     KF1.statePre.at<float>(1) = clusterCentroids.at(1).y;
-    KF1.statePre.at<float>(2) = 0; // initial v_x
-    KF1.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
+    KF1.statePre.at<float>(2) = 0;
+    KF1.statePre.at<float>(3) = 0;
     KF2.statePre.at<float>(0) = clusterCentroids.at(2).x;
     KF2.statePre.at<float>(1) = clusterCentroids.at(2).y;
-    KF2.statePre.at<float>(2) = 0; // initial v_x
-    KF2.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
+    KF2.statePre.at<float>(2) = 0;
+    KF2.statePre.at<float>(3) = 0;
     KF3.statePre.at<float>(0) = clusterCentroids.at(3).x;
     KF3.statePre.at<float>(1) = clusterCentroids.at(3).y;
-    KF3.statePre.at<float>(2) = 0; // initial v_x
-    KF3.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
+    KF3.statePre.at<float>(2) = 0;
+    KF3.statePre.at<float>(3) = 0;
     KF4.statePre.at<float>(0) = clusterCentroids.at(4).x;
     KF4.statePre.at<float>(1) = clusterCentroids.at(4).y;
-    KF4.statePre.at<float>(2) = 0; // initial v_x
-    KF4.statePre.at<float>(3) = 0; // initial v_y
-
-    // Set initial state
+    KF4.statePre.at<float>(2) = 0;
+    KF4.statePre.at<float>(3) = 0;
     KF5.statePre.at<float>(0) = clusterCentroids.at(5).x;
     KF5.statePre.at<float>(1) = clusterCentroids.at(5).y;
-    KF5.statePre.at<float>(2) = 0; // initial v_x
-    KF5.statePre.at<float>(3) = 0; // initial v_y
-
+    KF5.statePre.at<float>(2) = 0;
+    KF5.statePre.at<float>(3) = 0;
     firstFrame = false;
-
+    prevClusterCenters.resize(6);
     for (int i = 0; i < 6; i++) {
       geometry_msgs::Point pt;
       pt.x = clusterCentroids.at(i).x;
       pt.y = clusterCentroids.at(i).y;
-      prevClusterCenters.push_back(pt);
+      pt.z = 0.0;
+      prevClusterCenters[i] = pt;
     }
-    /*  // Print the initial state of the kalman filter for debugging
-      cout<<"KF0.satePre="<<KF0.statePre.at<float>(0)<<","<<KF0.statePre.at<float>(1)<<"\n";
-      cout<<"KF1.satePre="<<KF1.statePre.at<float>(0)<<","<<KF1.statePre.at<float>(1)<<"\n";
-      cout<<"KF2.satePre="<<KF2.statePre.at<float>(0)<<","<<KF2.statePre.at<float>(1)<<"\n";
-      cout<<"KF3.satePre="<<KF3.statePre.at<float>(0)<<","<<KF3.statePre.at<float>(1)<<"\n";
-      cout<<"KF4.satePre="<<KF4.statePre.at<float>(0)<<","<<KF4.statePre.at<float>(1)<<"\n";
-      cout<<"KF5.satePre="<<KF5.statePre.at<float>(0)<<","<<KF5.statePre.at<float>(1)<<"\n";
-
-      //cin.ignore();// To be able to see the printed initial state of the
-      KalmanFilter
-      */
+    havePrevCenters = true;
   }
-
   else {
-    // cout<<"ELSE firstFrame="<<firstFrame<<"\n";
-    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZ>::Ptr clustered_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    /* Creating the KdTree from input point cloud*/
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(
-        new pcl::search::KdTree<pcl::PointXYZ>);
-
+    // 이후 프레임 처리
+    pcl::PointCloud<pcl::PointXYZ>::Ptr input_cloud(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::fromROSMsg(*input, *input_cloud);
-
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
     tree->setInputCloud(input_cloud);
-
-    /* Here we are creating a vector of PointIndices, which contains the actual
-     * index information in a vector<int>. The indices of each detected cluster
-     * are saved here. Cluster_indices is a vector containing one instance of
-     * PointIndices for each detected cluster. Cluster_indices[0] contain all
-     * indices of the first cluster in input point cloud.
-     */
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
     ec.setClusterTolerance(0.3);
@@ -819,183 +522,90 @@ void cloud_cb(const sensor_msgs::PointCloud2ConstPtr &input)
     ec.setMaxClusterSize(600);
     ec.setSearchMethod(tree);
     ec.setInputCloud(input_cloud);
-    // cout<<"PCL init successfull\n";
-    /* Extract the clusters out of pc and save indices in cluster_indices.*/
     ec.extract(cluster_indices);
-    // cout<<"PCL extract successfull\n";
-    /* To separate each cluster out of the vector<PointIndices> we have to
-     * iterate through cluster_indices, create a new PointCloud for each
-     * entry and write all points of the current cluster in the PointCloud.
-     */
-    // pcl::PointXYZ origin (0,0,0);
-    // float mindist_this_cluster = 1000;
-    // float dist_this_point = 1000;
-
-    std::vector<pcl::PointIndices>::const_iterator it;
-    std::vector<int>::const_iterator pit;
-    // Vector of cluster pointclouds
     std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> cluster_vec;
-
-    // Cluster centroids
     std::vector<pcl::PointXYZ> clusterCentroids;
-
-    for (it = cluster_indices.begin(); it != cluster_indices.end(); ++it) {
-      float x = 0.0;
-      float y = 0.0;
-      int numPts = 0;
-      pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(
-          new pcl::PointCloud<pcl::PointXYZ>);
-      for (pit = it->indices.begin(); pit != it->indices.end(); pit++) {
-
-        cloud_cluster->points.push_back(input_cloud->points[*pit]);
-
-        x += input_cloud->points[*pit].x;
-        y += input_cloud->points[*pit].y;
-        numPts++;
-
-        // dist_this_point = pcl::geometry::distance(input_cloud->points[*pit],
-        //                                          origin);
-        // mindist_this_cluster = std::min(dist_this_point,
-        // mindist_this_cluster);
+    for(auto &inds : cluster_indices){
+      pcl::PointCloud<pcl::PointXYZ>::Ptr cCluster(new pcl::PointCloud<pcl::PointXYZ>);
+      float sumx = 0, sumy = 0;
+      int count = 0;
+      for(auto idx : inds.indices){
+        cCluster->points.push_back(input_cloud->points[idx]);
+        sumx += input_cloud->points[idx].x;
+        sumy += input_cloud->points[idx].y;
+        count++;
       }
-
-      pcl::PointXYZ centroid;
-      centroid.x = x / numPts;
-      centroid.y = y / numPts;
-      centroid.z = 0.0;
-
-      cluster_vec.push_back(cloud_cluster);
-
-      // Get the centroid of the cluster
-      clusterCentroids.push_back(centroid);
+      pcl::PointXYZ c;
+      if(count > 0){
+        c.x = sumx / count;
+        c.y = sumy / count;
+      }
+      c.z = 0.0;
+      cluster_vec.push_back(cCluster);
+      clusterCentroids.push_back(c);
     }
-    // cout<<"cluster_vec got some clusters\n";
-
-    // Ensure at least 6 clusters exist to publish (later clusters may be empty)
     while (cluster_vec.size() < 6) {
-      pcl::PointCloud<pcl::PointXYZ>::Ptr empty_cluster(
-          new pcl::PointCloud<pcl::PointXYZ>);
-      empty_cluster->points.push_back(pcl::PointXYZ(0, 0, 0));
-      cluster_vec.push_back(empty_cluster);
+      pcl::PointCloud<pcl::PointXYZ>::Ptr emptyC(new pcl::PointCloud<pcl::PointXYZ>);
+      emptyC->points.push_back(pcl::PointXYZ(0, 0, 0));
+      cluster_vec.push_back(emptyC);
     }
-
     while (clusterCentroids.size() < 6) {
-      pcl::PointXYZ centroid;
-      centroid.x = 0.0;
-      centroid.y = 0.0;
-      centroid.z = 0.0;
-
-      clusterCentroids.push_back(centroid);
+      pcl::PointXYZ dummy; dummy.x = 0; dummy.y = 0; dummy.z = 0;
+      clusterCentroids.push_back(dummy);
     }
-
     std_msgs::Float32MultiArray cc;
     for (int i = 0; i < 6; i++) {
       cc.data.push_back(clusterCentroids.at(i).x);
       cc.data.push_back(clusterCentroids.at(i).y);
       cc.data.push_back(clusterCentroids.at(i).z);
     }
-    // cout<<"6 clusters initialized\n";
-
-    // cc_pos.publish(cc);// Publish cluster mid-points.
-    KFT(cc);
-    int i = 0;
-    bool publishedCluster[6];
-    for (auto it = objID.begin(); it != objID.end();
-         it++) { // cout<<"Inside the for loop\n";
-
+    KFT(cc, dt);
+    // 클러스터 pointcloud 퍼블리시
+    for (int i = 0; i < 6; i++) {
       switch (i) {
-        cout << "Inside the switch case\n";
-      case 0: {
-        publish_cloud(pub_cluster0, cluster_vec[*it]);
-        publishedCluster[i] =
-            true; // Use this flag to publish only once for a given obj ID
-        i++;
-        break;
-      }
-      case 1: {
-        publish_cloud(pub_cluster1, cluster_vec[*it]);
-        publishedCluster[i] =
-            true; // Use this flag to publish only once for a given obj ID
-        i++;
-        break;
-      }
-      case 2: {
-        publish_cloud(pub_cluster2, cluster_vec[*it]);
-        publishedCluster[i] =
-            true; // Use this flag to publish only once for a given obj ID
-        i++;
-        break;
-      }
-      case 3: {
-        publish_cloud(pub_cluster3, cluster_vec[*it]);
-        publishedCluster[i] =
-            true; // Use this flag to publish only once for a given obj ID
-        i++;
-        break;
-      }
-      case 4: {
-        publish_cloud(pub_cluster4, cluster_vec[*it]);
-        publishedCluster[i] =
-            true; // Use this flag to publish only once for a given obj ID
-        i++;
-        break;
-      }
-
-      case 5: {
-        publish_cloud(pub_cluster5, cluster_vec[*it]);
-        publishedCluster[i] =
-            true; // Use this flag to publish only once for a given obj ID
-        i++;
-        break;
-      }
-      default:
-        break;
+        case 0: publish_cloud(pub_cluster0, cluster_vec[objID[i]]); break;
+        case 1: publish_cloud(pub_cluster1, cluster_vec[objID[i]]); break;
+        case 2: publish_cloud(pub_cluster2, cluster_vec[objID[i]]); break;
+        case 3: publish_cloud(pub_cluster3, cluster_vec[objID[i]]); break;
+        case 4: publish_cloud(pub_cluster4, cluster_vec[objID[i]]); break;
+        case 5: publish_cloud(pub_cluster5, cluster_vec[objID[i]]); break;
+        default: break;
       }
     }
   }
 }
 
+// -------------------- 메인 함수 --------------------
 int main(int argc, char **argv) {
-  // ROS init
   ros::init(argc, argv, "kf_tracker");
   ros::NodeHandle nh;
 
-  // Publishers to publish the state of the objects (pos and vel)
-  // objState1=nh.advertise<geometry_msgs::Twist> ("obj_1",1);
-
-  cout << "About to setup callback\n";
-
-  // Create a ROS subscriber for the input point cloud
+  // PointCloud 구독
   ros::Subscriber sub = nh.subscribe("filtered_cloud", 1, cloud_cb);
-  // Create a ROS publisher for the output point cloud
+
+  // 클러스터 pointcloud 퍼블리셔
   pub_cluster0 = nh.advertise<sensor_msgs::PointCloud2>("cluster_0", 1);
   pub_cluster1 = nh.advertise<sensor_msgs::PointCloud2>("cluster_1", 1);
   pub_cluster2 = nh.advertise<sensor_msgs::PointCloud2>("cluster_2", 1);
   pub_cluster3 = nh.advertise<sensor_msgs::PointCloud2>("cluster_3", 1);
   pub_cluster4 = nh.advertise<sensor_msgs::PointCloud2>("cluster_4", 1);
   pub_cluster5 = nh.advertise<sensor_msgs::PointCloud2>("cluster_5", 1);
-  // Subscribe to the clustered pointclouds
-  // ros::Subscriber c1=nh.subscribe("ccs",100,KFT);
-  objID_pub = nh.advertise<std_msgs::Int32MultiArray>("obj_id", 1);
-  /* Point cloud clustering
-   */
 
-  // cc_pos=nh.advertise<std_msgs::Float32MultiArray>("ccs",100);//clusterCenter1
+  objID_pub = nh.advertise<std_msgs::Int32MultiArray>("obj_id", 1);
   markerPub = nh.advertise<visualization_msgs::MarkerArray>("viz", 1);
 
-  /* Point cloud clustering
-   */
-
-  // odometry 퍼블리셔들 (객체별)
   odom_pub0 = nh.advertise<nav_msgs::Odometry>("cluster0_odom", 1);
   odom_pub1 = nh.advertise<nav_msgs::Odometry>("cluster1_odom", 1);
   odom_pub2 = nh.advertise<nav_msgs::Odometry>("cluster2_odom", 1);
   odom_pub3 = nh.advertise<nav_msgs::Odometry>("cluster3_odom", 1);
   odom_pub4 = nh.advertise<nav_msgs::Odometry>("cluster4_odom", 1);
   odom_pub5 = nh.advertise<nav_msgs::Odometry>("cluster5_odom", 1);
-  
-  // velocity arrow marker 퍼블리셔
+
   vel_arrow_pub = nh.advertise<visualization_msgs::MarkerArray>("velocity_arrows", 1);
+
+  // 차량 Odometry 구독 (heading은 orientation에서 직접 추출)
   ros::Subscriber vehicleOdomSub = nh.subscribe("/odom/coordinate/gps", 1, vehicleOdomCallback);
+
   ros::spin();
+  return 0;
 }
