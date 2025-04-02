@@ -161,45 +161,91 @@ pcl::PointXYZ getMedianPoint(pcl::PointCloud<pcl::PointXYZ>::Ptr cluster)
   return medianPt;
 }
 
-// ------------------- 바운딩박스 (Axis-Aligned) 계산 함수 ------------------- //
-/** 
-* @brief cluster(PointCloud)에 대해 min_x,max_x, min_y,max_y, min_z,max_z를 구해 
-*        바운딩 박스 중심(center)과 스케일(scale)을 반환
-*/
-bool computeBoundingBox(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cluster,
-                        geometry_msgs::Point &boxCenter,
-                        geometry_msgs::Point &boxScale)
+
+// 오리엔티드 바운딩박스 계산 함수
+bool computeOrientedBoundingBox(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cluster,
+                                geometry_msgs::Pose &obbPose,
+                                geometry_msgs::Vector3 &obbScale)
 {
-  if(cluster->points.empty()){
+  if (cluster->points.empty()) {
+    ROS_WARN("Empty cluster for OBB computation!");
     return false;
   }
-
-  float min_x = std::numeric_limits<float>::max();
-  float max_x = -std::numeric_limits<float>::max();
-  float min_y = std::numeric_limits<float>::max();
-  float max_y = -std::numeric_limits<float>::max();
-  float min_z = std::numeric_limits<float>::max();
-  float max_z = -std::numeric_limits<float>::max();
-
-  for(const auto &p : cluster->points)
+  if(!cluster || cluster->points.size() < 3)
   {
-    if(p.x < min_x) min_x = p.x;
-    if(p.x > max_x) max_x = p.x;
+    ROS_WARN("Cannot compute OBB for cluster with <3 points.");
+    return false;
+  }
+  // (1) 클라우드의 중심(centroid) 계산
+  Eigen::Vector4f pcaCentroid;
+  pcl::compute3DCentroid(*cluster, pcaCentroid);
 
-    if(p.y < min_y) min_y = p.y;
-    if(p.y > max_y) max_y = p.y;
+  // (2) PCA 수행
+  pcl::PCA<pcl::PointXYZ> pca;
+  pca.setInputCloud(cluster);
 
-    if(p.z < min_z) min_z = p.z;
-    if(p.z > max_z) max_z = p.z;
+  // 주성분 방향(고유벡터) 획득 (columns are eigenvectors)
+  Eigen::Matrix3f eigenVectors = pca.getEigenVectors();
+  // 주성분 값(고유값) (필요시 사용 가능)
+  // Eigen::Vector3f eigenValues = pca.getEigenValues();
+
+  // (3) 클라우드를 PCA 좌표계로 투영 (주성분 축과 정렬된 좌표계)
+  Eigen::Matrix4f projTransform(Eigen::Matrix4f::Identity());
+  projTransform.block<3,3>(0,0) = eigenVectors.transpose();  // R^T
+  // -R^T * centroid
+  projTransform.block<3,1>(0,3) = -1.0f * (eigenVectors.transpose() * pcaCentroid.head<3>());
+  
+  pcl::PointCloud<pcl::PointXYZ>::Ptr cloudProjected(new pcl::PointCloud<pcl::PointXYZ>);
+  pcl::transformPointCloud(*cluster, *cloudProjected, projTransform);
+
+  // (4) PCA 좌표계에서 min/max (x,y,z)
+  pcl::PointXYZ minPt, maxPt;
+  minPt.x = minPt.y = minPt.z =  std::numeric_limits<float>::max();
+  maxPt.x = maxPt.y = maxPt.z = -std::numeric_limits<float>::max();
+
+  for (const auto &pt : cloudProjected->points) {
+    if (pt.x < minPt.x) minPt.x = pt.x;
+    if (pt.y < minPt.y) minPt.y = pt.y;
+    if (pt.z < minPt.z) minPt.z = pt.z;
+
+    if (pt.x > maxPt.x) maxPt.x = pt.x;
+    if (pt.y > maxPt.y) maxPt.y = pt.y;
+    if (pt.z > maxPt.z) maxPt.z = pt.z;
   }
 
-  boxCenter.x = 0.5f*(min_x + max_x);
-  boxCenter.y = 0.5f*(min_y + max_y);
-  boxCenter.z = 0.5f*(min_z + max_z);
+  // (5) 박스 중심 (투영공간에서)
+  Eigen::Vector3f meanDiagonal = 0.5f * (Eigen::Vector3f(maxPt.x, maxPt.y, maxPt.z) +
+                                         Eigen::Vector3f(minPt.x, minPt.y, minPt.z));
 
-  boxScale.x = (max_x - min_x);
-  boxScale.y = (max_y - min_y);
-  boxScale.z = (max_z - min_z);
+  // (6) PCA좌표계에서의 중심을 다시 원래 좌표계로 역변환
+  Eigen::Vector3f obb_center_world = eigenVectors * meanDiagonal + pcaCentroid.head<3>();
+
+  // (7) Bounding box 크기 (scale)
+  float length = maxPt.x - minPt.x;
+  float width  = maxPt.y - minPt.y;
+  float height = maxPt.z - minPt.z;
+
+  // (8) 회전행렬 -> 쿼터니언 변환
+  //  - eigenVectors는 기본적으로 열(column)에 고유벡터가 들어 있으나,
+  //    여기서는 R = eigenVectors로 두고 그대로 사용(검증 필요).
+  //    일반적으로 PCA에서 얻은 eigenVectors는 column별 축이므로, 
+  //    사용시 row/column transpose 여부를 꼭 확인해줘야 합니다.
+  Eigen::Matrix3f rotation = eigenVectors;  // or eigenVectors.transpose() (필요시 조정)
+  Eigen::Quaternionf q(rotation);
+
+  // (9) geometry_msgs에 할당
+  obbPose.position.x = obb_center_world.x();
+  obbPose.position.y = obb_center_world.y();
+  obbPose.position.z = obb_center_world.z();
+
+  obbPose.orientation.x = q.x();
+  obbPose.orientation.y = q.y();
+  obbPose.orientation.z = q.z();
+  obbPose.orientation.w = q.w();
+
+  obbScale.x = fabs(length);
+  obbScale.y = fabs(width);
+  obbScale.z = fabs(height);
 
   return true;
 }
@@ -534,33 +580,35 @@ void cloud_cb(const sensor_msgs::PointCloud2ConstPtr &input)
       );
 
       // (B) 바운딩박스 계산 & 마커 (base_link에서 축 정렬)
-      geometry_msgs::Point boxCenter, boxScale;
-      bool validBox = computeBoundingBox(cluster_vec[cid], boxCenter, boxScale);
-      if(validBox){
-        // 바운딩 박스 마커
+      // 1) computeOrientedBoundingBox 호출
+      geometry_msgs::Pose obbPose;
+      geometry_msgs::Vector3 obbScale;
+      bool validBox = computeOrientedBoundingBox(cluster_vec[cid], obbPose, obbScale);
+
+      if (validBox) {
         visualization_msgs::Marker bboxMarker;
         bboxMarker.header.frame_id = "base_link";
         bboxMarker.header.stamp    = ros::Time::now();
-        bboxMarker.ns = "tracked_bounding_boxes";
-        bboxMarker.id = i;  // 트래킹ID 별로 표시
-        bboxMarker.type   = visualization_msgs::Marker::CUBE;
+        bboxMarker.ns    = "tracked_bounding_boxes";
+        bboxMarker.id    = i;
+        bboxMarker.type  = visualization_msgs::Marker::CUBE;
         bboxMarker.action = visualization_msgs::Marker::ADD;
 
-        bboxMarker.pose.position.x = boxCenter.x;
-        bboxMarker.pose.position.y = boxCenter.y;
-        bboxMarker.pose.position.z = boxCenter.z;
+        // 2) Pose와 Scale 설정
+        bboxMarker.pose = obbPose;
+        bboxMarker.scale.x = obbScale.x;
+        bboxMarker.scale.y = obbScale.y;
+        bboxMarker.scale.z = (obbScale.z > 0.01? obbScale.z : 0.01);  // 최소높이 예외처리 등
 
-        bboxMarker.scale.x = boxScale.x;
-        bboxMarker.scale.y = boxScale.y;
-        bboxMarker.scale.z = (boxScale.z > 0.01? boxScale.z : 0.01); // 최소 높이 예외처리
-
-        bboxMarker.color.a = 0.4; // 좀 투명하게
-        bboxMarker.color.r = 1.0; // 빨강 박스 (원하시면 색상 변경)
+        // 3) 색상, 투명도 등
+        bboxMarker.color.a = 0.4;
+        bboxMarker.color.r = 1.0;
         bboxMarker.color.g = 0.0;
         bboxMarker.color.b = 0.0;
 
         bboxArr.markers.push_back(bboxMarker);
       }
+
     }
     // 바운딩박스 전체 퍼블리시
     bboxPub.publish(bboxArr);
