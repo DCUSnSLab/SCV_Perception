@@ -1,6 +1,7 @@
 /**********************************************
  * median_based_kf_tracker_with_bbox.cpp
- * 중앙값(median)으로 군집 중심 계산 + 저역통과필터 + 칼만필터 + Bounding Box
+ * 중앙값(median)으로 군집 중심 계산 + 저역통과 필터(ego-motion 보상 및 시간적 평활화 적용)
+ * + 칼만 필터 + Bounding Box
  *********************************************/
 
  #include "kf_tracker/CKalmanFilter.h"
@@ -64,7 +65,7 @@
  // 최초 프레임 플래그
  static bool firstFrame = true;
  
- // (추가) 필터 재설정 임계치 (예: 1미터 이상 차이가 나면 필터를 재설정)
+ // reset 임계치: 이전 필터 상태와 새 측정값의 차이가 1.0m 이상이면 필터 재설정
  static const double reset_threshold = 1.0;
  
  // 퍼블리셔
@@ -75,37 +76,37 @@
  static ros::Publisher pub_cluster3;
  static ros::Publisher pub_cluster4;
  static ros::Publisher pub_cluster5;
- static ros::Publisher markerPub;       // CUBE 마커(트래킹된 위치)
- static ros::Publisher arrowPub;        // ARROW 마커(Heading)
- static ros::Publisher bboxPub;         // BBOX 마커(실제 클러스터)
+ static ros::Publisher markerPub;       // 칼만 필터 예측 위치 표시용 CUBE 마커
+ static ros::Publisher arrowPub;        // Heading ARROW 마커
+ static ros::Publisher bboxPub;         // Bounding Box 마커
  
- // 칼만 필터(최대 6개 객체)
- static cv::KalmanFilter KF0(4,2,0), KF1(4,2,0), KF2(4,2,0),
-                         KF3(4,2,0), KF4(4,2,0), KF5(4,2,0);
+ // 칼만 필터 (최대 6개 객체)
+ static cv::KalmanFilter KF0(4, 2, 0), KF1(4, 2, 0), KF2(4, 2, 0),
+                         KF3(4, 2, 0), KF4(4, 2, 0), KF5(4, 2, 0);
  
  // 매칭된 객체 ID
  static std::vector<int> objID(6);
  
- // 이전 프레임 시간 및 초기화용
+ // 이전 프레임 시간 및 초기화용 플래그
  static ros::Time prevTime;
  static bool firstTimeStamp = true;
  
- // base_link에서 이전 위치
+ // base_link 좌표계에서의 이전 측정 위치
  static std::vector<geometry_msgs::Point> prevObjPositions(6);
  
- // gps_utm에서 이전 위치
+ // gps_utm 좌표계에서의 이전 측정 위치
  static std::vector<geometry_msgs::Point> prevObjPositionsUTM(6);
  
- // 저역 통과 필터 결과
+ // 저역 통과 필터 결과 (월드 좌표계)
  static std::vector<double> world_x_filtered(6, 0.0);
  static std::vector<double> world_y_filtered(6, 0.0);
  static bool filter_initialized = false;
- static const double alpha = 0.2; // 0 < alpha < 1
+ static const double alpha = 0.2; // Low pass filter 계수 (0<alpha<1)
  
  // TF
  static tf::TransformListener* tfListener = nullptr;
  
- // 더미 데이터 여부 플래그 (각 객체별 KF측정이 더미인지)
+ // 더미 데이터 여부 플래그 (KF 측정이 더미인지)
  static std::vector<bool> isDummyMeasurement(6, false);
  
  // ------------------- distance 함수 ------------------- //
@@ -115,13 +116,13 @@
    double dx = p1.x - p2.x;
    double dy = p1.y - p2.y;
    double dz = p1.z - p2.z;
-   return std::sqrt(dx*dx + dy*dy + dz*dz);
+   return std::sqrt(dx * dx + dy * dy + dz * dz);
  }
   
  // ------------------- distMat 최소값 위치 찾기 ------------------- //
- std::pair<int,int> findIndexOfMin(const std::vector<std::vector<float>> &distMat)
+ std::pair<int, int> findIndexOfMin(const std::vector<std::vector<float>> &distMat)
  {
-   std::pair<int,int> minIndex;
+   std::pair<int, int> minIndex;
    float minVal = std::numeric_limits<float>::max();
    for (int i = 0; i < (int)distMat.size(); i++) {
      for (int j = 0; j < (int)distMat[i].size(); j++) {
@@ -160,7 +161,7 @@
    return medianPt;
  }
   
- // 오리엔티드 바운딩박스 계산 함수
+ // ------------------- 오리엔티드 바운딩박스 계산 함수 ------------------- //
  bool computeOrientedBoundingBox(const pcl::PointCloud<pcl::PointXYZ>::Ptr &cluster,
                                  geometry_msgs::Pose &obbPose,
                                  geometry_msgs::Vector3 &obbScale)
@@ -175,22 +176,22 @@
    }
    Eigen::Vector4f pcaCentroid;
    pcl::compute3DCentroid(*cluster, pcaCentroid);
-  
+   
    pcl::PCA<pcl::PointXYZ> pca;
    pca.setInputCloud(cluster);
    Eigen::Matrix3f eigenVectors = pca.getEigenVectors();
-  
+   
    Eigen::Matrix4f projTransform(Eigen::Matrix4f::Identity());
    projTransform.block<3,3>(0,0) = eigenVectors.transpose();
    projTransform.block<3,1>(0,3) = -1.0f * (eigenVectors.transpose() * pcaCentroid.head<3>());
    
    pcl::PointCloud<pcl::PointXYZ>::Ptr cloudProjected(new pcl::PointCloud<pcl::PointXYZ>);
    pcl::transformPointCloud(*cluster, *cloudProjected, projTransform);
-  
+   
    pcl::PointXYZ minPt, maxPt;
    minPt.x = minPt.y = minPt.z = std::numeric_limits<float>::max();
    maxPt.x = maxPt.y = maxPt.z = -std::numeric_limits<float>::max();
-  
+   
    for (const auto &pt : cloudProjected->points) {
      if (pt.x < minPt.x) minPt.x = pt.x;
      if (pt.y < minPt.y) minPt.y = pt.y;
@@ -199,31 +200,31 @@
      if (pt.y > maxPt.y) maxPt.y = pt.y;
      if (pt.z > maxPt.z) maxPt.z = pt.z;
    }
-  
+   
    Eigen::Vector3f meanDiagonal = 0.5f * (Eigen::Vector3f(maxPt.x, maxPt.y, maxPt.z) +
                                           Eigen::Vector3f(minPt.x, minPt.y, minPt.z));
    Eigen::Vector3f obb_center_world = eigenVectors * meanDiagonal + pcaCentroid.head<3>();
-  
+   
    float length = maxPt.x - minPt.x;
    float width  = maxPt.y - minPt.y;
    float height = maxPt.z - minPt.z;
-  
+   
    Eigen::Matrix3f rotation = eigenVectors;
    Eigen::Quaternionf q(rotation);
-  
+   
    obbPose.position.x = obb_center_world.x();
    obbPose.position.y = obb_center_world.y();
    obbPose.position.z = obb_center_world.z();
-  
+   
    obbPose.orientation.x = q.x();
    obbPose.orientation.y = q.y();
    obbPose.orientation.z = q.z();
    obbPose.orientation.w = q.w();
-  
+   
    obbScale.x = fabs(length);
    obbScale.y = fabs(width);
    obbScale.z = fabs(height);
-  
+   
    return true;
  }
   
@@ -307,9 +308,9 @@
      float meas[2];
      meas[0] = (float)clusterCenters[cidx].x;
      meas[1] = (float)clusterCenters[cidx].y;
-     if (fabs(meas[0]) < 1e-6 && fabs(meas[1]) < 1e-6) {
+     if (fabs(meas[0]) < 1e-6 && fabs(meas[1]) < 1e-6)
        isDummyMeasurement[i] = true;
-     } else {
+     else {
        isDummyMeasurement[i] = false;
        cv::Mat measurement(2, 1, CV_32F, meas);
        switch(i) {
@@ -325,7 +326,7 @@
    }
  }
   
- // ------------------- 클라우드 퍼블리시 ------------------- //
+ // ------------------- 클라우드 퍼블리시 함수 ------------------- //
  void publish_cloud(ros::Publisher &pub, pcl::PointCloud<pcl::PointXYZ>::Ptr cluster)
  {
    sensor_msgs::PointCloud2::Ptr msg(new sensor_msgs::PointCloud2);
@@ -335,16 +336,16 @@
    pub.publish(*msg);
  }
   
- // ------------------- cloud_cb ------------------- //
+ // ------------------- cloud_cb 콜백 함수 ------------------- //
  void cloud_cb(const sensor_msgs::PointCloud2ConstPtr &input)
  {
    if (firstFrame) {
      // 1) Kalman Filter 초기화
      float dx = 1.0f, dy = 1.0f, dvx = 0.01f, dvy = 0.01f;
-     cv::Mat T = (Mat_<float>(4,4) << dx,0, 1,0,
-                                      0,dy, 0,1,
-                                      0,0, dvx,0,
-                                      0,0, 0,dvy);
+     cv::Mat T = (Mat_<float>(4,4) << dx, 0, 1, 0,
+                                      0, dy, 0, 1,
+                                      0, 0, dvx, 0,
+                                      0, 0, 0, dvy);
      KF0.transitionMatrix = T.clone();
      KF1.transitionMatrix = T.clone();
      KF2.transitionMatrix = T.clone();
@@ -378,10 +379,8 @@
      // 2) PCL 군집 추출
      pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud(new pcl::PointCloud<pcl::PointXYZ>);
      pcl::fromROSMsg(*input, *in_cloud);
-  
      pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
      tree->setInputCloud(in_cloud);
-  
      std::vector<pcl::PointIndices> cluster_indices;
      pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
      ec.setClusterTolerance(0.2);
@@ -460,10 +459,8 @@
      // 2번째 프레임 이후
      pcl::PointCloud<pcl::PointXYZ>::Ptr in_cloud(new pcl::PointCloud<pcl::PointXYZ>);
      pcl::fromROSMsg(*input, *in_cloud);
-  
      pcl::search::KdTree<pcl::PointXYZ>::Ptr tree(new pcl::search::KdTree<pcl::PointXYZ>);
      tree->setInputCloud(in_cloud);
-  
      std::vector<pcl::PointIndices> cluster_indices;
      pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
      ec.setClusterTolerance(0.2);
@@ -574,7 +571,7 @@
          base_pt.point.z = 0.0;
          try {
            tfListener->transformPoint("gps_utm", base_pt, utm_pt);
-           // 새 트래킹 시작 시, 기존 필터 값과 차이가 reset_threshold를 초과하면 필터 상태를 재설정
+           // 새 트래킹 시작 시, 기존 필터 값과 측정값의 차이가 reset_threshold를 초과하면 필터 재설정
            if (fabs(utm_pt.point.x - world_x_filtered[i]) > reset_threshold ||
                fabs(utm_pt.point.y - world_y_filtered[i]) > reset_threshold) {
              world_x_filtered[i] = utm_pt.point.x;
@@ -609,7 +606,7 @@
                           i == 4 ? KF4.statePost.at<float>(1) :
                                    KF5.statePost.at<float>(1));
            bool isDummy = isDummyMeasurement[i];
-  
+   
            float x_prev_b = prevObjPositions[i].x;
            float y_prev_b = prevObjPositions[i].y;
            float vx_b = 0.0f, vy_b = 0.0f;
@@ -619,14 +616,13 @@
            }
            prevObjPositions[i].x = x_now;
            prevObjPositions[i].y = y_now;
-  
+   
            geometry_msgs::PointStamped base_pt, utm_pt;
            base_pt.header.frame_id = "base_link";
            base_pt.header.stamp = ros::Time(0);
            base_pt.point.x = x_now;
            base_pt.point.y = y_now;
            base_pt.point.z = 0.0;
-  
            double x_now_u = 0.0, y_now_u = 0.0;
            try {
              tfListener->transformPoint("gps_utm", base_pt, utm_pt);
@@ -635,7 +631,7 @@
            } catch(tf::TransformException &ex) {
              ROS_WARN("TF exc: %s", ex.what());
            }
-  
+   
            if (filter_initialized) {
              if (!isDummy) {
                if (fabs(x_now_u - world_x_filtered[i]) > reset_threshold ||
@@ -651,10 +647,10 @@
              world_x_filtered[i] = x_now_u;
              world_y_filtered[i] = y_now_u;
            }
-  
+   
            double x_f = world_x_filtered[i];
            double y_f = world_y_filtered[i];
-  
+   
            double x_prev_u = prevObjPositionsUTM[i].x;
            double y_prev_u = prevObjPositionsUTM[i].y;
            double vx_u = 0.0, vy_u = 0.0;
@@ -662,20 +658,19 @@
              vx_u = (x_f - x_prev_u) / dt;
              vy_u = (y_f - y_prev_u) / dt;
            }
-  
-           double heading_rad = 0.0;
-           double speed = 0.0;
+   
+           double heading_rad = 0.0, speed = 0.0;
            if (!isDummy) {
              heading_rad = std::atan2(vy_u, vx_u);
              speed = std::sqrt(vx_u * vx_u + vy_u * vy_u);
            }
-  
+   
            prevObjPositionsUTM[i].x = x_f;
            prevObjPositionsUTM[i].y = y_f;
-  
+   
            ROS_INFO("[Object %d] dt=%.2f s, (isDummy=%d) FilteredPos=(%.2f, %.2f), vel=(%.2f, %.2f), speed=%.2f",
                     i, dt, (int)isDummy, x_f, y_f, vx_u, vy_u, speed);
-  
+   
            visualization_msgs::Marker arrow;
            arrow.header.frame_id = "gps_utm";
            arrow.header.stamp = nowT;
@@ -705,9 +700,8 @@
              arrow.color.g = 0.0;
              arrow.color.b = 0.0;
            }
-           if (isDummy) {
+           if (isDummy)
              arrow.color.a = 0.0;
-           }
            arrowArr.markers.push_back(arrow);
          }
        }
