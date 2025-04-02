@@ -1,7 +1,7 @@
 /**********************************************
  * median_based_kf_tracker_with_bbox.cpp
- * 중앙값(median)으로 군집 중심 계산 + 저역통과 필터(ego-motion 보상 및 시간적 평활화 적용)
- * + 칼만 필터 + Bounding Box
+ * 중앙값(median)으로 군집 중심 계산 + 저역통과 필터(ego-motion 보상 및 시간적 평활화)
+ * + 칼만 필터 + Bounding Box + 충돌 예측 (향후 5초)
  *********************************************/
 
  #include "kf_tracker/CKalmanFilter.h"
@@ -44,13 +44,17 @@
  #include <visualization_msgs/Marker.h>
  #include <visualization_msgs/MarkerArray.h>
  
- // TF 변환 (base_link→gps_utm)
+ // odom 메시지 구독을 위한 헤더
+ #include <nav_msgs/Odometry.h>
+ 
+ // TF 변환 (base_link → gps_utm)
  #include <tf/transform_listener.h>
  #include <geometry_msgs/PointStamped.h>
  
  // Heading 계산 시 orientation 변환
  #include <tf/LinearMath/Quaternion.h>
  #include <tf/LinearMath/Matrix3x3.h>
+ #include <tf/transform_datatypes.h>
  
  #include <Eigen/Dense>
  #include <pcl/common/transforms.h>
@@ -65,9 +69,12 @@
  // 최초 프레임 플래그
  static bool firstFrame = true;
  
- // reset 임계치: 이전 필터 상태와 새 측정값의 차이가 1.0m 이상이면 필터 재설정
- static const double reset_threshold = 1.0;
+ // reset 임계치: 이전 필터 상태와 측정값 차이가 1.0m 이상이면 필터 재설정
+ static const double reset_threshold = 0.5;
  
+ // 충돌 예측 임계치 (예: 2.0m 이내면 충돌 가능성 있음)
+ static const double collision_threshold = 1.0;
+ static const double static_threshold = 0.6;
  // 퍼블리셔
  static ros::Publisher objID_pub;
  static ros::Publisher pub_cluster0;
@@ -76,9 +83,10 @@
  static ros::Publisher pub_cluster3;
  static ros::Publisher pub_cluster4;
  static ros::Publisher pub_cluster5;
- static ros::Publisher markerPub;       // 칼만 필터 예측 위치 표시용 CUBE 마커
- static ros::Publisher arrowPub;        // Heading ARROW 마커
- static ros::Publisher bboxPub;         // Bounding Box 마커
+ static ros::Publisher markerPub;    // 칼만 필터 예측 위치 표시용
+ static ros::Publisher arrowPub;     // Heading ARROW 표시용
+ static ros::Publisher bboxPub;      // Bounding Box 표시용
+ static ros::Publisher predPathPub;  // 충돌 위험 객체의 예상 경로 퍼블리시용
  
  // 칼만 필터 (최대 6개 객체)
  static cv::KalmanFilter KF0(4, 2, 0), KF1(4, 2, 0), KF2(4, 2, 0),
@@ -87,26 +95,35 @@
  // 매칭된 객체 ID
  static std::vector<int> objID(6);
  
- // 이전 프레임 시간 및 초기화용 플래그
+ // 이전 프레임 시간 및 초기화용
  static ros::Time prevTime;
  static bool firstTimeStamp = true;
  
- // base_link 좌표계에서의 이전 측정 위치
+ // base_link에서 이전 위치 (트래킹된 객체)
  static std::vector<geometry_msgs::Point> prevObjPositions(6);
  
- // gps_utm 좌표계에서의 이전 측정 위치
+ // gps_utm에서 이전 위치 (트래킹된 객체)
  static std::vector<geometry_msgs::Point> prevObjPositionsUTM(6);
  
  // 저역 통과 필터 결과 (월드 좌표계)
  static std::vector<double> world_x_filtered(6, 0.0);
  static std::vector<double> world_y_filtered(6, 0.0);
  static bool filter_initialized = false;
- static const double alpha = 0.2; // Low pass filter 계수 (0<alpha<1)
+ static const double alpha = 0.2; // Low pass filter 계수
+ 
+ // 차량의 odom (gps_utm) 좌표 및 속도 (global)
+ static geometry_msgs::Point vehicle_pose; // gps_utm 기준
+ static double vehicle_vel_x = 0.0;
+ static double vehicle_vel_y = 0.0;
+ 
+ // 트래킹 객체의 속도 (계산된 값, gps_utm 기준)
+ static std::vector<double> object_vel_x(6, 0.0);
+ static std::vector<double> object_vel_y(6, 0.0);
  
  // TF
  static tf::TransformListener* tfListener = nullptr;
  
- // 더미 데이터 여부 플래그 (KF 측정이 더미인지)
+ // 더미 데이터 여부 플래그 (각 객체별 KF측정이 더미인지)
  static std::vector<bool> isDummyMeasurement(6, false);
  
  // ------------------- distance 함수 ------------------- //
@@ -116,7 +133,7 @@
    double dx = p1.x - p2.x;
    double dy = p1.y - p2.y;
    double dz = p1.z - p2.z;
-   return std::sqrt(dx * dx + dy * dy + dz * dz);
+   return std::sqrt(dx*dx + dy*dy + dz*dz);
  }
   
  // ------------------- distMat 최소값 위치 찾기 ------------------- //
@@ -235,7 +252,7 @@
      KF0.predict(), KF1.predict(), KF2.predict(),
      KF3.predict(), KF4.predict(), KF5.predict()
    };
-  
+   
    std::vector<geometry_msgs::Point> clusterCenters;
    clusterCenters.reserve(6);
    for (size_t i = 0; i < ccs.data.size(); i += 3) {
@@ -245,7 +262,7 @@
      p.z = ccs.data[i+2];
      clusterCenters.push_back(p);
    }
-  
+   
    std::vector<geometry_msgs::Point> KFpredictions;
    KFpredictions.reserve(6);
    for (int i = 0; i < 6; i++) {
@@ -255,14 +272,14 @@
      pt.z = 0.0;
      KFpredictions.push_back(pt);
    }
-  
+   
    std::vector<std::vector<float>> distMat(6, std::vector<float>(6, 0.0f));
    for (int i = 0; i < 6; i++) {
      for (int j = 0; j < 6; j++) {
        distMat[i][j] = euclidean_distance(KFpredictions[i], clusterCenters[j]);
      }
    }
-  
+   
    for (int c = 0; c < 6; c++) {
      auto minIndex = findIndexOfMin(distMat);
      objID[minIndex.first] = minIndex.second;
@@ -273,7 +290,7 @@
        distMat[row][minIndex.second] = 1e5;
      }
    }
-  
+   
    visualization_msgs::MarkerArray mkArr;
    mkArr.markers.reserve(6);
    for (int i = 0; i < 6; i++) {
@@ -296,13 +313,13 @@
      mkArr.markers.push_back(mk);
    }
    markerPub.publish(mkArr);
-  
+   
    std_msgs::Int32MultiArray ids;
    for (int i = 0; i < 6; i++) {
      ids.data.push_back(objID[i]);
    }
    objID_pub.publish(ids);
-  
+   
    for (int i = 0; i < 6; i++) {
      int cidx = objID[i];
      float meas[2];
@@ -334,6 +351,98 @@
    msg->header.frame_id = "base_link";
    msg->header.stamp = ros::Time::now();
    pub.publish(*msg);
+ }
+  
+ // ------------------- 충돌 예측 함수 ------------------- //
+ // 트래킹된 각 객체에 대해, 현재 위치와 속도(객체_vel_x, object_vel_y)를 사용하여 향후 5초간 선형 예측하고,
+ // 차량의 예상 궤적과의 거리가 임계치(collision_threshold) 이하인 경우 예상 경로(라인 스트립)를 퍼블리시합니다.
+// 충돌 예측 함수
+void checkCollision(ros::Publisher &predPathPub)
+{
+  // 예측 간격 및 총 시간 (5초)
+  double T_total = 5.0;
+  double dt_pred = 0.5;
+  visualization_msgs::MarkerArray predArr;
+  
+  for (int i = 0; i < 6; i++) {
+    // 더미 데이터나 정적 객체(속도 < static_threshold)는 충돌 예측에서 제외
+    if (isDummyMeasurement[i])
+      continue;
+    
+    double obj_x = prevObjPositionsUTM[i].x;
+    double obj_y = prevObjPositionsUTM[i].y;
+    double vx = object_vel_x[i];
+    double vy = object_vel_y[i];
+    
+    double obj_speed = sqrt(vx * vx + vy * vy);
+    if (obj_speed < static_threshold)
+      continue;
+    
+    bool collisionPossible = false;
+    
+    visualization_msgs::Marker lineMarker;
+    lineMarker.header.frame_id = "gps_utm";
+    lineMarker.header.stamp = ros::Time::now();
+    lineMarker.ns = "predicted_path";
+    lineMarker.id = i;
+    lineMarker.type = visualization_msgs::Marker::LINE_STRIP;
+    lineMarker.action = visualization_msgs::Marker::ADD;
+    lineMarker.scale.x = 0.2; // 선 두께
+    // lifetime를 짧게 설정하여 금방 삭제되도록 함
+    lineMarker.lifetime = ros::Duration(0.1);
+    lineMarker.color.a = 1.0;
+    lineMarker.color.r = 1.0;
+    lineMarker.color.g = 0.0;
+    lineMarker.color.b = 0.0;
+    
+    for (double t = 0.0; t <= T_total; t += dt_pred) {
+      geometry_msgs::Point objPred;
+      objPred.x = obj_x + vx * t;
+      objPred.y = obj_y + vy * t;
+      objPred.z = 0.0;
+      
+      geometry_msgs::Point vehPred;
+      vehPred.x = vehicle_pose.x + vehicle_vel_x * t;
+      vehPred.y = vehicle_pose.y + vehicle_vel_y * t;
+      vehPred.z = 0.0;
+      
+      double dist = sqrt(pow(objPred.x - vehPred.x, 2) + pow(objPred.y - vehPred.y, 2));
+      if (dist < collision_threshold)
+        collisionPossible = true;
+      
+      lineMarker.points.push_back(objPred);
+    }
+    
+    if (collisionPossible)
+      predArr.markers.push_back(lineMarker);
+  }
+  
+  if (!predArr.markers.empty())
+    predPathPub.publish(predArr);
+}
+
+ // ------------------- odom 콜백 함수 ------------------- //
+ // /odom/coordinate/gps 토픽 (예: nav_msgs/Odometry 메시지)를 구독하여 차량의 현재 pose 및 twist를 이용해
+ // 차량의 vel_x, vel_y (heading을 고려한)를 계산하고 ROS_INFO로 출력합니다.
+ void odom_cb(const nav_msgs::Odometry::ConstPtr &msg)
+ {
+   // 차량 pose (gps_utm 기준)
+   vehicle_pose = msg->pose.pose.position;
+   
+   // 차량 heading 계산 (yaw)
+   double yaw = tf::getYaw(msg->pose.pose.orientation);
+   
+   // 차량의 선형 속도 (전진 속도는 twist.linear.x)
+   double linear_speed = msg->twist.twist.linear.x;
+   if (linear_speed >= 0 && linear_speed <= 0.5) linear_speed = 0.5;
+   if (linear_speed >= -0.5 && linear_speed < 0) linear_speed = -0.5;
+   vehicle_vel_x = linear_speed * cos(yaw);
+   vehicle_vel_y = linear_speed * sin(yaw);
+   
+   ROS_INFO("Vehicle: vel_x = %.3f, vel_y = %.3f, heading (rad) = %.3f", vehicle_vel_x, vehicle_vel_y, yaw);
+   
+   // 충돌 예측 (5초 내) – 트래킹 객체들의 속도와 차량의 속도를 비교
+   checkCollision(predPathPub);
  }
   
  // ------------------- cloud_cb 콜백 함수 ------------------- //
@@ -571,15 +680,8 @@
          base_pt.point.z = 0.0;
          try {
            tfListener->transformPoint("gps_utm", base_pt, utm_pt);
-           // 새 트래킹 시작 시, 기존 필터 값과 측정값의 차이가 reset_threshold를 초과하면 필터 재설정
-           if (fabs(utm_pt.point.x - world_x_filtered[i]) > reset_threshold ||
-               fabs(utm_pt.point.y - world_y_filtered[i]) > reset_threshold) {
-             world_x_filtered[i] = utm_pt.point.x;
-             world_y_filtered[i] = utm_pt.point.y;
-           } else {
-             world_x_filtered[i] = alpha * utm_pt.point.x + (1.0 - alpha) * world_x_filtered[i];
-             world_y_filtered[i] = alpha * utm_pt.point.y + (1.0 - alpha) * world_y_filtered[i];
-           }
+           world_x_filtered[i] = utm_pt.point.x;
+           world_y_filtered[i] = utm_pt.point.y;
            prevObjPositionsUTM[i].x = world_x_filtered[i];
            prevObjPositionsUTM[i].y = world_y_filtered[i];
          } catch(tf::TransformException &ex) {
@@ -659,6 +761,10 @@
              vy_u = (y_f - y_prev_u) / dt;
            }
    
+           // 업데이트: 객체 속도 저장 (추후 충돌 예측에 사용)
+           object_vel_x[i] = vx_u;
+           object_vel_y[i] = vy_u;
+   
            double heading_rad = 0.0, speed = 0.0;
            if (!isDummy) {
              heading_rad = std::atan2(vy_u, vx_u);
@@ -691,7 +797,7 @@
            arrow.pose.orientation.z = q.z();
            arrow.pose.orientation.w = q.w();
            arrow.color.a = 1.0;
-           if (speed > 0.6) {
+           if (speed > static_threshold) {
              arrow.color.r = 0.0;
              arrow.color.g = 1.0;
              arrow.color.b = 0.0;
@@ -710,28 +816,37 @@
      }
      arrowPub.publish(arrowArr);
    }
+   
+   // 충돌 예측 (5초 내) – 차량의 odom 정보는 odom_cb에서 업데이트됨
+   // checkCollision()는 odom_cb에서 호출하도록 함.
  }
   
+  
+ // ------------------- main 함수 ------------------- //
  int main(int argc, char** argv)
  {
    ros::init(argc, argv, "kf_tracker_world");
    ros::NodeHandle nh;
    tfListener = new tf::TransformListener();
-  
-   ros::Subscriber sub = nh.subscribe("filtered_cloud", 1, cloud_cb);
-  
+   
+   // 구독: 트래킹 클라우드 및 odom (gps) 메시지
+   ros::Subscriber subCloud = nh.subscribe("filtered_cloud", 1, cloud_cb);
+   ros::Subscriber subOdom  = nh.subscribe("/odom/coordinate/gps", 1, odom_cb);
+   
+   // 퍼블리셔
    pub_cluster0 = nh.advertise<sensor_msgs::PointCloud2>("cluster_0", 1);
    pub_cluster1 = nh.advertise<sensor_msgs::PointCloud2>("cluster_1", 1);
    pub_cluster2 = nh.advertise<sensor_msgs::PointCloud2>("cluster_2", 1);
    pub_cluster3 = nh.advertise<sensor_msgs::PointCloud2>("cluster_3", 1);
    pub_cluster4 = nh.advertise<sensor_msgs::PointCloud2>("cluster_4", 1);
    pub_cluster5 = nh.advertise<sensor_msgs::PointCloud2>("cluster_5", 1);
-  
+   
    objID_pub = nh.advertise<std_msgs::Int32MultiArray>("obj_id", 1);
    markerPub = nh.advertise<visualization_msgs::MarkerArray>("viz", 1);
    arrowPub  = nh.advertise<visualization_msgs::MarkerArray>("heading_arrows", 1);
    bboxPub   = nh.advertise<visualization_msgs::MarkerArray>("tracked_bboxes", 1);
-  
+   predPathPub = nh.advertise<visualization_msgs::MarkerArray>("predicted_collision_path", 1);
+   
    ros::spin();
    delete tfListener;
    return 0;
