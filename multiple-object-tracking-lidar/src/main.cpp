@@ -92,7 +92,7 @@
  static std::vector<double> world_x_filtered(6, 0.0);
  static std::vector<double> world_y_filtered(6, 0.0);
  static bool filter_initialized = false;
- static const double alpha = 0.1; // 0<alpha<1
+ static const double alpha = 0.2; // 0<alpha<1
  
  // TF
  static tf::TransformListener* tfListener = nullptr;
@@ -202,24 +202,17 @@
  // ------------------- 칼만필터 업데이트 함수 ------------------- //
  void KFT(const std_msgs::Float32MultiArray &ccs)
  {
-   // 0) 각 트랙의 이전 상태를 저장 (보정 전 상태)
-   cv::Mat oldState0 = KF0.statePost.clone();
-   cv::Mat oldState1 = KF1.statePost.clone();
-   cv::Mat oldState2 = KF2.statePost.clone();
-   cv::Mat oldState3 = KF3.statePost.clone();
-   cv::Mat oldState4 = KF4.statePost.clone();
-   cv::Mat oldState5 = KF5.statePost.clone();
- 
-   // 1) 예측: 모든 트랙에 대해 KF.predict() 수행
+   // 1) 예측
    std::vector<cv::Mat> pred{
-     KF0.predict(), KF1.predict(), KF2.predict(),
-     KF3.predict(), KF4.predict(), KF5.predict()
+     KF0.predict(),KF1.predict(),KF2.predict(),
+     KF3.predict(),KF4.predict(),KF5.predict()
    };
  
-   // 2) 측정값을 clusterCenters로 변환
+   // 2) 측정값 -> clusterCenters
    std::vector<geometry_msgs::Point> clusterCenters;
    clusterCenters.reserve(6);
-   for (size_t i = 0; i < ccs.data.size(); i += 3) {
+ 
+   for(size_t i=0; i<ccs.data.size(); i+=3){
      geometry_msgs::Point p;
      p.x = ccs.data[i];
      p.y = ccs.data[i+1];
@@ -227,10 +220,11 @@
      clusterCenters.push_back(p);
    }
  
-   // 3) KF 예측 위치를 사용해 매칭을 위한 데이터 준비
+   // 3) KF 예측 위치
    std::vector<geometry_msgs::Point> KFpredictions;
    KFpredictions.reserve(6);
-   for (int i = 0; i < 6; i++) {
+ 
+   for(int i=0; i<6; i++){
      geometry_msgs::Point pt;
      pt.x = pred[i].at<float>(0);
      pt.y = pred[i].at<float>(1);
@@ -238,69 +232,73 @@
      KFpredictions.push_back(pt);
    }
  
-   // 4) 예측값과 측정값 간의 거리 행렬(distMat) 계산
-   std::vector<std::vector<float>> distMat(6, std::vector<float>(6, 0.0f));
-   for (int i = 0; i < 6; i++) {
-     for (int j = 0; j < 6; j++) {
+   // 4) distMat
+   std::vector<std::vector<float>> distMat(6, std::vector<float>(6,0.0f));
+   for(int i=0; i<6; i++){
+     for(int j=0; j<6; j++){
        distMat[i][j] = euclidean_distance(KFpredictions[i], clusterCenters[j]);
      }
    }
  
-   // 5) 데이터 연관: distMat에서 최소값을 찾아 objID에 매칭
-   for (int c = 0; c < 6; c++) {
+   // 5) 최소값 -> objID
+   for(int c=0; c<6; c++){
      auto minIndex = findIndexOfMin(distMat);
      objID[minIndex.first] = minIndex.second;
-     // 해당 row/col은 큰 값으로 설정
-     for (int col = 0; col < 6; col++) {
+     // 해당 row/col은 큰 값으로
+     for(int col=0; col<6; col++){
        distMat[minIndex.first][col] = 1e5;
      }
-     for (int row = 0; row < 6; row++) {
+     for(int row=0; row<6; row++){
        distMat[row][minIndex.second] = 1e5;
      }
    }
  
-   // 6) (시각화용) base_link 좌표계에 KF 예측 위치 마커 퍼블리싱
+   // 6) base_link 마커 시각화 (CUBE: 칼만필터 예측 위치)
    visualization_msgs::MarkerArray mkArr;
    mkArr.markers.reserve(6);
-   for (int i = 0; i < 6; i++) {
+ 
+   for(int i=0; i<6; i++){
      visualization_msgs::Marker mk;
      mk.header.frame_id = "base_link";
-     mk.header.stamp = ros::Time::now();
+     mk.header.stamp    = ros::Time::now();
      mk.id = i;
      mk.type = visualization_msgs::Marker::CUBE;
      mk.action = visualization_msgs::Marker::ADD;
      mk.pose.position.x = KFpredictions[i].x;
      mk.pose.position.y = KFpredictions[i].y;
      mk.pose.position.z = 0.0;
+ 
+     // 트래킹 "위치"만 간단히 표시
      mk.scale.x = 0.3;
      mk.scale.y = 0.3;
      mk.scale.z = 0.3;
+ 
      mk.color.a = 1.0;
-     mk.color.r = (i % 2) ? 1 : 0;
-     mk.color.g = (i % 3) ? 1 : 0;
-     mk.color.b = (i % 4) ? 1 : 0;
+     mk.color.r = (i%2)?1:0;
+     mk.color.g = (i%3)?1:0;
+     mk.color.b = (i%4)?1:0;
+ 
      mkArr.markers.push_back(mk);
    }
    markerPub.publish(mkArr);
  
-   // 7) objID 퍼블리시
+   // 7) obj_id 퍼블리시
    std_msgs::Int32MultiArray ids;
-   for (int i = 0; i < 6; i++) {
+   for(int i=0; i<6; i++){
      ids.data.push_back(objID[i]);
    }
    objID_pub.publish(ids);
  
-   // 8) 측정값에 따른 KF 보정 및 업데이트
-   for (int i = 0; i < 6; i++) {
+   // 8) 측정값 -> correct
+   for(int i=0; i<6; i++){
      int cidx = objID[i];
      float meas[2];
-     meas[0] = static_cast<float>(clusterCenters[cidx].x);
-     meas[1] = static_cast<float>(clusterCenters[cidx].y);
+     meas[0] = (float)clusterCenters[cidx].x;
+     meas[1] = (float)clusterCenters[cidx].y;
  
-     // 만약 측정값이 (0,0)이 아니면 (즉, 군집이 검출되었으면) 보정 수행
-     if (!(meas[0] == 0.f && meas[1] == 0.f)) {
-       cv::Mat measurement(2, 1, CV_32F, meas);
-       switch (i) {
+     if(!(meas[0]==0.f && meas[1]==0.f)){
+       cv::Mat measurement(2,1,CV_32F, meas);
+       switch(i){
          case 0: KF0.correct(measurement); break;
          case 1: KF1.correct(measurement); break;
          case 2: KF2.correct(measurement); break;
@@ -310,21 +308,8 @@
          default: break;
        }
      }
-     else {
-       // 측정값이 없으므로, 해당 트랙은 업데이트 없이 이전 상태를 유지
-       switch (i) {
-         case 0: KF0.statePost = oldState0.clone(); break;
-         case 1: KF1.statePost = oldState1.clone(); break;
-         case 2: KF2.statePost = oldState2.clone(); break;
-         case 3: KF3.statePost = oldState3.clone(); break;
-         case 4: KF4.statePost = oldState4.clone(); break;
-         case 5: KF5.statePost = oldState5.clone(); break;
-         default: break;
-       }
-     }
    }
  }
- 
  
  // ------------------- 클라우드 퍼블리시 ------------------- //
  void publish_cloud(ros::Publisher &pub, pcl::PointCloud<pcl::PointXYZ>::Ptr cluster)
@@ -480,7 +465,7 @@
  
      std::vector<pcl::PointIndices> cluster_indices;
      pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-     ec.setClusterTolerance(0.08);
+     ec.setClusterTolerance(0.2);
      ec.setMinClusterSize(10);
      ec.setMaxClusterSize(600);
      ec.setSearchMethod(tree);
@@ -565,7 +550,7 @@
          bboxMarker.scale.z = (boxScale.z > 0.01? boxScale.z : 0.01); // 최소 높이 예외처리
  
          bboxMarker.color.a = 0.4; // 좀 투명하게
-         bboxMarker.color.r = 1.0; // 빨강 박스
+         bboxMarker.color.r = 1.0; // 빨강 박스 (원하시면 색상 변경)
          bboxMarker.color.g = 0.0;
          bboxMarker.color.b = 0.0;
  
@@ -685,7 +670,7 @@
              world_x_filtered[i] = x_now_u;
              world_y_filtered[i] = y_now_u;
            }
-          
+ 
            double x_f = world_x_filtered[i];
            double y_f = world_y_filtered[i];
  
