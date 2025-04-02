@@ -52,8 +52,8 @@ Detector::Detector(ros::NodeHandle* nh){
     /*subscribing to the given topic*/
     sub = nh->subscribe(params::topicName, 1, &Detector::filtered,this);
     /*publishing filtered points*/
-    pub_road = nh->advertise<pcl::PCLPointCloud2>("road", 1);
-    pub_high = nh->advertise<pcl::PCLPointCloud2>("curb", 1);
+    pub_road = nh->advertise<pcl::PCLPointCloud2>("road_points", 1);
+    pub_high = nh->advertise<pcl::PCLPointCloud2>("nonroad_points", 1);
     pub_box = nh->advertise<pcl::PCLPointCloud2>("roi", 1); // ROI - region of interest
     pub_pobroad = nh->advertise<pcl::PCLPointCloud2>("road_probably", 1);
     pub_marker = nh->advertise<visualization_msgs::MarkerArray>("road_marker", 1);
