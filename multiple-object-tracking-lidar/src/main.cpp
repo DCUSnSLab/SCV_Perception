@@ -126,6 +126,9 @@
  // 더미 데이터 여부 플래그 (각 객체별 KF측정이 더미인지)
  static std::vector<bool> isDummyMeasurement(6, false);
  
+ // ★ 추가: 각 트랙의 이전 객체 ID를 저장하는 벡터 (초기값 -1: 아직 할당되지 않음)
+ static std::vector<int> prevObjID(6, -1);
+ 
  // ------------------- distance 함수 ------------------- //
  double euclidean_distance(const geometry_msgs::Point &p1,
                            const geometry_msgs::Point &p2)
@@ -354,85 +357,75 @@
  }
   
  // ------------------- 충돌 예측 함수 ------------------- //
- // 트래킹된 각 객체에 대해, 현재 위치와 속도(객체_vel_x, object_vel_y)를 사용하여 향후 5초간 선형 예측하고,
- // 차량의 예상 궤적과의 거리가 임계치(collision_threshold) 이하인 경우 예상 경로(라인 스트립)를 퍼블리시합니다.
-// 충돌 예측 함수
-void checkCollision(ros::Publisher &predPathPub)
-{
-  // 예측 간격 및 총 시간 (5초)
-  double T_total = 5.0;
-  double dt_pred = 0.5;
-  visualization_msgs::MarkerArray predArr;
+ void checkCollision(ros::Publisher &predPathPub)
+ {
+   double T_total = 5.0;
+   double dt_pred = 0.5;
+   visualization_msgs::MarkerArray predArr;
+   
+   for (int i = 0; i < 6; i++) {
+     if (isDummyMeasurement[i])
+       continue;
+     
+     double obj_x = prevObjPositionsUTM[i].x;
+     double obj_y = prevObjPositionsUTM[i].y;
+     double vx = object_vel_x[i];
+     double vy = object_vel_y[i];
+     
+     double obj_speed = sqrt(vx * vx + vy * vy);
+     if (obj_speed < static_threshold)
+       continue;
+     
+     bool collisionPossible = false;
+     
+     visualization_msgs::Marker lineMarker;
+     lineMarker.header.frame_id = "gps_utm";
+     lineMarker.header.stamp = ros::Time::now();
+     lineMarker.ns = "predicted_path";
+     lineMarker.id = i;
+     lineMarker.type = visualization_msgs::Marker::LINE_STRIP;
+     lineMarker.action = visualization_msgs::Marker::ADD;
+     lineMarker.scale.x = 0.2;
+     lineMarker.lifetime = ros::Duration(0.1);
+     lineMarker.color.a = 1.0;
+     lineMarker.color.r = 1.0;
+     lineMarker.color.g = 0.0;
+     lineMarker.color.b = 0.0;
+     
+     for (double t = 0.0; t <= T_total; t += dt_pred) {
+       geometry_msgs::Point objPred;
+       objPred.x = obj_x + vx * t;
+       objPred.y = obj_y + vy * t;
+       objPred.z = 0.0;
+       
+       geometry_msgs::Point vehPred;
+       vehPred.x = vehicle_pose.x + vehicle_vel_x * t;
+       vehPred.y = vehicle_pose.y + vehicle_vel_y * t;
+       vehPred.z = 0.0;
+       
+       double dist = sqrt(pow(objPred.x - vehPred.x, 2) + pow(objPred.y - vehPred.y, 2));
+       if (dist < collision_threshold)
+         collisionPossible = true;
+       
+       lineMarker.points.push_back(objPred);
+     }
+     
+     if (collisionPossible)
+       predArr.markers.push_back(lineMarker);
+   }
+   
+   if (!predArr.markers.empty())
+     predPathPub.publish(predArr);
+ }
   
-  for (int i = 0; i < 6; i++) {
-    // 더미 데이터나 정적 객체(속도 < static_threshold)는 충돌 예측에서 제외
-    if (isDummyMeasurement[i])
-      continue;
-    
-    double obj_x = prevObjPositionsUTM[i].x;
-    double obj_y = prevObjPositionsUTM[i].y;
-    double vx = object_vel_x[i];
-    double vy = object_vel_y[i];
-    
-    double obj_speed = sqrt(vx * vx + vy * vy);
-    if (obj_speed < static_threshold)
-      continue;
-    
-    bool collisionPossible = false;
-    
-    visualization_msgs::Marker lineMarker;
-    lineMarker.header.frame_id = "gps_utm";
-    lineMarker.header.stamp = ros::Time::now();
-    lineMarker.ns = "predicted_path";
-    lineMarker.id = i;
-    lineMarker.type = visualization_msgs::Marker::LINE_STRIP;
-    lineMarker.action = visualization_msgs::Marker::ADD;
-    lineMarker.scale.x = 0.2; // 선 두께
-    // lifetime를 짧게 설정하여 금방 삭제되도록 함
-    lineMarker.lifetime = ros::Duration(0.1);
-    lineMarker.color.a = 1.0;
-    lineMarker.color.r = 1.0;
-    lineMarker.color.g = 0.0;
-    lineMarker.color.b = 0.0;
-    
-    for (double t = 0.0; t <= T_total; t += dt_pred) {
-      geometry_msgs::Point objPred;
-      objPred.x = obj_x + vx * t;
-      objPred.y = obj_y + vy * t;
-      objPred.z = 0.0;
-      
-      geometry_msgs::Point vehPred;
-      vehPred.x = vehicle_pose.x + vehicle_vel_x * t;
-      vehPred.y = vehicle_pose.y + vehicle_vel_y * t;
-      vehPred.z = 0.0;
-      
-      double dist = sqrt(pow(objPred.x - vehPred.x, 2) + pow(objPred.y - vehPred.y, 2));
-      if (dist < collision_threshold)
-        collisionPossible = true;
-      
-      lineMarker.points.push_back(objPred);
-    }
-    
-    if (collisionPossible)
-      predArr.markers.push_back(lineMarker);
-  }
-  
-  if (!predArr.markers.empty())
-    predPathPub.publish(predArr);
-}
-
  // ------------------- odom 콜백 함수 ------------------- //
- // /odom/coordinate/gps 토픽 (예: nav_msgs/Odometry 메시지)를 구독하여 차량의 현재 pose 및 twist를 이용해
- // 차량의 vel_x, vel_y (heading을 고려한)를 계산하고 ROS_INFO로 출력합니다.
+ // /odom/coordinate/gps 토픽을 구독하여 차량의 pose 및 속도(heading 고려)를 계산합니다.
  void odom_cb(const nav_msgs::Odometry::ConstPtr &msg)
  {
-   // 차량 pose (gps_utm 기준)
    vehicle_pose = msg->pose.pose.position;
    
-   // 차량 heading 계산 (yaw)
    double yaw = tf::getYaw(msg->pose.pose.orientation);
    
-   // 차량의 선형 속도 (전진 속도는 twist.linear.x)
    double linear_speed = msg->twist.twist.linear.x;
    if (linear_speed >= 0 && linear_speed <= 0.5) linear_speed = 0.5;
    if (linear_speed >= -0.5 && linear_speed < 0) linear_speed = -0.5;
@@ -441,7 +434,6 @@ void checkCollision(ros::Publisher &predPathPub)
    
    ROS_INFO("Vehicle: vel_x = %.3f, vel_y = %.3f, heading (rad) = %.3f", vehicle_vel_x, vehicle_vel_y, yaw);
    
-   // 충돌 예측 (5초 내) – 트래킹 객체들의 속도와 차량의 속도를 비교
    checkCollision(predPathPub);
  }
   
@@ -756,12 +748,24 @@ void checkCollision(ros::Publisher &predPathPub)
            double x_prev_u = prevObjPositionsUTM[i].x;
            double y_prev_u = prevObjPositionsUTM[i].y;
            double vx_u = 0.0, vy_u = 0.0;
+           // ★ 여기서 현재 트랙의 객체 ID와 이전 객체 ID를 비교하여 전환 시 속도 초기화
+           int currentObjID = objID[i];
+           if (prevObjID[i] != currentObjID) {
+             // 트랙이 다른 객체로 전환되었으므로 속도를 초기화
+             object_vel_x[i] = 0;
+             object_vel_y[i] = 0;
+             prevObjPositionsUTM[i].x = x_f;
+             prevObjPositionsUTM[i].y = y_f;
+             prevObjID[i] = currentObjID;
+             // (원한다면 이 프레임에 대해 arrow 표시를 생략하거나, 0 속도의 화살표를 표시)
+             continue;
+           }
+   
            if (!isDummy && dt > 1e-6) {
              vx_u = (x_f - x_prev_u) / dt;
              vy_u = (y_f - y_prev_u) / dt;
            }
    
-           // 업데이트: 객체 속도 저장 (추후 충돌 예측에 사용)
            object_vel_x[i] = vx_u;
            object_vel_y[i] = vy_u;
    
@@ -817,11 +821,9 @@ void checkCollision(ros::Publisher &predPathPub)
      arrowPub.publish(arrowArr);
    }
    
-   // 충돌 예측 (5초 내) – 차량의 odom 정보는 odom_cb에서 업데이트됨
-   // checkCollision()는 odom_cb에서 호출하도록 함.
+   // 충돌 예측은 odom_cb에서 호출하도록 함.
  }
-  
-  
+   
  // ------------------- main 함수 ------------------- //
  int main(int argc, char** argv)
  {
@@ -829,11 +831,9 @@ void checkCollision(ros::Publisher &predPathPub)
    ros::NodeHandle nh;
    tfListener = new tf::TransformListener();
    
-   // 구독: 트래킹 클라우드 및 odom (gps) 메시지
    ros::Subscriber subCloud = nh.subscribe("filtered_cloud", 1, cloud_cb);
    ros::Subscriber subOdom  = nh.subscribe("/odom/coordinate/gps", 1, odom_cb);
    
-   // 퍼블리셔
    pub_cluster0 = nh.advertise<sensor_msgs::PointCloud2>("cluster_0", 1);
    pub_cluster1 = nh.advertise<sensor_msgs::PointCloud2>("cluster_1", 1);
    pub_cluster2 = nh.advertise<sensor_msgs::PointCloud2>("cluster_2", 1);
