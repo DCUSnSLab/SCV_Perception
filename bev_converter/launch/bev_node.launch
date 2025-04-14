@@ -1,0 +1,12 @@
+<launch>
+  <!-- camera 토픽 이름을 설정할 수 있도록 arg 정의 (기본값: /camera/image_raw) -->
+  <arg name="camera_topic" default="/zed_node/left/image_rect_color"/>
+
+  <!-- config 파일 로드 -->
+  <rosparam command="load" file="$(find bev_converter)/config/camera_params.yaml" />
+
+  <!-- Python 노드 실행 (camera_topic 파라미터를 노드로 전달) -->
+  <node pkg="bev_converter" type="bev_node.py" name="bev_node" output="screen">
+    <param name="camera_topic" value="$(arg camera_topic)" />
+  </node>
+</launch>
