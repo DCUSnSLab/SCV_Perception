@@ -28,7 +28,7 @@ class BevNode:
 
         self.h = self.extrinsics.get("translation", [0.0, 0.0, 0.45])[2]
 
-        self.marker_frame = rospy.get_param("~marker_frame", "front_box")
+        self.marker_frame = rospy.get_param("~marker_frame", "zed2i_base_link")
 
         self.image_sub = rospy.Subscriber(self.camera_topic, Image, self.image_callback)
         rospy.loginfo("Subscribed to camera topic: %s", self.camera_topic)
@@ -61,7 +61,6 @@ class BevNode:
         R = np.array(R_list).reshape(3, 3)
         # translation 벡터
         t_vec = np.array(self.extrinsics.get("translation", [0, 0, self.h]))
-        
         # 호모그래피 행렬 구성: H = K * [r1, r2, t]
         r1 = R[:, 0].reshape(3, 1)
         r2 = R[:, 1].reshape(3, 1)
@@ -88,11 +87,10 @@ class BevNode:
         points = []  # RViz에 시각화할 점들을 담을 리스트
         
         for detection in detections_msg.detections.detections:
-            # 임시로 person 클래스만 처리: detection.results에 저장된 id가 0인 경우만 사용
-            if not detection.results:
-                continue
-            if detection.results[0].id != 0:
-                continue
+            # if not detection.results:
+            #     continue
+            # if detection.results[0].id != 0:
+            #     continue
 
             bbox = detection.bbox
             u = bbox.center.x
@@ -102,12 +100,14 @@ class BevNode:
             rospy.loginfo("Person detection bottom (u,v): (%.2f, %.2f) -> Ground (X,Y): (%.2f, %.2f)", u, v, X, Y)
             # RViz에 추가할 점
             pt = Point()
-            pt.x = X
-            pt.y = Y
+            X = X * 10
+            Y = Y * 10
+            print(X,Y)
+            pt.x = Y
+            pt.y = -X
             pt.z = 0.0  # 지면 평면 상으로 가정
             points.append(pt)
 
-        # Marker 메시지 생성 (여러 점을 POINTS 형태로 시각화)
         marker = Marker()
         marker.header.frame_id = self.marker_frame
         marker.header.stamp = rospy.Time.now()
@@ -117,11 +117,9 @@ class BevNode:
         marker.action = Marker.ADD
         marker.pose.orientation.w = 1.0
 
-        # 점의 크기 설정
         marker.scale.x = 0.2
         marker.scale.y = 0.2
 
-        # 색상 설정 (예: 초록색)
         marker.color.a = 1.0
         marker.color.r = 0.0
         marker.color.g = 1.0
