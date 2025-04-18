@@ -1,6 +1,6 @@
 <launch>
   <!-- camera 토픽 이름을 설정할 수 있도록 arg 정의 (기본값: /camera/image_raw) -->
-  <arg name="camera_topic" default="/zed_node/left/image_rect_color"/>
+  <arg name="camera_topic" default="/cam/image_raw"/>
 
   <!-- config 파일 로드 -->
   <rosparam command="load" file="$(find bev_converter)/config/camera_params.yaml" />
