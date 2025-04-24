@@ -87,6 +87,33 @@ def ground_to_rviz(X, Y, scale_factor=1.0):
     
     return X_scaled, Y_scaled, X_old, Y_old
 
+def ground_to_image(X, Y, Z, camera_matrix, R, t):
+    """
+    지면 좌표를 이미지 좌표로 변환
+    ※ 호모그래피의 역방향 변환
+    """
+    # 지면 좌표 (3D)
+    world_point = np.array([[X], [Y], [Z], [1.0]])
+    
+    # 회전 및 이동 행렬
+    Rt = np.hstack((R, t.reshape(3, 1)))
+    
+    # 월드 좌표를 카메라 좌표로 변환
+    camera_point = np.dot(Rt, world_point)
+    
+    # 카메라 좌표를 이미지 좌표로 변환
+    if camera_point[2, 0] < 1e-10:  # Z가 0에 가까우면
+        return None
+    
+    # 이미지 평면에 투영
+    point_2d = np.dot(camera_matrix, camera_point[:3])
+    point_2d /= point_2d[2, 0]
+    
+    u = float(point_2d[0, 0])
+    v = float(point_2d[1, 0])
+    
+    return u, v
+
 def test_homography_with_grid():
     """
     그리드 패턴을 사용한 호모그래피 테스트
@@ -134,15 +161,16 @@ def test_homography_with_grid():
             rviz_points_new.append((X_rviz_new, Y_rviz_new))
             rviz_points_old.append((X_rviz_old, Y_rviz_old))
     
+    # 한글 폰트 문제 해결을 위해 영문만 사용
     # 그래프 그리기
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
     
     # 지면 좌표 (원본)
     X_points, Y_points = zip(*ground_points)
-    ax1.scatter(X_points, Y_points, c='blue', marker='.', label='지면 좌표')
-    ax1.set_title('원본 지면 좌표')
-    ax1.set_xlabel('X (카메라 전방)')
-    ax1.set_ylabel('Y (카메라 좌측)')
+    ax1.scatter(X_points, Y_points, c='blue', marker='.', label='Ground Coordinates')
+    ax1.set_title('Original Ground Coordinates')
+    ax1.set_xlabel('X (Camera Forward)')
+    ax1.set_ylabel('Y (Camera Left)')
     ax1.grid(True)
     ax1.axis('equal')
     
@@ -150,9 +178,9 @@ def test_homography_with_grid():
     X_new, Y_new = zip(*rviz_points_new)
     X_old, Y_old = zip(*rviz_points_old)
     
-    ax2.scatter(X_new, Y_new, c='green', marker='.', label='개선된 방식')
-    ax2.scatter(X_old, Y_old, c='red', marker='x', label='기존 방식')
-    ax2.set_title('RViz 좌표 비교')
+    ax2.scatter(X_new, Y_new, c='green', marker='.', label='Improved Method')
+    ax2.scatter(X_old, Y_old, c='red', marker='x', label='Original Method')
+    ax2.set_title('RViz Coordinate Comparison')
     ax2.set_xlabel('X (RViz)')
     ax2.set_ylabel('Y (RViz)')
     ax2.grid(True)
@@ -188,7 +216,7 @@ def test_homography_with_grid():
 
 def test_distance_accuracy():
     """
-    거리 정확도 테스트
+    거리 정확도 테스트 - 개선된 버전
     지면 위 특정 거리에 있는 객체의 좌표 변환 정확도 확인
     """
     camera_params = load_camera_params(config_path)
@@ -206,46 +234,89 @@ def test_distance_accuracy():
     # 이미지 중심선에서 다양한 거리에 있는 포인트 테스트
     test_distances = [1, 2, 3, 5, 10, 15, 20]  # 미터 단위
     
-    # 카메라 내부 파라미터
+    # 카메라 파라미터 추출
     fx = intrinsics.get("fx", 1.0)
     fy = intrinsics.get("fy", 1.0)
     cx = intrinsics.get("cx", 0.0)
     cy = intrinsics.get("cy", 0.0)
+    camera_matrix = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]])
+    
+    # 회전 및 이동 행렬
+    R_list = extrinsics.get("rotation", [1, 0, 0, 0, 1, 0, 0, 0, 1])
+    R = np.array(R_list).reshape(3, 3)
+    t_vec = np.array(extrinsics.get("translation", [0, 0, h]))
     
     # 결과 저장
     results = []
     
+    # 월드 좌표에서 이미지 좌표로의 변환 테스트
+    fig, ax = plt.subplots(figsize=(10, 6))
+    world_points = []
+    image_points = []
+    recovered_points = []
+    
     for dist in test_distances:
-        # 지면 좌표 (카메라 앞쪽 dist 미터 지점)
+        # 지면 좌표 (카메라 앞쪽 dist 미터 지점, Z=0 평면)
         X_ground = dist
-        Y_ground = 0
+        Y_ground = 0.0
+        Z_ground = 0.0  # 지면 평면
         
-        # 지면 좌표를 이미지 좌표로 역변환 (간단히 계산)
-        # 높이가 h인 경우, 거리 dist에 있는 지점은 이미지에서 v = cy + fy*h/dist 위치에 나타남
-        v_approx = cy + fy * h / dist
+        # 지면 좌표를 이미지 좌표로 변환
+        img_result = ground_to_image(X_ground, Y_ground, Z_ground, camera_matrix, R, t_vec)
+        if img_result is None:
+            print(f"Warning: Could not project point at distance {dist}m to image")
+            continue
+            
+        u, v = img_result
         
-        # 그 지점을 다시 지면 좌표로 변환
-        X_back, Y_back = image_to_ground(cx, v_approx, H_inv)
+        # 이미지 좌표를 다시 지면 좌표로 변환 (호모그래피 이용)
+        # 이 과정은 지면 좌표 -> 이미지 좌표 -> 지면 좌표 반복
+        X_back, Y_back = image_to_ground(u, v, H_inv)
         
-        # 거리 오차
-        distance_error = abs(X_back - dist)
-        error_percent = (distance_error / dist) * 100
+        # 거리 오차 계산
+        distance_error = abs(X_back - X_ground)
+        error_percent = (distance_error / dist) * 100.0 if dist > 0 else 0.0
         
+        # 그래프용 데이터 저장
+        world_points.append((X_ground, Y_ground))
+        image_points.append((u, v))
+        recovered_points.append((X_back, Y_back))
+        
+        # 결과 저장
         results.append({
-            'expected_dist': dist,
-            'image_v': v_approx,
+            'expected_dist': X_ground,
+            'image_coord': (u, v),
             'computed_dist': X_back,
             'error': distance_error,
             'error_percent': error_percent
         })
     
+    # 결과 그래프 생성
+    if world_points and recovered_points:
+        # 월드 좌표와 복원된 좌표 비교
+        world_x, world_y = zip(*world_points)
+        rec_x, rec_y = zip(*recovered_points)
+        
+        ax.scatter(world_x, world_y, color='blue', marker='o', label='Original World Points')
+        ax.scatter(rec_x, rec_y, color='red', marker='x', label='Recovered World Points')
+        ax.set_xlabel('X (meters)')
+        ax.set_ylabel('Y (meters)')
+        ax.set_title('Coordinate Transformation Accuracy')
+        ax.grid(True)
+        ax.legend()
+        
+        # 그래프 저장
+        output_dir = os.path.dirname(script_dir)
+        plt.savefig(os.path.join(output_dir, 'distance_accuracy_test.png'))
+    
     # 결과 출력
-    print("\n거리 정확도 테스트 결과:")
-    print("기대 거리(m) | 이미지 v좌표 | 계산된 거리(m) | 오차(m) | 오차(%)")
-    print("-" * 80)
+    print("\nDistance Accuracy Test Results:")
+    print("Expected Distance(m) | Image Coords (u,v) | Computed Distance(m) | Error(m) | Error(%)")
+    print("-" * 90)
     
     for r in results:
-        print(f"{r['expected_dist']:11.1f} | {r['image_v']:11.1f} | {r['computed_dist']:13.3f} | {r['error']:7.3f} | {r['error_percent']:7.2f}")
+        u, v = r['image_coord']
+        print(f"{r['expected_dist']:20.1f} | ({u:6.1f}, {v:6.1f}) | {r['computed_dist']:18.3f} | {r['error']:7.3f} | {r['error_percent']:7.2f}")
     
     # 스케일 팩터 계산 (카메라 높이 기준)
     scale_factor = 1.0 / h
