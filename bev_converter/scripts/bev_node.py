@@ -7,9 +7,6 @@ from visualization_msgs.msg import Marker
 from geometry_msgs.msg import Point
 # 필요한 import만 유지
 from ultralytics_ros.msg import YoloResult
-from cv_bridge import CvBridge
-
-bridge = CvBridge()
 
 class BevNode:
     def __init__(self):
@@ -32,7 +29,7 @@ class BevNode:
 
         self.h = self.extrinsics.get("translation", [0.0, 0.0, 0.45])[2]
 
-        self.marker_frame = rospy.get_param("~marker_frame", "map")
+        self.marker_frame = rospy.get_param("~marker_frame", "zed2i_base_link")
 
         self.image_sub = rospy.Subscriber(self.camera_topic, Image, self.image_callback)
         rospy.loginfo("Subscribed to camera topic: %s", self.camera_topic)
@@ -42,7 +39,6 @@ class BevNode:
         rospy.loginfo("Subscribed to YOLO topic: %s", self.yolo_topic)
 
         self.marker_pub = rospy.Publisher("~bev_marker", Marker, queue_size=10)
-        self.bev_image_pub = rospy.Publisher("~bev_image", Image, queue_size=10)
 
         self.H_inv = self.compute_homography_inv()
 
