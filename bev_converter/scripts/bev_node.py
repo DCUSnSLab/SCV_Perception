@@ -66,18 +66,34 @@ class BevNode:
         # 카메라 위치 및 방향 분석을 위한 로그
         rospy.loginfo("Camera rotation matrix:\n%s", R)
         
-        # 카메라가 지면을 향하는 각도 계산 (지면이 XY 평면이라고 가정)
-        # Z축을 기준으로 한 각도 (카메라가 지면을 바라보는 각도)
-        # 여기서는 카메라가 지면에 수직하다고 가정 (실제로는 측정이 필요)
-        # 필요시 여기에 추가 회전을 적용할 수 있음
+        # 회전 행렬이 단위 행렬인지 확인 (단위 행렬이면 카메라가 지면에 수직으로 설치되어 있다는 의미)
+        is_identity = np.allclose(R, np.eye(3))
+        rospy.loginfo("Camera rotation is identity matrix: %s", is_identity)
         
         # translation 벡터
         t_vec = np.array(self.extrinsics.get("translation", [0, 0, self.h]))
         rospy.loginfo("Camera height: %.2f meters", self.h)
         
+        # 
+        # 지면과 카메라 각도 고려: 실제 테스트에서는 카메라가 아래로 기울어져 있을 가능성이 높음
+        # 카메라가 아래로 기울어지는 각도 (pitch angle) 조정 - 이 값을 조정하여 테스트
+        pitch_angle_degrees = -15  # 카메라가 아래로 15도 기울어져 있다고 가정
+        pitch_angle_rad = np.radians(pitch_angle_degrees)
+        
+        # 새로운 회전 행렬 계산 (피치 각도 반영)
+        R_pitch = np.array([
+            [np.cos(pitch_angle_rad), 0, np.sin(pitch_angle_rad)],
+            [0, 1, 0],
+            [-np.sin(pitch_angle_rad), 0, np.cos(pitch_angle_rad)]
+        ])
+        
+        # 기존 회전과 피치 회전 적용
+        R_adjusted = np.dot(R, R_pitch)
+        rospy.loginfo("Adjusted rotation matrix with pitch angle %d degrees:\n%s", pitch_angle_degrees, R_adjusted)
+        
         # 호모그래피 행렬 구성: H = K * [r1, r2, t]
-        r1 = R[:, 0].reshape(3, 1)  # 첫 번째 열 벡터
-        r2 = R[:, 1].reshape(3, 1)  # 두 번째 열 벡터
+        r1 = R_adjusted[:, 0].reshape(3, 1)  # 첫 번째 열 벡터
+        r2 = R_adjusted[:, 1].reshape(3, 1)  # 두 번째 열 벡터
         t = t_vec.reshape(3, 1)     # 평행 이동 벡터
         
         H = np.dot(self.camera_matrix, np.hstack((r1, r2, t)))  # 결과: 3x3 행렬
@@ -104,50 +120,93 @@ class BevNode:
 
         points = []  # RViz에 시각화할 점들을 담을 리스트
         
+        # 고정된 2m 디버깅 마커 추가
+        debug_marker = Marker()
+        debug_marker.header.frame_id = self.marker_frame
+        debug_marker.header.stamp = rospy.Time.now()
+        debug_marker.ns = "debug_distance"
+        debug_marker.id = 1
+        debug_marker.type = Marker.POINTS
+        debug_marker.action = Marker.ADD
+        debug_marker.pose.orientation.w = 1.0
+        debug_marker.scale.x = 0.3
+        debug_marker.scale.y = 0.3
+        debug_marker.color.a = 1.0
+        debug_marker.color.r = 1.0
+        debug_marker.color.g = 0.0
+        debug_marker.color.b = 0.0
+        
+        # 2m 거리에 참조 마커 표시
+        debug_pt = Point()
+        debug_pt.x = 2.0  # 2미터 거리
+        debug_pt.y = 0.0  # 중앙
+        debug_pt.z = 0.0  # 지면 평면
+        debug_marker.points = [debug_pt]
+        
+        # 디버깅용 마커 게시
+        self.marker_pub.publish(debug_marker)
+        
         # 객체 감지 결과 처리
         try:
             for detection in detections_msg.detections.detections:
-                if not detection.results:
-                    continue
-                if detection.results[0].id != 0:
-                    continue
+                # 바운딩 박스 정보 추출
                 bbox = detection.bbox
                 
                 # 객체의 하단 중심점 좌표 (발 위치)
                 u = bbox.center.x
                 v = bbox.center.y + (bbox.size_y / 2.0)  # y 좌표 + 박스 높이의 절반 = 바닥
                 
-                # 카메라 왜곡 보정 (필요시 활성화)
-                # point_undistorted = cv2.undistortPoints(np.array([[[u, v]]], dtype=np.float32), 
-                #                                         self.camera_matrix, self.dist_coeffs)
-                # u_undistorted = point_undistorted[0][0][0]
-                # v_undistorted = point_undistorted[0][0][1]
-                # u, v = u_undistorted, v_undistorted
+                # 카메라 왜곡 보정 (활성화)
+                point_distorted = np.array([[[u, v]]], dtype=np.float32)
+                point_undistorted = cv2.undistortPoints(point_distorted, self.camera_matrix, self.dist_coeffs, P=self.camera_matrix)
+                u_undistorted = point_undistorted[0][0][0]
+                v_undistorted = point_undistorted[0][0][1]
+                
+                # 디버깅: 왜곡 보정 전/후 비교
+                rospy.loginfo("Image coordinate before undistortion: (%.2f, %.2f) -> after: (%.2f, %.2f)", 
+                             u, v, u_undistorted, v_undistorted)
+                
+                # 왜곡이 보정된 좌표 사용
+                u, v = u_undistorted, v_undistorted
                 
                 # 호모그래피를 적용하여 이미지 좌표 (u,v)를 월드 좌표 (X, Y)로 변환
                 X, Y = self.image_to_ground(u, v, self.H_inv)
                 
-                # 카메라 높이를 기반으로 스케일 조정
-                # 테스트 결과에서 얻은 적절한 스케일 팩터 적용
-                scale_factor = 2.222  # 테스트를 통해 확인된 적절한 값
-                X_scaled = X * scale_factor
-                Y_scaled = Y * scale_factor
+                # 거리 계산 (지면 평면상의 직선 거리)
+                distance = np.sqrt(X*X + Y*Y)
                 
-                rospy.loginfo("Detection at (u,v): (%.2f, %.2f) -> Ground (X,Y): (%.2f, %.2f) -> Scaled: (%.2f, %.2f)", 
-                            u, v, X, Y, X_scaled, Y_scaled)
+                # Y 좌표가 더 큰 것을 확인했으므로, 좌표계 교환
+                # 전방 거리를 Y좌표로 표현하고, X는 좌우 위치를 의미
+                X_adjusted = Y  # 좌우 위치
+                Y_adjusted = X  # 전방 거리
+                
+                # 원래 좌표와 조정된 좌표 값 확인
+                rospy.loginfo("Original Ground Coord: (%.2f, %.2f), Distance: %.2f -> Swapped: (%.2f, %.2f)", 
+                             X, Y, distance, X_adjusted, Y_adjusted)
+                
+                # 스케일 조정
+                scale_factor = 2.0  # 실제 거리에 맞게 조정 (200cm = 2.0)
+                X_scaled = X_adjusted * scale_factor
+                Y_scaled = Y_adjusted * scale_factor
+                
+                rospy.loginfo("Detection at (u,v): (%.2f, %.2f) -> Ground: (%.2f, %.2f) -> Final: (%.2f, %.2f)", 
+                              u, v, X, Y, X_scaled, Y_scaled)
                 
                 # RViz 좌표계로 변환 (ROS 좌표계 규칙에 맞게)
                 pt = Point()
-                # X: 카메라로부터의 전방 거리, Y: 카메라로부터 좌측 거리
-                pt.x = X_scaled  # X는 RViz에서 전방(forward) 방향
-                pt.y = Y_scaled  # Y는 RViz에서 좌측(left) 방향
-                pt.z = 0.0       # 지면 평면 상으로 가정
+                # 표준 ROS 좌표계: x=전방, y=좌측, z=위쪽
+                pt.x = Y_scaled  # 전방 거리
+                pt.y = X_scaled  # 좌우 위치
+                pt.z = 0.0       # 지면 평면
                 points.append(pt)
                 
         except Exception as e:
             rospy.logerr("Error processing detection: %s", str(e))
+            import traceback
+            rospy.logerr(traceback.format_exc())
             return
 
+        # 감지 결과 마커 생성
         marker = Marker()
         marker.header.frame_id = self.marker_frame
         marker.header.stamp = rospy.Time.now()
