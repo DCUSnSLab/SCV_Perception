@@ -111,7 +111,10 @@ class BevNode:
         # 객체 감지 결과 처리
         try:
             for detection in detections_msg.detections.detections:
-                # 바운딩 박스 정보 추출
+                if not detection.results:
+                    continue
+                if detection.results[0].id != 0:
+                    continue
                 bbox = detection.bbox
                 
                 # 객체의 하단 중심점 좌표 (발 위치)
