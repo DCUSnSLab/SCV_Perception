@@ -68,31 +68,23 @@ class DepthAnythingNode:
     def infer_once(self):
         if self.image_msg is None:
             return
-
-        t0 = time.perf_counter()           # ⬅ 시작 시각
-
         # 1) ROS → numpy (RGB)
+        t0 = time.perf_counter() 
         img = self.bridge.imgmsg_to_cv2(self.image_msg, desired_encoding="rgb8")
         orig_h, orig_w = img.shape[:2]
-
-        # 2) 전처리 & 입력 버퍼 복사
-        img_processed = preprocess(img).ravel()
+        # 2) 전처리 & 입력 버퍼 복사# 8ms
+        img_processed = preprocess(img).ravel() 
         np.copyto(self.h_input, img_processed)
-
         # 3) Host → Device
         cuda.memcpy_htod_async(self.d_input, self.h_input, self.stream)
-
         # 4) 텐서 주소 등록
         self.context.set_tensor_address(self.input_name,  int(self.d_input))
         self.context.set_tensor_address(self.output_name, int(self.d_output))
-
         # 5) 비동기 추론
         self.context.execute_async_v3(stream_handle=self.stream.handle)
-
         # 6) Device → Host
         cuda.memcpy_dtoh_async(self.h_output, self.d_output, self.stream)
         self.stream.synchronize()
-
         # 7) 후처리 & 퍼블리시
         depth = self.h_output.reshape(self.output_shape).squeeze() * self.depth_scale
         depth = cv2.resize(depth, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
