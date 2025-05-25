@@ -1,0 +1,23 @@
+<launch>
+  <arg name="namespace" default="depth_anything" />
+  <arg name="input_image" default="/zed_node/left/image_rect_color"/>
+  <arg name="input_depth" default="/depth_anything/depth_registered/image_rect"/>
+  <arg name="output_cloud" default="/$(arg namespace)/depth_registered/points" />
+  <arg name="camera_info" default="/zed_node/left/camera_info"/>
+  <arg name="model" default="vits"/>
+  <arg name="model_path" default="$(find depth_anything)/trained_data/depth_anything_v2_metric_hypersim_$(arg model).engine"/>
+  <arg name="depth_scale" default="0.5"/>
+  <arg name="nodelet_manager" value="nodelet_manager" />
+
+  <!-- depth_estimation -->
+  <group ns="$(arg namespace)">
+    <node name="depth_estimation" pkg="depth_anything" type="depth_estimation_node.py" output="screen" >
+      <remap from="~input_image" to="$(arg input_image)" />
+      <remap from="~depth_registered/image_rect" to="$(arg input_depth)" />
+      <rosparam subst_value="true" >
+        model_path: $(arg model_path)
+        depth_scale: $(arg depth_scale)
+      </rosparam>
+    </node>
+  </group>
+</launch>

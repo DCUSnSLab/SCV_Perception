@@ -17,7 +17,7 @@
   <arg name="result_labels" default="true"/>
   <arg name="result_boxes" default="true"/>
 
-  <node name="tracker_node" pkg="ultralytics_ros" type="camera_det_node.py" output="screen">
+  <node name="tracker_node" pkg="ultralytics_ros" type="seg_model_run.py" output="screen">
     <param name="yolo_model" value="$(arg yolo_model)"/>
     <param name="input_topic" value="$(arg input_topic)"/>
     <param name="result_topic" value="$(arg result_topic)"/>
