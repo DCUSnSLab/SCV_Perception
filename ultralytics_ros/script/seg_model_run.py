@@ -10,7 +10,7 @@ from sensor_msgs.msg import Image
 from ultralytics import YOLO
 from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 from ultralytics_ros.msg import YoloResult
-
+import time
 
 class TrackerNode:
     def __init__(self):
@@ -54,6 +54,7 @@ class TrackerNode:
 
     # ───────────────────────────────────────────────────────────────────────────
     def image_callback(self, msg):
+        t0 = time.perf_counter() 
         cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
 
         results = self.model.predict(
@@ -84,6 +85,8 @@ class TrackerNode:
             seg_mask_msg = self.create_combined_mask_image(results, msg.header)
             if seg_mask_msg is not None:
                 self.seg_mask_pub.publish(seg_mask_msg)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0   # ⬅ 경과 시간(ms)
+        rospy.loginfo_throttle(1.0, f"[ultralytics] 1 frame = {elapsed_ms:.1f} ms")
 
     # ───────────────────────────────────────────────────────────────────────────
     # helpers
