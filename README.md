@@ -1,4 +1,4 @@
-# SCV Perceptio) 시스템을 위한 ROS 패키지
+# SCV Perception 시스템을 위한 ROS 패키지
 ---
 
 ## 카메라 센서
