@@ -28,16 +28,15 @@ TrackerWithCloudNode::TrackerWithCloudNode() : pnh_("~")
   pnh_.param<float>("voxel_leaf_size", voxel_leaf_size_, 0.5);
   pnh_.param<int>("min_cluster_size", min_cluster_size_, 100);
   pnh_.param<int>("max_cluster_size", max_cluster_size_, 25000);
-
   detection_cloud_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("detection_cloud", 1);
   detection3d_pub_ = nh_.advertise<vision_msgs::Detection3DArray>(yolo_3d_result_topic_, 1);
   marker_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("detection_marker", 1);
   raw_point_pub_ = nh_.advertise<sensor_msgs::PointCloud2>("point_test", 1);
 
-  camera_info_sub_.subscribe(nh_, camera_info_topic_, 10);
-  lidar_sub_.subscribe(nh_, lidar_topic_, 10);
-  yolo_result_sub_.subscribe(nh_, yolo_result_topic_, 10);
-  sync_ = boost::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(10);
+  camera_info_sub_.subscribe(nh_, camera_info_topic_, 30);
+  lidar_sub_.subscribe(nh_, lidar_topic_, 30);
+  yolo_result_sub_.subscribe(nh_, yolo_result_topic_, 30);
+  sync_ = boost::make_shared<message_filters::Synchronizer<ApproximateSyncPolicy>>(100);
   sync_->connectInput(camera_info_sub_, lidar_sub_, yolo_result_sub_);
   sync_->registerCallback(boost::bind(&TrackerWithCloudNode::syncCallback, this, _1, _2, _3));
 
@@ -50,12 +49,13 @@ void TrackerWithCloudNode::syncCallback(const sensor_msgs::CameraInfo::ConstPtr&
                                         const ultralytics_ros::YoloResultConstPtr& yolo_result_msg)
 {
   ROS_INFO("test");
+  printf("start");
   ros::Time current_call_time = ros::Time::now();
   ros::Duration callback_interval = current_call_time - last_call_time_;
   last_call_time_ = current_call_time;
   pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZ>);
   downsampled_cloud = downsampleCloudMsg(cloud_msg);
-
+  cam_model_.fromCameraInfo(camera_info_msg);
   pcl::PointCloud<pcl::PointXYZ>::Ptr transformed_cloud;
   transformed_cloud = cloud2TransformedCloud(downsampled_cloud, cloud_msg->header.frame_id, cam_model_.tfFrame(),
                                              cloud_msg->header.stamp);
@@ -63,7 +63,7 @@ void TrackerWithCloudNode::syncCallback(const sensor_msgs::CameraInfo::ConstPtr&
   sensor_msgs::PointCloud2 detection_cloud_msg;
   visualization_msgs::MarkerArray marker_array_msg;
 
-  cam_model_.fromCameraInfo(camera_info_msg);
+  
   projectCloud(transformed_cloud, yolo_result_msg, cloud_msg->header, detections3d_msg, detection_cloud_msg);
   marker_array_msg = createMarkerArray(detections3d_msg, callback_interval.toSec());
 
@@ -299,7 +299,7 @@ TrackerWithCloudNode::createMarkerArray(const vision_msgs::Detection3DArray& det
 int main(int argc, char** argv)
 {
   ros::init(argc, argv, "tracker_with_cloud_node");
-  printf("Hello, world!\n");
+  printf("Hello, world!!!\n");
   TrackerWithCloudNode node;
   ros::spin();
 }

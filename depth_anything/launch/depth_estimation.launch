@@ -1,0 +1,48 @@
+<launch>
+  <arg name="namespace" default="depth_anything" />
+  <arg name="input_image" default="/zed_node/left/image_rect_color"/>
+  <arg name="input_depth" default="/depth_anything/depth_registered/image_rect"/>
+  <arg name="output_cloud" default="/$(arg namespace)/depth_registered/points" />
+  <arg name="camera_info" default="/zed_node/left/camera_info"/>
+  <arg name="model" default="vits"/>
+  <arg name="model_path" default="$(find depth_anything_ros)/trained_data/depth_anything_v2_metric_hypersim_$(arg model).engine"/>
+  <arg name="depth_scale" default="0.5"/>
+
+  <arg name="nodelet_manager" value="nodelet_manager" />
+
+  <!-- depth_estimation -->
+  <group ns="$(arg namespace)">
+    <!-- nodelet manager -->
+    <node name="nodelet_manager" pkg="nodelet" type="nodelet" args="manager"
+          respawn="true"
+          output="screen" />
+    <!-- depth anything -->
+    <node name="depth_estimation" pkg="depth_anything_ros" type="depth_estimation_node" output="screen" >
+      <remap from="~input_image" to="$(arg input_image)" />
+      <remap from="~depth_registered/image_rect" to="$(arg input_depth)" />
+      <rosparam subst_value="true" >
+        model_path: $(arg model_path)
+        depth_scale: $(arg depth_scale)
+      </rosparam>
+    </node>
+
+    <node name="depth_correction_node" pkg="depth_anything_ros" type="depth_correction.py" output="screen">
+    </node>
+
+    <!-- depth_to_points_node -->
+    <node name="depth_to_points_node" pkg="depth_anything_ros" type="depth_to_points.py" output="screen">
+      <!-- 필요 시 파라미터 조정 -->
+      <param name="use_rgb" value="false"/>
+      <param name="queue_size" value="2"/>
+      <param name="sync_slop"  value="0.05"/>
+
+      <!-- 만약 실제 토픽 이름이 다르면 remap -->
+      <remap from="/camera/depth/image_rect"      to="$(arg input_depth)" />
+      <remap from="/camera/depth/camera_info"     to="$(arg camera_info)" />
+      <remap from="/camera/rgb/image_rect_color"  to="$(arg input_image)" />
+      <remap from="/depth/points"                to="/pointcloud_xyzrgb" />
+    </node>
+  </group>
+
+</launch>
+        <!-- header.frame_id = "zed2i_left_camera_frame"  # Set the frame_id -->
