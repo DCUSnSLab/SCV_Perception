@@ -35,7 +35,7 @@ class ObjectDepthTracker:
 
         self.marker_pub = rospy.Publisher(
             "tracked_points", MarkerArray, queue_size=2)
-        filter_name = rospy.get_param("~filter_type", "centroid")  # 또는 kalman6d
+        filter_name = rospy.get_param("~filter_type", "kalman_6d_v2")
         self.tracker = build_filter(filter_name)
         rospy.loginfo("Using filter: %s", filter_name)
         rospy.loginfo("Tracker ready  (track ids=%s)", self.track_ids)
@@ -48,6 +48,7 @@ class ObjectDepthTracker:
 
         depth = self.bridge.imgmsg_to_cv2(depth_msg, "32FC1")
         stamp = depth_msg.header.stamp
+        stamp_sec = depth_msg.header.stamp.to_sec()
         frame = depth_msg.header.frame_id or "zed_left_camera"
 
         marker_arr = MarkerArray()
@@ -92,28 +93,57 @@ class ObjectDepthTracker:
             mk.pose.orientation.w = 1.0
             mk.scale.x = mk.scale.y = mk.scale.z = 0.15
             mk.color.r, mk.color.g, mk.color.b, mk.color.a = 0.0, 0.8, 1.0, 0.8
-            marker_arr.markers.append(mk)
             measurements.append((np.array([X,Y,Z]), cls_id))
             
-        tracks = self.tracker.update(measurements, stamp)
+        tracks = self.tracker.update(measurements, stamp_sec)
+        # print(tracks)
         marker_arr = self.to_markers(tracks, stamp, frame)
         self.marker_pub.publish(marker_arr)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0   # ⬅ 경과 시간(ms)
-        rospy.loginfo_throttle(1.0, f"[obj_depth_tracker] 1 frame = {elapsed_ms:.1f} ms")
+        # rospy.loginfo_throttle(1.0, f"[obj_depth_tracker] 1 frame = {elapsed_ms:.1f} ms")
 
     def to_markers(self, tracks, stamp, frame):
         arr = MarkerArray()
+
+        # 1) 이전 마커 전부 삭제
+        clear = Marker()
+        clear.header.stamp = stamp
+        clear.header.frame_id = frame
+        clear.action = Marker.DELETEALL
+        arr.markers.append(clear)
+
+        # 2) 현재 트랙에 대해 ADD
         for trk in tracks:
+            # 구체 표시
             m = Marker()
             m.header.stamp = stamp
             m.header.frame_id = frame
             m.ns = "tracked_pts"; m.id = trk.id
-            m.type, m.action = Marker.SPHERE, Marker.ADD
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
             m.pose.position.x, m.pose.position.y, m.pose.position.z = trk.xyz
             m.pose.orientation.w = 1.0
             m.scale.x = m.scale.y = m.scale.z = 0.15
-            m.color.r, m.color.g, m.color.b, m.color.a = 0.,.8,1.,.8
+            m.color.r, m.color.g, m.color.b, m.color.a = 0., .8, 1., .8
             arr.markers.append(m)
+
+            # ID 텍스트 표시
+            txt = Marker()
+            txt.header.stamp = stamp
+            txt.header.frame_id = frame
+            txt.ns = "track_id"; txt.id = trk.id
+            txt.type = Marker.TEXT_VIEW_FACING
+            txt.action = Marker.ADD
+            x, y, z = trk.xyz
+            txt.pose.position.x = x
+            txt.pose.position.y = y
+            txt.pose.position.z = z + 0.2
+            txt.pose.orientation.w = 1.0
+            txt.scale.z = 0.2
+            txt.color.r = txt.color.g = txt.color.b = txt.color.a = 1.0
+            txt.text = str(trk.id)
+            arr.markers.append(txt)
+
         return arr
 
 # ----------------------------------------------------------------------
