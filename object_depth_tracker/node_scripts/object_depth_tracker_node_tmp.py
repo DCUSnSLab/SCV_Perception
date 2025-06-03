@@ -6,7 +6,7 @@ import time
 from cv_bridge import CvBridge
 
 from sensor_msgs.msg import Image, CameraInfo
-from visualization_msgs.msg import Marker, MarkerArray, Odometry
+from visualization_msgs.msg import Marker, MarkerArray
 from ultralytics_ros.msg import YoloResult           # ← ultralytics_ros 패키지
 from filters import build as build_filter       
 
@@ -38,7 +38,7 @@ class ObjectDepthTracker:
 
         self.marker_pub = rospy.Publisher(
             "tracked_points", MarkerArray, queue_size=2)
-        self.odom_pub   = rospy.Publisher("tracked_odom",   Odometry,    queue_size=20)
+        
         
         rospy.loginfo("Using filter: %s", filter_name)
         rospy.loginfo("Tracker ready  (track ids=%s)", self.track_ids)

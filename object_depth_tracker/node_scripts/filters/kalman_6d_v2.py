@@ -28,7 +28,7 @@ class Filter:
     def __init__(self,
                  process_var: float = 1e-2,
                  meas_var:    float = 1e-1,
-                 dist_thresh: float = 1.0,
+                 dist_thresh: float = 2.0,
                  max_age:     float = 2.0):
         self.tracks      = []
         self.Q           = np.eye(6) * process_var
