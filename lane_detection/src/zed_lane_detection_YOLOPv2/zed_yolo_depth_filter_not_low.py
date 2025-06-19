@@ -99,11 +99,11 @@ class PublishMaskedDepth:
 
 def make_parser():
     parser = argparse.ArgumentParser()
-    #parser.add_argument('--weights', nargs='+', type=str, default='/home/ssc/SSC/src/perception/src/lane_detection/zed_lane_detection_YOLOPv2/data/weights/yolopv2.pt', help='model.pt path(s)')
-    parser.add_argument('--weights', nargs='+', type=str, default='/home/scv/SCV/src/scv_system/SCV_Perception/lane_detection/src/zed_lane_detection_YOLOPv2/yolopv2.pt', help='model.pt path(s)')
+    parser.add_argument('--weights', nargs='+', type=str, default='/home/scv/SCV_P_ws/src/SCV_Perception/lane_detection/src/zed_lane_detection_YOLOPv2/data/weights/bae.pt', help='model.pt path(s)')
+    #parser.add_argument('--weights', nargs='+', type=str, default='/home/scv/SCV/src/scv_system/SCV_Perception/lane_detection/src/zed_lane_detection_YOLOPv2/yolopv2.pt', help='model.pt path(s)')
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--topic-name', type=str, default='/zed2/zed_node/left/image_rect_color/compressed', help='name of the topic to read images from')
+    parser.add_argument('--topic-name', type=str, default='/zed_node/left/image_rect_color', help='name of the topic to read images from')
     parser.add_argument('--depth-topic-name', type=str, default='/zed_node/depth/depth_registered', help='name of the depth topic to read images from')
     parser.add_argument('--camera-info-topic-name', type=str, default='/zed_node/depth/camera_info', help='name of the camera info topic to read from')
     return parser
@@ -132,42 +132,59 @@ def detect():
         model.half()  # FP16으로 변환
     model.eval()
 
-    dataset = LoadImagesFromBag(opt.topic_name, opt.depth_topic_name, opt.camera_info_topic_name, img_size=imgsz, stride=stride)
-
+    dataset = LoadImagesFromBag(
+        opt.topic_name,
+        opt.depth_topic_name,
+        opt.camera_info_topic_name,
+        img_size=opt.img_size,
+        stride=32
+    )
     publisher = PublishMaskedDepth()
 
-    if device.type != 'cpu':
-        model(torch.zeros(1, 3, imgsz, imgsz).to(device).type_as(next(model.parameters())))
-    t0 = time.time()
+    for img_resized, img_orig, depth_img, camera_info in dataset:
+        # 1) 모델 입력 전처리
+        img_t = torch.from_numpy(img_resized).to(device)
+        img_t = img_t.permute(2, 0, 1)
+        img_t = img_t.half() if half else img_t.float()
+        img_t /= 255.0
+        if img_t.ndimension() == 3:
+            img_t = img_t.unsqueeze(0)
 
-    for img, im0s, depth_img, camera_info in dataset: # resize, 원본, depth 원본, info
-        img = torch.from_numpy(img).to(device)
-        img = img.permute(2, 0, 1)
-        img = img.half() if half else img.float()
-        img /= 255.0
+        # 2) ll 마스크만 추출 & 채널 선택
+        ll = model(img_t)
+        print(ll)                             # Tensor([1, 2, H, W])
+        ll_np = ll.squeeze().cpu().numpy()            # → ndarray shape (2, H, W)
 
-        if img.ndimension() == 3:
-            img = img.unsqueeze(0)
+        # 채널 1을 lane-line 마스크로 사용 (필요에 따라 0 또는 1 선택)
+        ll_channel = ll_np[1]                         # → shape (H, W)
 
-        t1 = time_synchronized()
-        [pred, anchor_grid], seg, ll = model(img)
-        t2 = time_synchronized()
+        # 이진화
+        ll_bin = (ll_channel > 0.5).astype(np.uint8)  # → shape (H, W)
 
-        da_seg_mask = driving_area_mask(seg)
-        ll_seg_mask = lane_line_mask(ll)
+        # 3) 원본 크기로 리사이즈
+        h, w = img_orig.shape[:2]
+        if h == 0 or w == 0:
+            rospy.logwarn(f"Invalid img_orig size: {h}×{w}, skipping frame")
+            continue
 
-        # da, ll 겹치는 부분 제거 및 depth 이미지 1ㄷ1 매칭
-        ll_only_mask = np.where(da_seg_mask == 1, 0, ll_seg_mask)
-        # ll_only_mask = dataset.apply_low_pass_filter(ll_only_mask)
-        ll_only_mask_resized = cv2.resize(ll_only_mask, (depth_img.shape[1], depth_img.shape[0]), interpolation=cv2.INTER_NEAREST)
-        mask = ll_only_mask_resized * 255
-        masked_depth = apply_mask_to_depth(depth_img, mask)
+        ll_resized = cv2.resize(
+            ll_bin, (w, h),
+            interpolation=cv2.INTER_NEAREST
+        )
 
-        # 디텍션 확인을 위한 이미지 생성
-        ll_only_mask_colored = np.zeros_like(im0s)
-        ll_only_mask_colored[ll_only_mask == 1] = [0, 255, 0]
-        lane_det_img = cv2.addWeighted(im0s, 1, ll_only_mask_colored, 0.8, 0)
-        publisher.publish(masked_depth, camera_info, lane_det_img)
+        # 4) 컬러 오버레이
+        mask_color = np.zeros_like(img_orig)
+        mask_color[ll_resized == 1] = [255, 0, 0]
+        lane_det_img = cv2.addWeighted(img_orig, 0.0, mask_color, 1.0, 0)
+
+        # 5) 퍼블리시
+        try:
+            lane_msg = publisher.bridge.cv2_to_imgmsg(lane_det_img, encoding="bgr8")
+            lane_msg.header.stamp = rospy.Time.now()
+            lane_msg.header.frame_id = camera_info.header.frame_id
+            publisher.lane_det_img_pub.publish(lane_msg)
+        except CvBridgeError as e:
+            rospy.logerr(f"Error publishing lane image: {e}")
 
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
