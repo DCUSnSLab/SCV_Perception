@@ -4,7 +4,7 @@ from sensor_msgs.msg import Image, CameraInfo, PointCloud2
 import sensor_msgs.point_cloud2 as pc2
 from cv_bridge import CvBridge, CvBridgeError
 from threading import Lock
-
+import cv2
 
 class DepthToPointCloud:
     def __init__(self):
@@ -17,6 +17,7 @@ class DepthToPointCloud:
                                       "/zed_node/left/camera_info")
         self.use_rgb = rospy.get_param("~use_rgb", True)
         self.debug   = rospy.get_param("~debug", False)
+        self.scale   = rospy.get_param("~scale", 0.5)
         # --------------------------------
 
         self.bridge = CvBridge()
@@ -68,13 +69,30 @@ class DepthToPointCloud:
         except CvBridgeError as e:
             rospy.logerr(f"[bridge depth] {e}")
             return
+        if self.scale < 1.0:
+            new_h = int(depth.shape[0] * self.scale)
+            new_w = int(depth.shape[1] * self.scale)
 
-        if self.debug:
-            self._print_stats(msg, depth)
+            depth = cv2.resize(depth, (new_w, new_h), cv2.INTER_NEAREST)
 
-        # 포인트클라우드 생성 & 발행
-        pc_msg = self._make_cloud(msg.header, depth, self.K,
-                                  self.rgb_img if self.use_rgb else None)
+            if self.use_rgb:
+                rgb = cv2.resize(self.rgb_img, (new_w, new_h),
+                                cv2.INTER_LINEAR)
+            else:
+                rgb = None
+
+            # K 스케일 조정
+            with self.K_lock:
+                K_scaled = self.K.copy()
+            K_scaled[0, 0] *= self.scale   # fx
+            K_scaled[1, 1] *= self.scale   # fy
+            K_scaled[0, 2] *= self.scale   # cx
+            K_scaled[1, 2] *= self.scale   # cy
+        else:
+            rgb = self.rgb_img if self.use_rgb else None
+            K_scaled = self.K
+
+        pc_msg = self._make_cloud(msg.header, depth, K_scaled, rgb)
         self.pub_pc.publish(pc_msg)
 
         # 타이머 종료 및 로그
