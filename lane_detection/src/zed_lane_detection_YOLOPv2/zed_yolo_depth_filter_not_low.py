@@ -99,13 +99,13 @@ class PublishMaskedDepth:
 
 def make_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', nargs='+', type=str, default='/home/scv/SCV_P_ws/src/SCV_Perception/lane_detection/src/zed_lane_detection_YOLOPv2/data/weights/bae.pt', help='model.pt path(s)')
+    parser.add_argument('--weights', nargs='+', type=str, default='/home/ssc/SCV_Perception_ws/src/SCV_Perception/lane_detection/src/zed_lane_detection_YOLOPv2/data/weights/test.pt', help='model.pt path(s)')
     #parser.add_argument('--weights', nargs='+', type=str, default='/home/scv/SCV/src/scv_system/SCV_Perception/lane_detection/src/zed_lane_detection_YOLOPv2/yolopv2.pt', help='model.pt path(s)')
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
     parser.add_argument('--topic-name', type=str, default='/zed_node/left/image_rect_color', help='name of the topic to read images from')
     parser.add_argument('--depth-topic-name', type=str, default='/zed_node/depth/depth_registered', help='name of the depth topic to read images from')
-    parser.add_argument('--camera-info-topic-name', type=str, default='/zed_node/depth/camera_info', help='name of the camera info topic to read from')
+    parser.add_argument('--camera-info-topic-name', type=str, default='/zed_node/left/camera_info', help='name of the camera info topic to read from')
     return parser
 
 def signal_handler(sig, frame):
@@ -175,7 +175,7 @@ def detect():
         # 4) 컬러 오버레이
         mask_color = np.zeros_like(img_orig)
         mask_color[ll_resized == 1] = [255, 0, 0]
-        lane_det_img = cv2.addWeighted(img_orig, 0.0, mask_color, 1.0, 0)
+        lane_det_img = cv2.addWeighted(img_orig, 0.5, mask_color, 1.0, 0)
 
         # 5) 퍼블리시
         try:

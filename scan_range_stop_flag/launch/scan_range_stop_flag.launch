@@ -1,0 +1,16 @@
+<launch>
+  <!-- 원하는 ROI 및 스캔 토픽 지정 -->
+  <node name="scan_range_stop_flag"
+        pkg="scan_range_stop_flag"
+        type="scan_range_stop_flag_node.py"
+        output="screen">
+
+    <!-- ROI 파라미터 -->
+    <param name="x_min"      value="0.60" />
+    <param name="x_max"      value="0.70" />
+    <param name="y_abs"      value="0.70" />
+
+    <!-- 스캔 토픽 이름 -->
+    <param name="scan_topic" value="/scan" />
+  </node>
+</launch>
