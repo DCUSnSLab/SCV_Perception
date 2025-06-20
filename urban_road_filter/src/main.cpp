@@ -2,8 +2,8 @@
 
 /*parameter setup*/
 void paramsCallback(urban_road_filter::LidarFiltersConfig &config, uint32_t level){
-    params::fixedFrame = config.fixed_frame;
-    params::topicName = config.topic_name;
+    params::fixedFrame = "velodyne";
+    params::topicName = "/velodyne_points";
     params::x_zero_method = config.x_zero_method;
     params::z_zero_method = config.z_zero_method;
     params::star_shaped_method  = config.star_shaped_method ;

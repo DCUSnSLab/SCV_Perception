@@ -103,7 +103,7 @@ def make_parser():
     parser.add_argument('--weights', nargs='+', type=str, default='/home/scv/SCV/src/scv_system/SCV_Perception/lane_detection/src/zed_lane_detection_YOLOPv2/yolopv2.pt', help='model.pt path(s)')
     parser.add_argument('--img-size', type=int, default=640, help='inference size (pixels)')
     parser.add_argument('--device', default='0', help='cuda device, i.e. 0 or 0,1,2,3 or cpu')
-    parser.add_argument('--topic-name', type=str, default='/zed2/zed_node/left/image_rect_color/compressed', help='name of the topic to read images from')
+    parser.add_argument('--topic-name', type=str, default='/zed_node/left/image_rect_color', help='name of the topic to read images from')
     parser.add_argument('--depth-topic-name', type=str, default='/zed_node/depth/depth_registered', help='name of the depth topic to read images from')
     parser.add_argument('--camera-info-topic-name', type=str, default='/zed_node/depth/camera_info', help='name of the camera info topic to read from')
     return parser
