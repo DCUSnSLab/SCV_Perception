@@ -1,9 +1,9 @@
 <launch>
   <arg name="namespace" default="depth_anything" />
-  <arg name="input_image" default="/zed_node/left/image_rect_color"/>
+  <arg name="input_image" default="/cam/image_raw"/>
   <arg name="input_depth" default="/depth_anything/depth_registered/image_rect"/>
   <arg name="output_cloud" default="/$(arg namespace)/depth_registered/points" />
-  <arg name="camera_info" default="/zed_node/left/camera_info"/>
+  <arg name="camera_info" default="/cam/camera_info"/>
   <arg name="model" default="vits"/>
   <arg name="model_path" default="$(find depth_anything)/trained_data/depth_anything_v2_metric_hypersim_$(arg model).engine"/>
   <arg name="depth_scale" default="0.5"/>
