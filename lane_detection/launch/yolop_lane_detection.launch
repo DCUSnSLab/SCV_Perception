@@ -1,0 +1,41 @@
+<?xml version="1.0"?>
+<launch>
+    <!-- Lane-line-only YOLOP ROS node -->
+
+    <!-- ───── 기본 인자 ───── -->
+    <arg name="node_name"          default="lane_line_node"/>
+    <arg name="weights_path"       default="$(find lane_detection)/weights/06_27.pth"/>
+    <arg name="device"             default="cuda:0"/>   <!-- GPU 사용 시 -->
+    <arg name="img_size"           default="640"/>
+
+    <!-- 카메라 설정 -->
+    <arg name="camera_topic"       default="/ardu_cam_link/image_undistorted"/>
+    <arg name="use_compressed"     default="false"/>
+
+    <!-- 디버그(첫 프레임 지연 로그) -->
+    <arg name="debug"              default="false"/>
+
+    <!-- 표준 roslaunch 옵션 -->
+    <arg name="output"             default="screen"/>
+    <arg name="launch_prefix"      default=""/>
+
+    <!-- ───── 노드 실행 ───── -->
+    <node name="$(arg node_name)"
+          pkg="lane_detection"
+          type="yolop_lane_detection.py"
+          output="$(arg output)"
+          launch-prefix="$(arg launch_prefix)">
+
+        <!-- 필수 파라미터 -->
+        <param name="weights_path"  value="$(arg weights_path)"/>
+        <param name="device"        value="$(arg device)"/>
+        <param name="img_size"      value="$(arg img_size)"/>
+
+        <!-- 카메라 -->
+        <param name="camera_topic"  value="$(arg camera_topic)"/>
+        <param name="use_compressed" value="$(arg use_compressed)"/>
+
+        <!-- 디버그 -->
+        <param name="debug"         value="$(arg debug)"/>
+    </node>
+</launch>

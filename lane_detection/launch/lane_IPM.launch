@@ -1,0 +1,78 @@
+<?xml version="1.0"?>
+<launch>
+
+    <!-- ───── 공통 인자 ───── -->
+    <arg name="output"         default="screen"/>
+    <arg name="launch_prefix"  default=""/>
+
+    <!-- ───── YOLOP lane-line 노드 인자 ───── -->
+    <arg name="node_name"      default="lane_line_node"/>
+    <arg name="weights_path"   default="$(find lane_detection)/weights/06_27.pth"/>
+    <arg name="device"         default="cuda:0"/>
+    <arg name="img_size"       default="640"/>
+
+    <!-- 카메라 -->
+    <arg name="camera_topic"   default="/ardu_cam_link/image_undistorted"/>
+    <arg name="use_compressed" default="false"/>
+    <arg name="debug"          default="false"/>
+
+    <!-- ───── IPM → LaserScan 노드 인자 ───── -->
+    <!-- 카메라 외부 파라미터 -->
+    <arg name="cam_height"        default="0.92"/>   <!-- [m] 카메라 높이 -->
+    <arg name="cam_pitch_deg"     default="-40.0"/>   <!-- [deg] 아래로 기울어진 각도 -->
+    <arg name="range_scale"       default="1.5"/>
+
+    <!-- CameraInfo topic (카메라 드라이버에서 퍼블리시) -->
+    <arg name="camera_info_topic" default="/ardu_cam_link/camera_info"/>
+
+    <!-- LaserScan 설정 -->
+    <arg name="scan_num_beams"    default="360"/>
+    <arg name="scan_angle_min"    default="-0.785398"/>  <!-- -45° -->
+    <arg name="scan_angle_max"    default="0.785398"/>   <!-- +45° -->
+    <arg name="scan_range_max"    default="15.0"/>
+    <arg name="scan_frame_id"     default="base_link"/>
+
+    <!-- ───── YOLOP lane-line 노드 실행 ───── -->
+    <node name="$(arg node_name)"
+          pkg="lane_detection"
+          type="yolop_lane_detection.py"
+          output="$(arg output)"
+          launch-prefix="$(arg launch_prefix)">
+
+        <param name="weights_path"   value="$(arg weights_path)"/>
+        <param name="device"         value="$(arg device)"/>
+        <param name="img_size"       value="$(arg img_size)"/>
+
+        <param name="camera_topic"   value="$(arg camera_topic)"/>
+        <param name="use_compressed" value="$(arg use_compressed)"/>
+        <param name="max_hz" value="10.0"/>
+        <param name="debug"          value="$(arg debug)"/>
+    </node>
+
+    <!-- ───── Lane mask → LaserScan(IPM) 노드 실행 ───── -->
+    <node name="lane_to_scan_ipm"
+          pkg="lane_detection"
+          type="lane_to_scan_IPM.py"
+          output="$(arg output)"
+          launch-prefix="$(arg launch_prefix)">
+
+        <!-- 입력 토픽 -->
+        <!-- YOLOP 노드가 "~lane_line" 로 퍼블리시 → /<node_name>/lane_line -->
+        <param name="lane_mask_topic"  value="/$(arg node_name)/lane_line"/>
+        <param name="camera_info_topic" value="$(arg camera_info_topic)"/>
+
+        <!-- 카메라 외부 파라미터 -->
+        <param name="cam_height"        value="$(arg cam_height)"/>
+        <param name="cam_pitch_deg"     value="$(arg cam_pitch_deg)"/>
+
+        <!-- LaserScan 파라미터 -->
+        <param name="scan_num_beams"    value="$(arg scan_num_beams)"/>
+        <param name="scan_angle_min"    value="$(arg scan_angle_min)"/>
+        <param name="scan_angle_max"    value="$(arg scan_angle_max)"/>
+        <param name="scan_range_max"    value="$(arg scan_range_max)"/>
+        <param name="scan_frame_id"     value="$(arg scan_frame_id)"/>
+
+        <param name="range_scale"      value="$(arg range_scale)"/>
+    </node>
+
+</launch>

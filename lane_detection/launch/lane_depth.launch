@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<launch>
+
+  <!-- ───── 인자 ───── -->
+  <arg name="weights_path" default="$(find lane_detection)/weights/final_state.pth"/>
+  <arg name="device"       default="cuda:0"/>
+  <arg name="img_size"     default="640"/>
+  <arg name="camera_topic" default="/ardu_cam_link/image_undistorted"/>
+  <arg name="depth_topic"  default="/depth_anything/depth_registered/image_rect"/>
+  <arg name="use_compressed" default="false"/>
+  <arg name="debug"          default="false"/>
+  <arg name="camera_info_topic"          default="/ardu_cam_link/image_undistorted/camera_info"/>
+  <!-- ───── ① YOLOP Lane-line 세그멘테이션 ───── -->
+  <node pkg="lane_detection" type="yolop_lane_detection.py" name="lane_line_node"
+        output="screen">
+    <param name="weights_path"  value="$(arg weights_path)"/>
+    <param name="device"        value="$(arg device)"/>
+    <param name="img_size"      value="$(arg img_size)"/>
+    <param name="camera_topic"  value="$(arg camera_topic)"/>
+    <param name="use_compressed" value="$(arg use_compressed)"/>
+    <param name="debug"         value="$(arg debug)"/>
+    <!-- WSL CUDA 라이브러리 prepend -->
+    <env  name="LD_LIBRARY_PATH"
+          value="/usr/lib/wsl/lib:$(env LD_LIBRARY_PATH)"/>
+  </node>
+
+  <!-- ───── ② Lane-depth 마스킹 ───── -->
+  <node pkg="lane_detection" type="lane_depth_fusion.py" name="lane_depth_fusion"
+        output="screen">
+    <param name="depth_topic"  value="$(arg depth_topic)"/>
+    <param name="mask_topic"   value="/lane_line_node/lane_line"/>
+    <param name="publish_overlay" value="true"/>
+    <param name="camera_info_topic" value="$(arg camera_info_topic)"/>
+  </node>
+
+  <!-- ───── ③ Depth → PointCloud ───── -->
+  <node pkg="lane_detection" type="lane_depth_to_cloud.py" name="lane_cloud_node"
+        output="screen">
+    <param name="depth_topic"        value="/lane_depth_fusion/lane_depth"/>
+    <param name="camera_info_topic"  value="/lane_depth_fusion/camera_info"/>
+    <param name="frame_id"           value="ardu_cam_link"/>
+  </node>
+
+</launch>

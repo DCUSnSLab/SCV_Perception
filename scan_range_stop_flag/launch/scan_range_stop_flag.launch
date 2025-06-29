@@ -7,7 +7,7 @@
 
     <!-- ROI 파라미터 -->
     <param name="x_min"      value="0.60" />
-    <param name="x_max"      value="0.70" />
+    <param name="x_max"      value="0.80" />
     <param name="y_abs"      value="0.70" />
 
     <!-- 스캔 토픽 이름 -->
