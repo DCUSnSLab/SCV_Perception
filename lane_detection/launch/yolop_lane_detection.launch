@@ -4,12 +4,12 @@
 
     <!-- ───── 기본 인자 ───── -->
     <arg name="node_name"          default="lane_line_node"/>
-    <arg name="weights_path"       default="$(find lane_detection)/weights/final_state.pth"/>
+    <arg name="weights_path"       default="$(find lane_detection)/weights/06_27.pth"/>
     <arg name="device"             default="cuda:0"/>   <!-- GPU 사용 시 -->
     <arg name="img_size"           default="640"/>
 
     <!-- 카메라 설정 -->
-    <arg name="camera_topic"       default="/cam/image_raw"/>
+    <arg name="camera_topic"       default="/ardu_cam_link/image_undistorted"/>
     <arg name="use_compressed"     default="false"/>
 
     <!-- 디버그(첫 프레임 지연 로그) -->

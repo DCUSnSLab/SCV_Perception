@@ -114,7 +114,7 @@ class LaneLineNode:
         except CvBridgeError as e:
             rospy.logerr("CvBridge error: %s", e)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0   # ⬅ 경과 시간(ms)
-        rospy.loginfo_throttle(1.0, f"[ultralytics] 1 frame = {elapsed_ms:.1f} ms")
+        # print(f"[yolop_lane_detection node] 1 frame = {elapsed_ms:.1f} ms")
 
     # ------------------------------------------------------------------
     def _preprocess(self, img: np.ndarray):

@@ -1,42 +1,50 @@
 #!/usr/bin/env python3
 """
-Fuse a mono-8 lane-line mask with a 32FC1 depth image to produce a
-masked-depth image that contains depth only on lane pixels.
+Fuse depth and lane mask, **and relay CameraInfo** so downstream nodes
+(e.g., depth→cloud) can subscribe to `/lane_depth_fusion/camera_info`.
 Publishes:
-  • /lane_node/lane_depth   (sensor_msgs/Image, 32FC1)
-  • /lane_node/overlay_rgb  (sensor_msgs/Image, bgr8) – visual debug
-Usage notes:
-  - Subscribes to (synchronised) depth image + lane mask topics
-  - Accepts dynamic topic remapping via ROS launch.
+  • ~lane_depth   (Image, 32FC1)
+  • ~overlay_rgb  (Image, bgr8)
+  • ~camera_info  (CameraInfo)  ← NEW
 """
-import rospy
-from sensor_msgs.msg import Image
+import rospy, cv2, numpy as np
+from sensor_msgs.msg import Image, CameraInfo
 from cv_bridge import CvBridge, CvBridgeError
 import message_filters
-import numpy as np
-import cv2
 
 class LaneDepthFusion:
     def __init__(self):
         rospy.init_node('lane_depth_fusion', anonymous=True)
 
-        # -------- Parameters --------
-        depth_topic = rospy.get_param('~depth_topic',  '/zed/depth/image')
-        mask_topic  = rospy.get_param('~mask_topic',   '/lane_line_node/lane_line')
-        overlay     = rospy.get_param('~publish_overlay', True)
-        self.scale_depth = rospy.get_param('~depth_scale', 1.0)  # if depth needs metres conversion
+        # ───── Parameters ─────
+        depth_topic  = rospy.get_param('~depth_topic',  '/zed/depth/image')
+        mask_topic   = rospy.get_param('~mask_topic',   '/lane_line_node/lane_line')
+        info_topic   = rospy.get_param('~camera_info_topic', '/zed/depth/camera_info')
+        overlay      = rospy.get_param('~publish_overlay', True)
+        self.scale_depth = rospy.get_param('~depth_scale', 1.0)
 
-        # -------- I/O --------
+        # ───── Subscribers ─────
         self.bridge = CvBridge()
         depth_sub = message_filters.Subscriber(depth_topic, Image)
         mask_sub  = message_filters.Subscriber(mask_topic,  Image)
-        ats = message_filters.ApproximateTimeSynchronizer([depth_sub, mask_sub], queue_size=5, slop=0.05)
-        ats.registerCallback(self.callback)
+        self.sync = message_filters.ApproximateTimeSynchronizer([depth_sub, mask_sub], queue_size=5, slop=0.05)
+        self.sync.registerCallback(self.callback)
 
-        self.depth_pub   = rospy.Publisher('~lane_depth',   Image, queue_size=1)
+        # camera info 저장
+        self.last_info = None
+        rospy.Subscriber(info_topic, CameraInfo, self.info_cb, queue_size=1)
+
+        # ───── Publishers ─────
+        self.depth_pub   = rospy.Publisher('~lane_depth', Image, queue_size=1)
         self.overlay_pub = rospy.Publisher('~overlay_rgb', Image, queue_size=1) if overlay else None
+        self.info_pub    = rospy.Publisher('~camera_info', CameraInfo, queue_size=1)
 
-        rospy.loginfo('LaneDepthFusion ready. depth="%s" mask="%s"', depth_topic, mask_topic)
+        rospy.loginfo('LaneDepthFusion ready. depth="%s" mask="%s" info="%s"', depth_topic, mask_topic, info_topic)
+
+    # ---------------------------------------------------------------
+    def info_cb(self, msg: CameraInfo):
+        """Store the latest CameraInfo so we can relay it with matched stamp."""
+        self.last_info = msg
 
     # ---------------------------------------------------------------
     def callback(self, depth_msg: Image, mask_msg: Image):
@@ -47,29 +55,43 @@ class LaneDepthFusion:
             rospy.logerr_throttle(5, 'CvBridge error: %s', e)
             return
 
-        # normalise mask to {0,1}
         mask_bin = (mask > 0).astype(np.float32)
         fused    = depth * mask_bin * self.scale_depth
 
-        # Publish fused depth
+        # ─── Publish fused depth ───
         try:
             fused_msg = self.bridge.cv2_to_imgmsg(fused, encoding='32FC1')
-            fused_msg.header.stamp = depth_msg.header.stamp
-            fused_msg.header.frame_id = depth_msg.header.frame_id
+            fused_msg.header = depth_msg.header  # copy stamp + frame
             self.depth_pub.publish(fused_msg)
         except CvBridgeError as e:
             rospy.logerr_throttle(5, 'CvBridge error publish: %s', e)
 
-        # Optional overlay for visualisation
-        if self.overlay_pub and self.overlay_pub.get_num_connections() > 0:
+        # ─── Relay CameraInfo with synced stamp ───
+        if self.last_info is not None:
+            info_out = CameraInfo()
+            info_out.header = fused_msg.header  # same stamp/frame
+            info_out.height = self.last_info.height
+            info_out.width  = self.last_info.width
+            info_out.K      = list(self.last_info.K)
+            info_out.D      = list(self.last_info.D)
+            info_out.R      = list(self.last_info.R)
+            info_out.P      = list(self.last_info.P)
+            info_out.distortion_model = self.last_info.distortion_model
+            self.info_pub.publish(info_out)
+
+        # ─── Optional overlay ───
+        if self.overlay_pub and self.overlay_pub.get_num_connections():
             overlay = cv2.cvtColor((mask_bin * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-            overlay[:,:,1] = 255  # make green for lanes
+            overlay[:, :, 1] = 255  # green mask
             depth_vis = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             depth_vis = cv2.cvtColor(depth_vis, cv2.COLOR_GRAY2BGR)
             show = cv2.addWeighted(depth_vis, 1.0, overlay, 0.6, 0)
-            show_msg = self.bridge.cv2_to_imgmsg(show, encoding='bgr8')
-            show_msg.header = fused_msg.header
-            self.overlay_pub.publish(show_msg)
+            try:
+                show_msg = self.bridge.cv2_to_imgmsg(show, encoding='bgr8')
+                show_msg.header = fused_msg.header
+                self.overlay_pub.publish(show_msg)
+            except CvBridgeError:
+                pass
 
     # ---------------------------------------------------------------
     def run(self):
@@ -77,7 +99,6 @@ class LaneDepthFusion:
 
 if __name__ == '__main__':
     try:
-        node = LaneDepthFusion()
-        node.run()
+        LaneDepthFusion().run()
     except rospy.ROSInterruptException:
         pass
