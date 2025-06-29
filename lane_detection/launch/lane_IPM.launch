@@ -12,23 +12,24 @@
     <arg name="img_size"       default="640"/>
 
     <!-- 카메라 -->
-    <arg name="camera_topic"   default="/cam/image_raw"/>
+    <arg name="camera_topic"   default="/ardu_cam_link/image_undistorted"/>
     <arg name="use_compressed" default="false"/>
     <arg name="debug"          default="false"/>
 
     <!-- ───── IPM → LaserScan 노드 인자 ───── -->
     <!-- 카메라 외부 파라미터 -->
-    <arg name="cam_height"        default="0.35"/>   <!-- [m] 카메라 높이 -->
+    <arg name="cam_height"        default="0.92"/>   <!-- [m] 카메라 높이 -->
     <arg name="cam_pitch_deg"     default="-40.0"/>   <!-- [deg] 아래로 기울어진 각도 -->
+    <arg name="range_scale"       default="1.5"/>
 
     <!-- CameraInfo topic (카메라 드라이버에서 퍼블리시) -->
-    <arg name="camera_info_topic" default="/cam/camera_info"/>
+    <arg name="camera_info_topic" default="/ardu_cam_link/camera_info"/>
 
     <!-- LaserScan 설정 -->
     <arg name="scan_num_beams"    default="360"/>
     <arg name="scan_angle_min"    default="-0.785398"/>  <!-- -45° -->
     <arg name="scan_angle_max"    default="0.785398"/>   <!-- +45° -->
-    <arg name="scan_range_max"    default="30.0"/>
+    <arg name="scan_range_max"    default="15.0"/>
     <arg name="scan_frame_id"     default="base_link"/>
 
     <!-- ───── YOLOP lane-line 노드 실행 ───── -->
@@ -44,7 +45,7 @@
 
         <param name="camera_topic"   value="$(arg camera_topic)"/>
         <param name="use_compressed" value="$(arg use_compressed)"/>
-
+        <param name="max_hz" value="10.0"/>
         <param name="debug"          value="$(arg debug)"/>
     </node>
 
@@ -70,6 +71,8 @@
         <param name="scan_angle_max"    value="$(arg scan_angle_max)"/>
         <param name="scan_range_max"    value="$(arg scan_range_max)"/>
         <param name="scan_frame_id"     value="$(arg scan_frame_id)"/>
+
+        <param name="range_scale"      value="$(arg range_scale)"/>
     </node>
 
 </launch>

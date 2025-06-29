@@ -13,7 +13,7 @@ import rospy, numpy as np, cv2
 from sensor_msgs.msg import Image, CameraInfo, LaserScan
 from cv_bridge import CvBridge
 from math import sin, cos, atan2, sqrt, radians, inf
-
+import time
 class LaneMaskToScan:
     def __init__(self):
         rospy.init_node("lane_mask_to_scan_node")
@@ -28,7 +28,7 @@ class LaneMaskToScan:
         self.angle_max         = float(rospy.get_param("~scan_angle_max",  np.pi/4))  # +45°
         self.range_max         = rospy.get_param("~scan_range_max", 30.0)    # [m]
         self.scan_frame        = rospy.get_param("~scan_frame_id", "base_link")
-
+        self.range_scale      = rospy.get_param("~range_scale", 1.0)
         self.ang_inc = (self.angle_max - self.angle_min) / self.n_beams
         self.pitch_rad = radians(self.pitch_deg)
 
@@ -54,6 +54,7 @@ class LaneMaskToScan:
 
     # ---------------------------------------
     def mask_cb(self, msg: Image):
+        t0 = time.perf_counter() 
         # ───────── 0. 준비 검사 ─────────
         if self.fx is None:
             rospy.logwarn_once("Waiting for CameraInfo …")
@@ -65,7 +66,6 @@ class LaneMaskToScan:
             mask = mask.astype(np.uint8)
 
         ys, xs = np.where(mask > 0)
-        rospy.loginfo("mask pixels: %d", xs.size)
 
         if xs.size == 0:
             return
@@ -75,8 +75,6 @@ class LaneMaskToScan:
         Y = (ys - self.cy) / self.fy
         Z = np.ones_like(X)
         dirs = np.stack([X, Y, Z], axis=1)
-
-        rospy.loginfo("dirs shape: %s; sample: %s", dirs.shape, dirs[0])
 
         # ───────── 3. pitch 회전 ─────────
         c, s = cos(self.pitch_rad), sin(self.pitch_rad)
@@ -88,7 +86,6 @@ class LaneMaskToScan:
         # ───────── 4. 지면 교차점 ─────────
         y_comp = dirs[:,1]
         valid_mask = y_comp > 1e-6
-        rospy.loginfo("rays hitting ground: %d / %d", valid_mask.sum(), dirs.shape[0])
 
         if not valid_mask.any():
             rospy.logwarn("No valid ground intersections this frame")
@@ -99,19 +96,16 @@ class LaneMaskToScan:
         t = self.h_cam / y_comp
         pts = dirs * t[:, None]           # (N,3)
 
-        rospy.loginfo("ground pts sample (cam frame): %s", pts[0])
-
-        # ───────── 5. camera→base 변환 ─────────
-        xb =  pts[:,2]
-        yb = -pts[:,0]
-        dist = np.hypot(xb, yb)
+        # ───────── 5. camera→base 변환 ─────────ㅊ
+        xb =  pts[:, 2]
+        print(xb)
+        yb = -pts[:, 0]
+        dist = np.hypot(xb, yb) * self.range_scale   # ★ 보정 적용
         ang  = np.arctan2(yb, xb)
 
         # ───────── 6. LaserScan 채우기 ─────────
         ranges = np.full(self.n_beams, inf, dtype=np.float32)
         in_fov = (ang >= self.angle_min) & (ang <= self.angle_max) & (dist < self.range_max)
-        rospy.loginfo("points in FOV: %d", in_fov.sum())
-
         if not in_fov.any():
             return
 
@@ -133,10 +127,9 @@ class LaneMaskToScan:
         scan.range_max       = self.range_max
         scan.ranges          = ranges.tolist()
 
-        rospy.loginfo("scan published; min range in frame: %.2f m",
-                      np.min(ranges[np.isfinite(ranges)]) if np.isfinite(ranges).any() else -1)
-
         self.scan_pub.publish(scan)
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0   # ⬅ 경과 시간(ms)
+        # print(f"[scan] 1 frame = {elapsed_ms:.1f} ms")
 
 # -------------------------------------------
 if __name__ == "__main__":

@@ -40,7 +40,9 @@ class LaneLineNode:
         self.conf_debug = rospy.get_param("~debug", False)
         self.camera_topic = rospy.get_param("~camera_topic", "/camera/image_raw")
         self.use_compressed = rospy.get_param("~use_compressed", False)
-
+        self.max_hz   = float(rospy.get_param("~max_hz", 15.0))
+        self.min_dt   = 1.0 / self.max_hz
+        self._last_ts = 0.0
         # transform
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                                 std=[0.229, 0.224, 0.225])
@@ -114,7 +116,7 @@ class LaneLineNode:
         except CvBridgeError as e:
             rospy.logerr("CvBridge error: %s", e)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0   # ⬅ 경과 시간(ms)
-        # print(f"[yolop_lane_detection node] 1 frame = {elapsed_ms:.1f} ms")
+        print(f"[yolop_lane_detection node] 1 frame = {elapsed_ms:.1f} ms")
 
     # ------------------------------------------------------------------
     def _preprocess(self, img: np.ndarray):
@@ -134,9 +136,30 @@ class LaneLineNode:
                 a,b,ll_seg_out = self.model(tensor)          # forward
                 t2 = time_synchronized()
 
-            # post‑process mask back to original resolution
+            # post-process mask back to original resolution
             mask = torch.argmax(ll_seg_out, 1).int().squeeze().cpu().numpy()
-            mask = cv2.resize(mask.astype(np.uint8), (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)
+            mask = cv2.resize(mask.astype(np.uint8),
+                            (frame.shape[1], frame.shape[0]),
+                            interpolation=cv2.INTER_NEAREST)
+
+            # ●───────────────── Noise filtering 추가 ─────────────────
+            # 0/1 이진화
+            bin_mask = (mask > 0).astype(np.uint8)
+
+            # ① Morphological opening → closing (3×3, 1회)
+            kernel = np.ones((3, 3), np.uint8)
+            bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_OPEN,  kernel, iterations=1)
+            bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+            # ② Connected-component 면적 필터링
+            num_lbl, lbls, stats, _ = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)
+            img_area   = bin_mask.shape[0] * bin_mask.shape[1]
+            min_area   = 0.002 * img_area          # 전체의 0.2 % 미만이면 잡음
+            for i in range(1, num_lbl):            # 0 = background
+                if stats[i, cv2.CC_STAT_AREA] < min_area:
+                    bin_mask[lbls == i] = 0
+
+            mask = bin_mask.astype(np.uint8)       # 이후 publish·overlay 사용
 
             # publish lane mask
             mask_msg = self.bridge.cv2_to_imgmsg((mask * 255).astype(np.uint8), "mono8")
