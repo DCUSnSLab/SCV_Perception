@@ -1,137 +1,129 @@
 #!/usr/bin/env python3
 # coding: utf-8
 """
-Subscribe : lane-line binary mask (mono8) + CameraInfo
-Publish   : LaserScan (base_link 평면 기준, IPM 변환)
-
-IPM 가정
-- 지면은 하나의 평면(Z=0 in base_link, => y_cam = +h in optical frame)
-- 카메라 외부 파라미터 : 고도 h[m], 피치 pitch_deg (카메라가 아래로 기운 각도, +40 = 40° 다운틸트)
-- 카메라 yaw·roll = 0 (정면 장착), 필요하면 TF로 수정하면 됨
+lane_mask_to_scan_node – GPU-accelerated (PyTorch ≥ 2.2)
+  * mono8 lane-mask  → 360-beam LaserScan
+  * 빈 마스크여도 항상 ranges=inf 로 발행
 """
-import rospy, numpy as np, cv2
+import rospy, cv2, numpy as np, torch, time
 from sensor_msgs.msg import Image, CameraInfo, LaserScan
 from cv_bridge import CvBridge
-from math import sin, cos, atan2, sqrt, radians, inf
-import time
+from math import radians
+
 class LaneMaskToScan:
+    # ────────────────────────────────────────────────────────────
     def __init__(self):
         rospy.init_node("lane_mask_to_scan_node")
 
-        # ---------- Parameters ----------
-        self.mask_topic        = rospy.get_param("~lane_mask_topic",  "/lane_line_node/lane_line")
-        self.cinfo_topic       = rospy.get_param("~camera_info_topic","/camera/camera_info")
-        self.h_cam             = rospy.get_param("~cam_height", 0.35)        # [m]
-        self.pitch_deg         = rospy.get_param("~cam_pitch_deg", 40.0)     # [deg] (+ down)
-        self.n_beams           = int(rospy.get_param("~scan_num_beams", 360))
-        self.angle_min         = float(rospy.get_param("~scan_angle_min", -np.pi/4))  # –45°
-        self.angle_max         = float(rospy.get_param("~scan_angle_max",  np.pi/4))  # +45°
-        self.range_max         = rospy.get_param("~scan_range_max", 30.0)    # [m]
-        self.scan_frame        = rospy.get_param("~scan_frame_id", "base_link")
-        self.range_scale      = rospy.get_param("~range_scale", 1.0)
-        self.ang_inc = (self.angle_max - self.angle_min) / self.n_beams
+        # ROS params ─────────────────────────────────────────────
+        self.mask_topic  = rospy.get_param("~lane_mask_topic",  "/lane_line_node/lane_line")
+        self.cinfo_topic = rospy.get_param("~camera_info_topic","/camera/camera_info")
+        self.h_cam       = rospy.get_param("~cam_height", 0.35)          # [m]
+        self.pitch_deg   = rospy.get_param("~cam_pitch_deg", 40.0)       # +down
+        self.n_beams     = int(rospy.get_param("~scan_num_beams", 360))
+        self.angle_min   = float(rospy.get_param("~scan_angle_min", -np.pi/4))
+        self.angle_max   = float(rospy.get_param("~scan_angle_max",  np.pi/4))
+        self.range_max   = rospy.get_param("~scan_range_max", 30.0)      # [m]
+        self.range_scale = rospy.get_param("~range_scale", 1.0)
+        self.scan_frame  = rospy.get_param("~scan_frame_id", "base_link")
+
+        self.ang_inc   = (self.angle_max - self.angle_min) / self.n_beams
         self.pitch_rad = radians(self.pitch_deg)
+        self.device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        # Camera intrinsics (filled once)
+        # Camera intrinsics & cached tensors (filled in cinfo_cb)
         self.fx = self.fy = self.cx = self.cy = None
+        self.dir_tbl_gpu, self.R_pitch_gpu = None, None
 
-        self.bridge = CvBridge()
-        self.scan_pub = rospy.Publisher("~lane_scan", LaserScan, queue_size=1, latch=False)
+        self.bridge   = CvBridge()
+        self.scan_pub = rospy.Publisher("~lane_scan", LaserScan, queue_size=1)
 
-        rospy.Subscriber(self.cinfo_topic, CameraInfo, self.cinfo_cb,   queue_size=1)
-        rospy.Subscriber(self.mask_topic,  Image,      self.mask_cb,    queue_size=1)
+        rospy.Subscriber(self.cinfo_topic, CameraInfo, self.cinfo_cb, queue_size=1)
+        rospy.Subscriber(self.mask_topic,  Image,      self.mask_cb,  queue_size=1)
 
-        rospy.loginfo("lane_mask_to_scan_node ready – waiting for camera_info & lane masks")
+        rospy.loginfo("lane_mask_to_scan_node (GPU) ready – waiting CameraInfo & masks.")
 
-    # ---------------------------------------
+    # ────────────────────────────────────────────────────────────
     def cinfo_cb(self, msg: CameraInfo):
-        # 한 번만 읽어도 충분
-        if self.fx is None:
-            self.fx, self.fy = msg.K[0], msg.K[4]
-            self.cx, self.cy = msg.K[2], msg.K[5]
-            rospy.loginfo("CameraInfo received (fx=%.1f, fy=%.1f, cx=%.1f, cy=%.1f)",
-                          self.fx, self.fy, self.cx, self.cy)
+        if self.fx is not None:  # 이미 초기화됨
+            return
 
-    # ---------------------------------------
+        self.fx, self.fy = msg.K[0], msg.K[4]
+        self.cx, self.cy = msg.K[2], msg.K[5]
+        H, W = msg.height, msg.width
+
+        ys, xs = torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij')
+        dir_tbl = torch.stack(
+            ((xs - self.cx) / self.fx,
+             (ys - self.cy) / self.fy,
+             torch.ones_like(xs, dtype=torch.float32)),
+            dim=-1).float().to(self.device)
+
+        c, s = np.cos(self.pitch_rad), np.sin(self.pitch_rad)
+        R_pitch = torch.tensor([[1,0,0],[0,c,-s],[0,s,c]], dtype=torch.float32, device=self.device)
+
+        self.dir_tbl_gpu, self.R_pitch_gpu = dir_tbl, R_pitch
+        rospy.loginfo("CameraInfo received – LUT cached on %s.", self.device)
+
+    # ────────────────────────────────────────────────────────────
     def mask_cb(self, msg: Image):
-        t0 = time.perf_counter() 
-        # ───────── 0. 준비 검사 ─────────
-        if self.fx is None:
-            rospy.logwarn_once("Waiting for CameraInfo …")
-            return
+        if self.dir_tbl_gpu is None:
+            return   # CameraInfo 아직
 
-        # ───────── 1. 마스크 디코딩 ─────────
-        mask = self.bridge.imgmsg_to_cv2(msg, "mono8")
-        if mask.dtype != np.uint8:
-            mask = mask.astype(np.uint8)
+        tic = time.perf_counter()
 
-        ys, xs = np.where(mask > 0)
+        # 0) mask → uint8 numpy → torch CPU → GPU
+        mask_np  = self.bridge.imgmsg_to_cv2(msg, "mono8")
+        mask_cpu = torch.from_numpy(mask_np).pin_memory()
+        mask_gpu = mask_cpu.to(self.device, non_blocking=True).bool()
 
-        if xs.size == 0:
-            return
+        # ranges: inf 로 초기
+        ranges_gpu = torch.full((self.n_beams,), float("inf"),
+                                device=self.device, dtype=torch.float32)
 
-        # ───────── 2. 카메라 레이 계산 ─────────
-        X = (xs - self.cx) / self.fx
-        Y = (ys - self.cy) / self.fy
-        Z = np.ones_like(X)
-        dirs = np.stack([X, Y, Z], axis=1)
+        if mask_gpu.any():
+            # 1) 방향 벡터 선택 + pitch 회전
+            dirs = self.dir_tbl_gpu[mask_gpu]          # (N,3)
+            dirs = torch.matmul(dirs, self.R_pitch_gpu.T)
 
-        # ───────── 3. pitch 회전 ─────────
-        c, s = cos(self.pitch_rad), sin(self.pitch_rad)
-        R = np.array([[1, 0, 0],
-                      [0, c,-s],
-                      [0, s, c]], dtype=np.float32)
-        dirs = dirs @ R.T
+            # 2) 지면 교차
+            y = dirs[:, 1]
+            valid = y > 1e-6
+            if valid.any():
+                dirs = dirs[valid]
+                t    = self.h_cam / y[valid]
+                pts  = dirs * t.unsqueeze(1)
 
-        # ───────── 4. 지면 교차점 ─────────
-        y_comp = dirs[:,1]
-        valid_mask = y_comp > 1e-6
+                xb =  pts[:, 2] - 0.5
+                yb = -pts[:, 0]
+                dist = torch.hypot(xb, yb) * self.range_scale
+                ang  = torch.atan2(yb, xb)
 
-        if not valid_mask.any():
-            rospy.logwarn("No valid ground intersections this frame")
-            return
+                in_fov = (ang >= self.angle_min) & (ang <= self.angle_max) & (dist < self.range_max)
+                if in_fov.any():
+                    ang, dist = ang[in_fov], dist[in_fov]
+                    idx = torch.clamp(((ang - self.angle_min) / self.ang_inc).long(),
+                                      0, self.n_beams - 1)
+                    ranges_gpu.scatter_reduce_(0, idx, dist, reduce="amin")
 
-        dirs = dirs[valid_mask]
-        y_comp = y_comp[valid_mask]
-        t = self.h_cam / y_comp
-        pts = dirs * t[:, None]           # (N,3)
+        # 3) publish (always)
+        self._publish_scan(msg.header.stamp, ranges_gpu)
+        print(f"[scan] {(time.perf_counter()-tic)*1000:.2f} ms")
 
-        # ───────── 5. camera→base 변환 ─────────ㅊ
-        xb =  pts[:, 2]
-        print(xb)
-        yb = -pts[:, 0]
-        dist = np.hypot(xb, yb) * self.range_scale   # ★ 보정 적용
-        ang  = np.arctan2(yb, xb)
-
-        # ───────── 6. LaserScan 채우기 ─────────
-        ranges = np.full(self.n_beams, inf, dtype=np.float32)
-        in_fov = (ang >= self.angle_min) & (ang <= self.angle_max) & (dist < self.range_max)
-        if not in_fov.any():
-            return
-
-        sel_ang = ang[in_fov]
-        sel_dst = dist[in_fov]
-        idx = np.floor((sel_ang - self.angle_min) / self.ang_inc).astype(np.int32)
-        for i, d in zip(idx, sel_dst):
-            if d < ranges[i]:
-                ranges[i] = d
-
-        # ───────── 7. 퍼블리시 ─────────
+    # ────────────────────────────────────────────────────────────
+    def _publish_scan(self, stamp, ranges_gpu):
         scan = LaserScan()
-        scan.header.stamp    = msg.header.stamp
+        scan.header.stamp    = stamp
         scan.header.frame_id = self.scan_frame
         scan.angle_min       = self.angle_min
         scan.angle_max       = self.angle_max
         scan.angle_increment = self.ang_inc
         scan.range_min       = 0.0
         scan.range_max       = self.range_max
-        scan.ranges          = ranges.tolist()
-
+        scan.ranges          = ranges_gpu.cpu().tolist()   # 360 floats
         self.scan_pub.publish(scan)
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0   # ⬅ 경과 시간(ms)
-        # print(f"[scan] 1 frame = {elapsed_ms:.1f} ms")
 
-# -------------------------------------------
+# ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     try:
         LaneMaskToScan()

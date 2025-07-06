@@ -53,6 +53,16 @@ class LaneLineNode:
         self.device = select_device(self.logger, self.device_name)
         self.half = self.device.type != "cpu"
 
+        self.hexagon_points = [
+            (760, 300),  # 왼쪽 위 (중앙보다 왼쪽)
+            (600, 600),  # 왼쪽 중간
+            (760, 900),  # 왼쪽 아래
+
+            (1160, 300), # 오른쪽 위 (중앙보다 오른쪽)
+            (1320, 600), # 오른쪽 중간
+            (1160, 900)  # 오른쪽 아래
+        ]
+
         self._load_model()
         self._init_ros_io()
         rospy.loginfo("Lane‑line node initialised and ready.")
@@ -112,11 +122,32 @@ class LaneLineNode:
         t0 = time.perf_counter() 
         try:
             cv_img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+            
+            h, w = cv_img.shape[:2]
+
+            # --------------------------------
+            # # 사용자가 지정한 점 6개 가져오기
+            # hexagon = np.array(self.hexagon_points, np.int32)
+
+            # # --------------------------------
+            # # ROI 마스크 생성
+            # mask = np.zeros((h, w), dtype=np.uint8)
+            # cv2.fillPoly(mask, [hexagon], 255)
+
+            # # --------------------------------
+            # # 반전 마스크 사용: 육각형 영역만 검은색
+            # inverted_mask = cv2.bitwise_not(mask)
+
+            # # 반전 마스크 적용
+            # roi_img = cv2.bitwise_and(cv_img, cv_img, mask=inverted_mask)
+
             self._process(cv_img, msg.header)
+
         except CvBridgeError as e:
             rospy.logerr("CvBridge error: %s", e)
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0   # ⬅ 경과 시간(ms)
-        print(f"[yolop_lane_detection node] 1 frame = {elapsed_ms:.1f} ms")
+
+        elapsed_ms = (time.perf_counter() - t0) * 1000.0
+        # print(f"[yolop_lane_detection node] 1 frame = {elapsed_ms:.1f} ms")
 
     # ------------------------------------------------------------------
     def _preprocess(self, img: np.ndarray):
@@ -130,48 +161,56 @@ class LaneLineNode:
     # ------------------------------------------------------------------
     def _process(self, frame: np.ndarray, header):
         try:
+            t1 = time_synchronized()
             tensor = self._preprocess(frame)
+            
             with torch.no_grad():
-                t1 = time_synchronized()
                 a,b,ll_seg_out = self.model(tensor)          # forward
-                t2 = time_synchronized()
-
+            
+            
             # post-process mask back to original resolution
             mask = torch.argmax(ll_seg_out, 1).int().squeeze().cpu().numpy()
             mask = cv2.resize(mask.astype(np.uint8),
                             (frame.shape[1], frame.shape[0]),
                             interpolation=cv2.INTER_NEAREST)
-
+            
             # ●───────────────── Noise filtering 추가 ─────────────────
             # 0/1 이진화
+            
             bin_mask = (mask > 0).astype(np.uint8)
 
             # ① Morphological opening → closing (3×3, 1회)
+            
             kernel = np.ones((3, 3), np.uint8)
             bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_OPEN,  kernel, iterations=1)
             bin_mask = cv2.morphologyEx(bin_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
-
+           
             # ② Connected-component 면적 필터링
+            
             num_lbl, lbls, stats, _ = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)
             img_area   = bin_mask.shape[0] * bin_mask.shape[1]
             min_area   = 0.002 * img_area          # 전체의 0.2 % 미만이면 잡음
             for i in range(1, num_lbl):            # 0 = background
                 if stats[i, cv2.CC_STAT_AREA] < min_area:
                     bin_mask[lbls == i] = 0
-
+            
             mask = bin_mask.astype(np.uint8)       # 이후 publish·overlay 사용
-
+            
             # publish lane mask
             mask_msg = self.bridge.cv2_to_imgmsg((mask * 255).astype(np.uint8), "mono8")
             mask_msg.header = header
             self.lane_mask_pub.publish(mask_msg)
-
+            
             # overlay for visual debugging
+            
             overlay = overlay_lane_mask(frame, mask)
+            
             overlay_msg = self.bridge.cv2_to_imgmsg(overlay, "bgr8")
             overlay_msg.header = header
             self.overlay_pub.publish(overlay_msg)
-
+            t2 = time_synchronized()
+            elapsed_ms = (t2 - t1) * 1000          # s → ms
+            print(f"model : {elapsed_ms:.1f} ms")
             if self.conf_debug:
                 rospy.loginfo_once("First inference done in %.1f ms", (t2 - t1) * 1000)
         except Exception as e:

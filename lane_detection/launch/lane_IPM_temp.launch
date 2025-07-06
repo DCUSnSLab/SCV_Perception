@@ -7,12 +7,12 @@
 
     <!-- ───── YOLOP lane-line 노드 인자 ───── -->
     <arg name="node_name"      default="lane_line_node"/>
-    <arg name="weights_path"   default="$(find lane_detection)/weights/06_27.pth"/>
+    <arg name="weights_path"   default="$(find lane_detection)/weights/07_06.pth"/>
     <arg name="device"         default="cuda:0"/>
     <arg name="img_size"       default="640"/>
 
     <!-- 카메라 -->
-    <arg name="camera_topic"   default="/ardu_cam_link/image_undistorted"/>
+    <arg name="camera_topic"   default="/cam/image_raw"/>
     <arg name="use_compressed" default="false"/>
     <arg name="debug"          default="false"/>
 
@@ -23,7 +23,7 @@
     <arg name="range_scale"       default="1.8"/>
 
     <!-- CameraInfo topic (카메라 드라이버에서 퍼블리시) -->
-    <arg name="camera_info_topic" default="/ardu_cam_link/camera_info"/>
+    <arg name="camera_info_topic" default="/cam/camera_info"/>
 
     <!-- LaserScan 설정 -->
     <arg name="scan_num_beams"    default="360"/>
