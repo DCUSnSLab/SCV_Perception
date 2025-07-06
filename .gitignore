@@ -2,3 +2,4 @@
 *.engine
 *.onnx
 *.pth
+*.pyc

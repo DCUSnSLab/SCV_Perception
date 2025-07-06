@@ -54,13 +54,12 @@ class LaneLineNode:
         self.half = self.device.type != "cpu"
 
         self.hexagon_points = [
-            (760, 300),  # 왼쪽 위 (중앙보다 왼쪽)
-            (600, 600),  # 왼쪽 중간
-            (760, 900),  # 왼쪽 아래
-
-            (1160, 300), # 오른쪽 위 (중앙보다 오른쪽)
-            (1320, 600), # 오른쪽 중간
-            (1160, 900)  # 오른쪽 아래
+            (438, 1076),   # 왼쪽 아래
+            (558,  679),   # 왼쪽 중간
+            (766,  502),   # 왼쪽 위
+            (1137, 522),   # 오른쪽 위
+            (1320, 685),   # 오른쪽 중간
+            (1431, 1079)   # 오른쪽 아래
         ]
 
         self._load_model()
@@ -124,24 +123,22 @@ class LaneLineNode:
             cv_img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
             
             h, w = cv_img.shape[:2]
+            # 사용자가 지정한 점 6개 가져오기
+            hexagon = np.array(self.hexagon_points, np.int32)
 
             # --------------------------------
-            # # 사용자가 지정한 점 6개 가져오기
-            # hexagon = np.array(self.hexagon_points, np.int32)
+            # ROI 마스크 생성
+            mask = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillPoly(mask, [hexagon], 255)
 
-            # # --------------------------------
-            # # ROI 마스크 생성
-            # mask = np.zeros((h, w), dtype=np.uint8)
-            # cv2.fillPoly(mask, [hexagon], 255)
+            # --------------------------------
+            # 반전 마스크 사용: 육각형 영역만 검은색
+            inverted_mask = cv2.bitwise_not(mask)
 
-            # # --------------------------------
-            # # 반전 마스크 사용: 육각형 영역만 검은색
-            # inverted_mask = cv2.bitwise_not(mask)
+            # 반전 마스크 적용
+            roi_img = cv2.bitwise_and(cv_img, cv_img, mask=inverted_mask)
 
-            # # 반전 마스크 적용
-            # roi_img = cv2.bitwise_and(cv_img, cv_img, mask=inverted_mask)
-
-            self._process(cv_img, msg.header)
+            self._process(roi_img, msg.header)
 
         except CvBridgeError as e:
             rospy.logerr("CvBridge error: %s", e)
