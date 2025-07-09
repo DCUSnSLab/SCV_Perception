@@ -7,7 +7,7 @@
 
     <!-- ───── YOLOP lane-line 노드 인자 ───── -->
     <arg name="node_name"      default="lane_line_node"/>
-    <arg name="weights_path"   default="$(find lane_detection)/weights/06_27.pth"/>
+    <arg name="weights_path"   default="$(find lane_detection)/weights/W_07-07_best.pth"/>
     <arg name="device"         default="cuda:0"/>
     <arg name="img_size"       default="640"/>
 
@@ -18,17 +18,17 @@
 
     <!-- ───── IPM → LaserScan 노드 인자 ───── -->
     <!-- 카메라 외부 파라미터 -->
-    <arg name="cam_height"        default="0.92"/>   <!-- [m] 카메라 높이 -->
-    <arg name="cam_pitch_deg"     default="-35.0"/>   <!-- [deg] 아래로 기울어진 각도 -->
-    <arg name="range_scale"       default="1.8"/>
+    <arg name="cam_height"        default="0.88"/>   <!-- [m] 카메라 높이 -->
+    <arg name="cam_pitch_deg"     default="-40.0"/>   <!-- [deg] 아래로 기울어진 각도 -->
+    <arg name="range_scale"       default="1.9"/>
 
     <!-- CameraInfo topic (카메라 드라이버에서 퍼블리시) -->
     <arg name="camera_info_topic" default="/ardu_cam_link/camera_info"/>
 
     <!-- LaserScan 설정 -->
-    <arg name="scan_num_beams"    default="360"/>
-    <arg name="scan_angle_min"    default="-0.785398"/>  <!-- -45° -->
-    <arg name="scan_angle_max"    default="0.785398"/>   <!-- +45° -->
+    <arg name="scan_num_beams" default="1080"/>
+    <arg name="scan_angle_min" default="-3.141592653589793"/>  <!-- -180° -->
+    <arg name="scan_angle_max" default=" 3.141592653589793"/>  <!-- +180° -->
     <arg name="scan_range_max"    default="15.0"/>
     <arg name="scan_frame_id"     default="base_link"/>
 

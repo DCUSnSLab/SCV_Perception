@@ -37,7 +37,9 @@ class LaneMaskToScan:
 
         self.bridge   = CvBridge()
         self.scan_pub = rospy.Publisher("~lane_scan", LaserScan, queue_size=1)
-
+        self.x_offset = -0.1  # +앞으로 0.30 m (−면 뒤로)
+        self.y_offset = 0.00   # +왼쪽   0.00 m (−면 오른쪽)
+        self.ang_inc   = (self.angle_max - self.angle_min) / self.n_beams
         rospy.Subscriber(self.cinfo_topic, CameraInfo, self.cinfo_cb, queue_size=1)
         rospy.Subscriber(self.mask_topic,  Image,      self.mask_cb,  queue_size=1)
 
@@ -94,8 +96,10 @@ class LaneMaskToScan:
                 t    = self.h_cam / y[valid]
                 pts  = dirs * t.unsqueeze(1)
 
-                xb =  pts[:, 2] - 0.5
-                yb = -pts[:, 0]
+                # xb =  pts[:, 2]
+                # yb = -pts[:, 0]
+                xb =  pts[:, 2] + self.x_offset   # forward/back
+                yb = -pts[:, 0] + self.y_offset   # left/right
                 dist = torch.hypot(xb, yb) * self.range_scale
                 ang  = torch.atan2(yb, xb)
 

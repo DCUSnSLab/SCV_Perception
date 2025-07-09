@@ -118,25 +118,28 @@ class LaneLineNode:
             rospy.logerr("CvBridge error: %s", e)
 
     def image_cb(self, msg: Image):
-        t0 = time.perf_counter() 
+        t0 = time.perf_counter()
         try:
             cv_img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-            
+
+            # ── (NEW) 전체 프레임 밝기 낮추기 ────────────────────────────────
+            # alpha=0.6이면 원본 대비 60 % 밝기
+            cv_img = cv2.convertScaleAbs(cv_img, alpha=0.9, beta=0)
+
             h, w = cv_img.shape[:2]
-            # 사용자가 지정한 점 6개 가져오기
             hexagon = np.array(self.hexagon_points, np.int32)
 
             # --------------------------------
-            # ROI 마스크 생성
             mask = np.zeros((h, w), dtype=np.uint8)
             cv2.fillPoly(mask, [hexagon], 255)
 
             # --------------------------------
-            # 반전 마스크 사용: 육각형 영역만 검은색
-            inverted_mask = cv2.bitwise_not(mask)
+            green_mask = np.zeros_like(cv_img)
+            green_mask[mask == 255] = [0, 0, 0]
 
-            # 반전 마스크 적용
+            inverted_mask = cv2.bitwise_not(mask)
             roi_img = cv2.bitwise_and(cv_img, cv_img, mask=inverted_mask)
+            roi_img = cv2.add(roi_img, green_mask)
 
             self._process(roi_img, msg.header)
 
@@ -144,7 +147,6 @@ class LaneLineNode:
             rospy.logerr("CvBridge error: %s", e)
 
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
-        # print(f"[yolop_lane_detection node] 1 frame = {elapsed_ms:.1f} ms")
 
     # ------------------------------------------------------------------
     def _preprocess(self, img: np.ndarray):
