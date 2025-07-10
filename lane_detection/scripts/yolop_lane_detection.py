@@ -34,37 +34,64 @@ class LaneLineNode:
         rospy.init_node("lane_line_node", anonymous=True)
 
         # ==== Parameters ====
-        self.weights_path = rospy.get_param("~weights_path", "weights/LaneLine.pth")
-        self.device_name = rospy.get_param("~device", "cuda:0")
-        self.img_size = int(rospy.get_param("~img_size", 640))
-        self.conf_debug = rospy.get_param("~debug", False)
-        self.camera_topic = rospy.get_param("~camera_topic", "/camera/image_raw")
+        self.weights_path   = rospy.get_param("~weights_path", "weights/LaneLine.pth")
+        self.device_name    = rospy.get_param("~device", "cuda:0")
+        self.img_size       = int(rospy.get_param("~img_size", 640))
+        self.conf_debug     = rospy.get_param("~debug", False)
+        self.camera_topic   = rospy.get_param("~camera_topic", "/camera/image_raw")
         self.use_compressed = rospy.get_param("~use_compressed", False)
-        self.max_hz   = float(rospy.get_param("~max_hz", 15.0))
-        self.min_dt   = 1.0 / self.max_hz
-        self._last_ts = 0.0
-        # transform
+        self.max_hz         = float(rospy.get_param("~max_hz", 15.0))
+        self.min_dt         = 1.0 / self.max_hz
+        self._last_ts       = 0.0
+
+        # transforms ···
         self.normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                                std=[0.229, 0.224, 0.225])
+                                              std =[0.229, 0.224, 0.225])
         self.transform = transforms.Compose([transforms.ToTensor(), self.normalize])
 
-        self.bridge = CvBridge()
-        self.logger, _, _ = create_logger(cfg, cfg.LOG_DIR, "lane_line_ros")
-        self.device = select_device(self.logger, self.device_name)
-        self.half = self.device.type != "cpu"
+        self.bridge        = CvBridge()
+        self.logger, _, _  = create_logger(cfg, cfg.LOG_DIR, "lane_line_ros")
+        self.device        = select_device(self.logger, self.device_name)
+        self.half          = self.device.type != "cpu"
 
-        self.hexagon_points = [
-            (438, 1076),   # 왼쪽 아래
-            (558,  679),   # 왼쪽 중간
-            (766,  502),   # 왼쪽 위
-            (1137, 522),   # 오른쪽 위
-            (1320, 685),   # 오른쪽 중간
-            (1431, 1079)   # 오른쪽 아래
-        ]
+        self.driving_option = rospy.get_param("/driving_option", 0)
+
+        # ── ROI 꼭짓점 ────────────────────────────────────────────
+        #self.hexagon_points = np.array([
+        #    (438, 1076), (558, 679), (766, 502),
+        #    (1137, 522), (1320, 685), (1431, 1079)
+        #], np.int32)
+        self.hexagon_points = np.array([
+            (436, 1079),
+            (500, 600),
+            (700, 410),
+            (960, 0),
+            (960, 0),
+            (1160, 405),
+            (1350, 600),
+            (1412, 1079)
+        ], np.int32)
+        # ── CHANGED: 마스크 캐시용 변수 초기화 ─────────────────────
+        self._mask        = None     # 8-bit mask (ROI = 255)
+        self._inv_mask    = None     # 8-bit inverted mask
+        self._green_layer = None     # 3-ch RGB layer to 덮어쓰기
 
         self._load_model()
         self._init_ros_io()
-        rospy.loginfo("Lane‑line node initialised and ready.")
+        rospy.loginfo("Lane-line node initialised and ready.")
+    
+    def _ensure_masks(self, h: int, w: int, sample_img: np.ndarray):
+        """프레임 해상도가 변하면 새로 생성한다."""
+        if self._mask is not None and self._mask.shape[0] == h and self._mask.shape[1] == w:
+            return                                           # 그대로 사용
+
+        # ── CHANGED: 마스크 1회 생성 ─────────────────────────────
+        self._mask     = np.zeros((h, w), dtype=np.uint8)
+        cv2.fillPoly(self._mask, [self.hexagon_points], 255)
+        self._inv_mask = cv2.bitwise_not(self._mask)
+
+        self._green_layer             = np.zeros_like(sample_img)
+        self._green_layer[self._mask == 255] = (0, 0, 0)     # 검은색 덮기
 
     # ------------------------------------------------------------------
     def _load_model(self):
@@ -118,35 +145,32 @@ class LaneLineNode:
             rospy.logerr("CvBridge error: %s", e)
 
     def image_cb(self, msg: Image):
-        t0 = time.perf_counter()
         try:
+            t0 = time.perf_counter()
             cv_img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
-
-            # ── (NEW) 전체 프레임 밝기 낮추기 ────────────────────────────────
-            # alpha=0.6이면 원본 대비 60 % 밝기
-            cv_img = cv2.convertScaleAbs(cv_img, alpha=0.9, beta=0)
+            
+            # 주행 옵션 7 → 전체 검은 화면
+            self.driving_option = int(rospy.get_param("/driving_option",
+                                                      self.driving_option))
+            if self.driving_option == 7:
+                cv_img.fill(0)  # np.zeros_like 보다 빠름
+                print(self.driving_option)
 
             h, w = cv_img.shape[:2]
-            hexagon = np.array(self.hexagon_points, np.int32)
+            self._ensure_masks(h, w, cv_img)                 # ── CHANGED
 
-            # --------------------------------
-            mask = np.zeros((h, w), dtype=np.uint8)
-            cv2.fillPoly(mask, [hexagon], 255)
+            
 
-            # --------------------------------
-            green_mask = np.zeros_like(cv_img)
-            green_mask[mask == 255] = [0, 0, 0]
-
-            inverted_mask = cv2.bitwise_not(mask)
-            roi_img = cv2.bitwise_and(cv_img, cv_img, mask=inverted_mask)
-            roi_img = cv2.add(roi_img, green_mask)
-
-            self._process(roi_img, msg.header)
+            # ── CHANGED: 캐시된 마스크 사용 & in-place add ─────────
+            roi_img = cv2.bitwise_and(cv_img, cv_img, mask=self._inv_mask)
+            cv2.add(roi_img, self._green_layer, dst=roi_img)
+            
+            self._process(cv_img, msg.header)
+            print(f"roi : {(time.perf_counter() - t0) * 1000.0:.1f} ms")
+            
 
         except CvBridgeError as e:
             rospy.logerr("CvBridge error: %s", e)
-
-        elapsed_ms = (time.perf_counter() - t0) * 1000.0
 
     # ------------------------------------------------------------------
     def _preprocess(self, img: np.ndarray):
@@ -207,9 +231,10 @@ class LaneLineNode:
             overlay_msg = self.bridge.cv2_to_imgmsg(overlay, "bgr8")
             overlay_msg.header = header
             self.overlay_pub.publish(overlay_msg)
+            
             t2 = time_synchronized()
-            elapsed_ms = (t2 - t1) * 1000          # s → ms
-            print(f"model : {elapsed_ms:.1f} ms")
+            #elapsed_ms = (t2 - t1) * 1000          # s → ms
+            #print(f"model : {elapsed_ms:.1f} ms")
             if self.conf_debug:
                 rospy.loginfo_once("First inference done in %.1f ms", (t2 - t1) * 1000)
         except Exception as e:

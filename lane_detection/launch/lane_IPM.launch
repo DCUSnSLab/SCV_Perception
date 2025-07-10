@@ -7,7 +7,7 @@
 
     <!-- ───── YOLOP lane-line 노드 인자 ───── -->
     <arg name="node_name"      default="lane_line_node"/>
-    <arg name="weights_path"   default="$(find lane_detection)/weights/W_07-07_best.pth"/>
+    <arg name="weights_path"   default="$(find lane_detection)/weights/W_06-27_best.pth"/>
     <arg name="device"         default="cuda:0"/>
     <arg name="img_size"       default="640"/>
 
