@@ -57,20 +57,20 @@ class LaneLineNode:
         self.driving_option = rospy.get_param("/driving_option", 0)
 
         # ── ROI 꼭짓점 ────────────────────────────────────────────
-        #self.hexagon_points = np.array([
-        #    (438, 1076), (558, 679), (766, 502),
-        #    (1137, 522), (1320, 685), (1431, 1079)
-        #], np.int32)
         self.hexagon_points = np.array([
-            (436, 1079),
-            (500, 600),
-            (700, 410),
-            (960, 0),
-            (960, 0),
-            (1160, 405),
-            (1350, 600),
-            (1412, 1079)
+           (438, 1076), (558, 679), (766, 502),
+           (1137, 522), (1320, 685), (1431, 1079)
         ], np.int32)
+        # self.hexagon_points = np.array([
+        #     (436, 1079),
+        #     (500, 600),
+        #     (700, 410),
+        #     (960, 0),
+        #     (960, 0),
+        #     (1160, 405),
+        #     (1350, 600),
+        #     (1412, 1079)
+        # ], np.int32)
         # ── CHANGED: 마스크 캐시용 변수 초기화 ─────────────────────
         self._mask        = None     # 8-bit mask (ROI = 255)
         self._inv_mask    = None     # 8-bit inverted mask
@@ -165,7 +165,7 @@ class LaneLineNode:
             roi_img = cv2.bitwise_and(cv_img, cv_img, mask=self._inv_mask)
             cv2.add(roi_img, self._green_layer, dst=roi_img)
             
-            self._process(cv_img, msg.header)
+            self._process(roi_img, msg.header)
             print(f"roi : {(time.perf_counter() - t0) * 1000.0:.1f} ms")
             
 
@@ -212,7 +212,7 @@ class LaneLineNode:
             
             num_lbl, lbls, stats, _ = cv2.connectedComponentsWithStats(bin_mask, connectivity=8)
             img_area   = bin_mask.shape[0] * bin_mask.shape[1]
-            min_area   = 0.002 * img_area          # 전체의 0.2 % 미만이면 잡음
+            min_area   = 0.01 * img_area          # 전체의 0.2 % 미만이면 잡음
             for i in range(1, num_lbl):            # 0 = background
                 if stats[i, cv2.CC_STAT_AREA] < min_area:
                     bin_mask[lbls == i] = 0
@@ -226,11 +226,11 @@ class LaneLineNode:
             
             # overlay for visual debugging
             
-            overlay = overlay_lane_mask(frame, mask)
+            # overlay = overlay_lane_mask(frame, mask)
             
-            overlay_msg = self.bridge.cv2_to_imgmsg(overlay, "bgr8")
-            overlay_msg.header = header
-            self.overlay_pub.publish(overlay_msg)
+            # overlay_msg = self.bridge.cv2_to_imgmsg(overlay, "bgr8")
+            # overlay_msg.header = header
+            # self.overlay_pub.publish(overlay_msg)
             
             t2 = time_synchronized()
             #elapsed_ms = (t2 - t1) * 1000          # s → ms
