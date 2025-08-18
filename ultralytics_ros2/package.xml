@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>ultralytics_ros2</name>
+  <version>0.1.0</version>
+  <description>ROS 2 wrapper node for Ultralytics YOLO segmentation visualization.</description>
+
+  <maintainer email="you@example.com">your_name</maintainer>
+  <license>Apache-2.0</license>
+
+  <!-- Build system for pure Python -->
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- ROS 2 runtime deps -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+
+  <!-- (선택) 메시지 퍼블리시를 확장하면 vision_msgs도 추가 -->
+  <!-- <exec_depend>vision_msgs</exec_depend> -->
+
+  <!-- OS 패키지(rosdep로 설치 가능) -->
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+
+  <!-- pip 패키지는 rosdep가 설치하지 않음: ultralytics 등은 수동 설치 필요 -->
+  <!-- <exec_depend>ultralytics</exec_depend> -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
