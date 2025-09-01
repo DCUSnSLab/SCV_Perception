@@ -1,0 +1,7 @@
+{
+  "package_name": "perception_interface",
+  "non_idl_tuples": [
+    "/home/jay/sort/src/perception_interface:msg/DetectionResult.msg",
+    "/home/jay/sort/src/perception_interface:msg/DetectionArray.msg"
+  ]
+}
