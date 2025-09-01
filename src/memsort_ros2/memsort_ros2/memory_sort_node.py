@@ -9,9 +9,10 @@ from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Header
 from cv_bridge import CvBridge
-from perception_interface.msg import DetectionResult, DetectionArray  # 실제 패키지명으로 변경
-from geometry_msgs.msg import Point, Polygon, Point32
-
+from perception_interface.msg import DetectionResult, DetectionArray  # 실제 msg 이름에 맞게 수정
+from geometry_msgs.msg import Point32, Polygon, Point
+from std_msgs.msg import Header
+from sensor_msgs.msg import Image as ROSImage
 
 
 # --------- OPTIONAL linear assignment (SciPy -> LAP -> greedy fallback) ---------
@@ -84,7 +85,7 @@ class KFBox:
         self.F = np.eye(7); self.H = np.zeros((4,7))
         self.H[0,0] = self.H[1,1] = self.H[2,2] = self.H[3,3] = 1.0
         self.set_dt(dt)
-        self.Q = np.diag([1,1,1,0.1,10,10,10]).astype(float) * q_scale
+        self.Q = np.diag([1,1,0.5,0.05,5,5,5]).astype(float) * q_scale
         self.R = np.diag([1,1,10,10]).astype(float) * r_scale
     def set_dt(self, dt):
         self.F[:] = np.eye(7)
@@ -125,7 +126,7 @@ class MemorySORT:
     def __init__(self, iou_thr_active=0.3, iou_thr_memory=0.2,
                  max_age_active=0, min_hits=3, memory_ttl_frames=30,
                  q_scale=1e-2, r_scale=1e-1, class_match=False,
-                 output_coasting=False, coast_inflate=0.05,
+                 output_coasting=True, coast_inflate=0.0,
                  use_mask_assoc=False, output_masks=False):
         self.iou_thr_active = float(iou_thr_active)
         self.iou_thr_memory = float(iou_thr_memory)
@@ -345,11 +346,11 @@ class MemorySortNode(Node):
         self.overlay_mask  = bool(p('overlay_mask', False).value)
         self.mask_alpha    = float(p('mask_alpha', 0.40).value)
 
-        self.iou_thr_active= float(p('iou_thr_active', 0.30).value)
-        self.iou_thr_memory= float(p('iou_thr_memory', 0.20).value)
+        self.iou_thr_active= float(p('iou_thr_active', 0.2).value)
+        self.iou_thr_memory= float(p('iou_thr_memory', 0.1).value)
         self.max_age_active= int(p('max_age_active', 0).value)
-        self.min_hits      = int(p('min_hits', 3).value)
-        self.memory_ttl_sec= float(p('memory_ttl_sec', 1.0).value)
+        self.min_hits      = int(p('min_hits', 1).value)
+        self.memory_ttl_sec= float(p('memory_ttl_sec', 2.0).value)
         self.q_scale       = float(p('q_scale', 1e-2).value)
         self.r_scale       = float(p('r_scale', 1e-1).value)
         self.class_match   = bool(p('class_match', False).value)
@@ -358,6 +359,7 @@ class MemorySortNode(Node):
         self.publish_overlay = bool(p('publish_overlay', True).value)
         self.out_fps       = float(p('out_fps', 0.0).value)
         self.save_path     = p('save_path', '').value
+        self.pub_detections = self.create_publisher(DetectionArray,'detection_results',10)
 
         # class filter
         self.COCO = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
@@ -396,7 +398,6 @@ class MemorySortNode(Node):
 
         self.sub = self.create_subscription(Image, self.image_topic, self.cb_image, qos)
         self.pub_overlay = self.create_publisher(Image, 'overlay', 1) if self.publish_overlay else None
-        self.pub_detections = self.create_publisher(DetectionArray, 'detection_results', 10)
 
         self.get_logger().info(f'Listening: {self.image_topic}')
         self.get_logger().info(f'Detector: {self.det} weights={self.weights} classes={self.classes_str}')
@@ -432,8 +433,8 @@ class MemorySortNode(Node):
             memory_ttl_frames=ttl_frames,
             q_scale=self.q_scale, r_scale=self.r_scale,
             class_match=self.class_match,
-            output_coasting=False,
-            coast_inflate=0.05,
+            output_coasting=True,
+            coast_inflate=0.0,
             use_mask_assoc=self.assoc_mask,
             output_masks=self.output_masks
         )
@@ -475,27 +476,44 @@ class MemorySortNode(Node):
         # tracker
         tracks = self.tracker.update(dets, dt=dt_use)
 
+        
         # draw
         for item in tracks:
+            # unpack basic data
             if len(item) >= 7:
-                x1,y1,x2,y2,tid,cls,pred = item[:7]
+                x1, y1, x2, y2, track_id, cls_id, is_pred = item[:7]
             else:
-                x1,y1,x2,y2,tid,cls = item; pred = 0
-            mask = item[7] if (len(item) >= 8) else None
+                x1, y1, x2, y2, track_id, cls_id = item
+                is_pred = 0
 
-            x1,y1,x2,y2 = map(int,[x1,y1,x2,y2])
-            color = (0,255,0) if pred == 0 else (0,200,255)
-            cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
-            lbl = f'ID {int(tid)}'
-            if pred == 1: lbl += ' (pred)'
-            if 0 <= int(cls) < len(self.COCO): lbl += f' {self.COCO[int(cls)]}'
-            cv2.putText(frame,lbl,(x1,max(15,y1-5)),cv2.FONT_HERSHEY_SIMPLEX,0.55,color,2)
+            mask = item[7] if len(item) >= 8 else None
 
+            # convert coordinates
+            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+
+            # color depending on prediction state
+            if is_pred == 1:
+                color = (100, 200, 255)   # gray for predicted (no detection)
+                label = f'ID {int(track_id)} (pred)'
+            else:
+                color = (100, 255, 0)       # green for detection + tracking
+                label = f'ID {int(track_id)}'
+
+            # add class name (if available)
+            if 0 <= int(cls_id) < len(self.COCO):
+                label += f' {self.COCO[int(cls_id)]}'
+
+            # draw rectangle and label
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, max(15, y1 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+            # optional segmentation mask overlay
             if self.overlay_mask and isinstance(mask, np.ndarray) and mask.shape[:2] == frame.shape[:2]:
                 overlay = frame.copy()
-                rng = np.random.default_rng(int(cls) + 12345)
-                col = tuple(int(c) for c in rng.integers(80, 255, size=3))
-                overlay[mask] = col
+                rng = np.random.default_rng(int(cls_id) + 12345)
+                mask_color = tuple(int(c) for c in rng.integers(80, 255, size=3))
+                overlay[mask] = mask_color
                 frame[:] = cv2.addWeighted(overlay, self.mask_alpha, frame, 1.0 - self.mask_alpha, 0)
 
         # publish overlay
@@ -506,6 +524,49 @@ class MemorySortNode(Node):
             out_msg.header.frame_id = msg.header.frame_id
             self.pub_overlay.publish(out_msg)
 
+        # --- DetectionArray 메시지 발행 ---
+        if self.pub_detections is not None:
+            det_array = DetectionArray()
+            det_array.header.stamp = msg.header.stamp
+            det_array.header.frame_id = msg.header.frame_id
+            det_array.model_name = "MemorySORT"
+            det_array.model_version = "v1.0"
+            det_array.source_image = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+
+            for item in tracks:
+                if len(item) >= 7:
+                    x1, y1, x2, y2, track_id, cls_id, is_pred = item[:7]
+                else:
+                    x1, y1, x2, y2, track_id, cls_id = item
+                    is_pred = 0
+                mask = item[7] if len(item) >= 8 else None
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2
+
+                dr = DetectionResult()
+                dr.header = det_array.header
+                dr.class_name = self.COCO[int(cls_id)] if 0 <= int(cls_id) < len(self.COCO) else "unknown"
+                dr.confidence = 1.0 if is_pred == 0 else 0.5
+                dr.track_id = int(track_id)
+                dr.centroid.x = float(cx)
+                dr.centroid.y = float(cy)
+                dr.centroid.z = 0.0
+
+                # Polygon 바운딩 박스
+                pt1 = Point32(x=float(x1), y=float(y1), z=0.0)
+                pt2 = Point32(x=float(x2), y=float(y1), z=0.0)
+                pt3 = Point32(x=float(x2), y=float(y2), z=0.0)
+                pt4 = Point32(x=float(x1), y=float(y2), z=0.0)
+                dr.bounding_box.points = [pt1, pt2, pt3, pt4]
+
+                if self.output_masks and mask is not None:
+                    dr.mask = self.bridge.cv2_to_imgmsg(mask.astype(np.uint8), encoding="mono8")
+
+                det_array.detections.append(dr)
+
+            self.pub_detections.publish(det_array)
+
+
         # save
         if self.video_writer is not None:
             if (W, H) != (self.vw_w, self.vw_h):
@@ -513,51 +574,6 @@ class MemorySortNode(Node):
                 pass
             else:
                 self.video_writer.write(frame)
-
-        # publish detection results
-        result_msg = DetectionArray()
-        result_msg.header = msg.header
-        result_msg.source_image = msg
-        result_msg.model_name = self.det
-        result_msg.model_version = self.weights
-
-        for item in tracks:
-            if len(item) < 6:
-                continue
-            x1, y1, x2, y2, track_id, cls_id = item[:6]
-            mask = item[7] if len(item) >= 8 else None
-
-            dr = DetectionResult()
-            dr.header = msg.header
-            dr.class_name = self.COCO[int(cls_id)] if 0 <= int(cls_id) < len(self.COCO) else 'unknown'
-            dr.confidence = 1.0  # ← 확신도 따로 저장 안되어 있으므로 임시로 1.0 사용
-            dr.track_id = int(track_id)
-
-            # bounding box
-            pt1 = Point32(x=x1, y=y1, z=0.0)
-            pt2 = Point32(x=x2, y=y1, z=0.0)
-            pt3 = Point32(x=x2, y=y2, z=0.0)
-            pt4 = Point32(x=x1, y=y2, z=0.0)
-            dr.bounding_box.points = [pt1, pt2, pt3, pt4]
-
-            # centroid
-            cx = (x1 + x2) / 2.0
-            cy = (y1 + y2) / 2.0
-            dr.centroid = Point(x=float(cx), y=float(cy), z=0.0)
-
-            # mask
-            if isinstance(mask, np.ndarray):
-                try:
-                    dr.mask = self.bridge.cv2_to_imgmsg(mask.astype(np.uint8)*255, encoding='mono8')
-                    dr.mask.header = msg.header
-                except Exception as e:
-                    self.get_logger().warn(f'Failed to encode mask: {e}')
-            else:
-                dr.mask = Image()  # 빈 메시지
-
-            result_msg.detections.append(dr)
-
-        self.pub_detections.publish(result_msg)
 
         # window
         if self.show_window:
