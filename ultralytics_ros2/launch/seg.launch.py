@@ -12,6 +12,7 @@ def generate_launch_description():
     yolo_model = LaunchConfiguration("yolo_model")
     input_topic = LaunchConfiguration("input_topic")
     result_image_topic = LaunchConfiguration("result_image_topic")
+    detection_topic = LaunchConfiguration("detection_topic")
     conf_thres = LaunchConfiguration("conf_thres")
     iou_thres = LaunchConfiguration("iou_thres")
     max_det = LaunchConfiguration("max_det")
@@ -23,11 +24,12 @@ def generate_launch_description():
                               description="Model file name under share/ultralytics_ros2/model or absolute path"),
         DeclareLaunchArgument("input_topic", default_value="/zed/zed_node/left/image_rect_color"),
         DeclareLaunchArgument("result_image_topic", default_value="yolo/seg_image"),
+        DeclareLaunchArgument("detection_topic", default_value="yolo/detections"),
         DeclareLaunchArgument("conf_thres", default_value="0.25"),
         DeclareLaunchArgument("iou_thres", default_value="0.45"),
         DeclareLaunchArgument("max_det", default_value="300"),
         DeclareLaunchArgument("device", default_value=""),
-        DeclareLaunchArgument("classes", default_value=""),  # 예: "0,1" (문자열)
+        DeclareLaunchArgument("classes", default_value="0,1,2,3,5,6,7,28"),  # 예: "0,1" (문자열)
 
         Node(
             package="ultralytics_ros2",
@@ -38,6 +40,7 @@ def generate_launch_description():
                 "yolo_model": yolo_model,
                 "input_topic": input_topic,
                 "result_image_topic": result_image_topic,
+                "detection_topic": detection_topic,
                 "conf_thres": conf_thres,
                 "iou_thres": iou_thres,
                 "max_det": max_det,

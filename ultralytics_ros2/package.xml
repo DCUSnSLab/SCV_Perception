@@ -13,8 +13,10 @@
   <!-- ROS 2 runtime deps -->
   <exec_depend>rclpy</exec_depend>
   <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
   <exec_depend>cv_bridge</exec_depend>
   <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>perception_interface</exec_depend>
 
   <!-- (선택) 메시지 퍼블리시를 확장하면 vision_msgs도 추가 -->
   <!-- <exec_depend>vision_msgs</exec_depend> -->

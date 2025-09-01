@@ -10,7 +10,10 @@ from rclpy.qos import qos_profile_sensor_data, QoSProfile
 from ament_index_python.packages import get_package_share_directory
 
 from sensor_msgs.msg import Image
+from geometry_msgs.msg import Point, Polygon, Point32
+from perception_interface.msg import DetectionResult, DetectionArray
 from ultralytics import YOLO
+import cv2
 
 
 class SegNode(Node):
@@ -21,6 +24,7 @@ class SegNode(Node):
         self.declare_parameter("yolo_model", "yolo11n-seg.pt")
         self.declare_parameter("input_topic", "image_raw")
         self.declare_parameter("result_image_topic", "yolo/seg_image")
+        self.declare_parameter("detection_topic", "yolo/detections")
 
         self.declare_parameter("conf_thres", 0.25)
         self.declare_parameter("iou_thres", 0.45)
@@ -39,6 +43,7 @@ class SegNode(Node):
         yolo_model = self.get_parameter("yolo_model").get_parameter_value().string_value
         self.input_topic = self.get_parameter("input_topic").get_parameter_value().string_value
         self.result_image_topic = self.get_parameter("result_image_topic").get_parameter_value().string_value
+        self.detection_topic = self.get_parameter("detection_topic").get_parameter_value().string_value
 
         self.conf_thres = self.get_parameter("conf_thres").value
         self.iou_thres = self.get_parameter("iou_thres").value
@@ -80,6 +85,7 @@ class SegNode(Node):
             Image, self.input_topic, self.image_cb, qos_profile_sensor_data
         )
         self.pub_img = self.create_publisher(Image, self.result_image_topic, QoSProfile(depth=1))
+        self.pub_detections = self.create_publisher(DetectionArray, self.detection_topic, QoSProfile(depth=1))
 
         self._last_log_t = 0.0
         self.get_logger().info("ultralytics_seg_node ready.")
@@ -102,6 +108,71 @@ class SegNode(Node):
             return
 
         res = results[0]
+        
+        # Create detection array message
+        detection_array = DetectionArray()
+        detection_array.header = msg.header
+        detection_array.source_image = msg
+        detection_array.model_name = "YOLO11"
+        detection_array.model_version = "v11"
+        detection_array.detections = []
+        
+        # Process each detection
+        if res.boxes is not None:
+            boxes = res.boxes.xyxy.cpu().numpy()  # x1, y1, x2, y2
+            confidences = res.boxes.conf.cpu().numpy()
+            class_ids = res.boxes.cls.cpu().numpy().astype(int)
+            
+            # Get masks if available (segmentation)
+            masks = None
+            if res.masks is not None:
+                masks = res.masks.data.cpu().numpy()
+            
+            for i in range(len(boxes)):
+                detection = DetectionResult()
+                detection.header = msg.header
+                
+                # Class name and confidence
+                detection.class_name = self.model.names[class_ids[i]]
+                detection.confidence = float(confidences[i])
+                
+                # Track ID (not available in detection mode, set to -1)
+                detection.track_id = -1
+                
+                # Bounding box as polygon
+                x1, y1, x2, y2 = boxes[i]
+                bbox_polygon = Polygon()
+                bbox_polygon.points = [
+                    Point32(x=float(x1), y=float(y1), z=0.0),
+                    Point32(x=float(x2), y=float(y1), z=0.0),
+                    Point32(x=float(x2), y=float(y2), z=0.0),
+                    Point32(x=float(x1), y=float(y2), z=0.0)
+                ]
+                detection.bounding_box = bbox_polygon
+                
+                # Centroid
+                detection.centroid = Point(
+                    x=float((x1 + x2) / 2),
+                    y=float((y1 + y2) / 2),
+                    z=0.0
+                )
+                
+                # Segmentation mask if available
+                if masks is not None and i < len(masks):
+                    mask = masks[i]
+                    mask_uint8 = (mask * 255).astype(np.uint8)
+                    detection.mask = self.bridge.cv2_to_imgmsg(mask_uint8, encoding="mono8")
+                else:
+                    # Create empty mask
+                    empty_mask = np.zeros((cv_img.shape[0], cv_img.shape[1]), dtype=np.uint8)
+                    detection.mask = self.bridge.cv2_to_imgmsg(empty_mask, encoding="mono8")
+                
+                detection_array.detections.append(detection)
+        
+        # Publish detection array
+        self.pub_detections.publish(detection_array)
+        
+        # Create and publish visualization
         vis_img = res.plot(
             conf=self.result_conf,
             line_width=self.result_line_width,
