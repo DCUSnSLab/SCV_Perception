@@ -13,7 +13,7 @@ import time
 from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
 from visualization_msgs.msg import Marker, MarkerArray
 from perception_interface.msg import DetectionArray
-from object_depth_tracker.filters import build as build_filter
+# Removed tracker filters - using Memory-SORT track IDs directly
 import struct
 import cv2
 
@@ -31,13 +31,7 @@ class ObjectDepthTracker(Node):
         self.declare_parameter("detection_topic", "yolo/detections")
         self.declare_parameter("depth_topic", "/depth_anything/depth_registered/image_rect")
         self.declare_parameter("camera_info_topic", "/zed/zed_node/left/camera_info")
-        self.declare_parameter("filter_type", "kalman_6d_v2")
-        
-        # Tracking parameters
-        self.declare_parameter("process_var", 1e-2)
-        self.declare_parameter("meas_var", 1e-1)
-        self.declare_parameter("dist_thresh", 1.0)
-        self.declare_parameter("max_age", 2.0)
+        # Removed filter_type and tracking parameters - using Memory-SORT directly
         self.declare_parameter("min_mask_pixels", 30)
         
         # Get track_class_ids parameter
@@ -58,13 +52,6 @@ class ObjectDepthTracker(Node):
         detection_topic = self.get_parameter("detection_topic").value
         depth_topic = self.get_parameter("depth_topic").value
         camera_info_topic = self.get_parameter("camera_info_topic").value
-        filter_name = self.get_parameter("filter_type").value
-        
-        # Get tracking parameters
-        self.process_var = self.get_parameter("process_var").value
-        self.meas_var = self.get_parameter("meas_var").value
-        self.dist_thresh = self.get_parameter("dist_thresh").value
-        self.max_age = self.get_parameter("max_age").value
         self.min_mask_pixels = int(self.get_parameter("min_mask_pixels").value)
         
         # Create comprehensive class mapping for YOLO models
@@ -98,23 +85,8 @@ class ObjectDepthTracker(Node):
         self.pointcloud_pub = self.create_publisher(
             PointCloud2, "debug_pointclouds", QoSProfile(depth=1))
         
-        # Initialize tracker with parameters
-        try:
-            if filter_name in ["kalman_6d", "kalman_6d_v2"]:
-                self.tracker = build_filter(filter_name, 
-                                           process_var=self.process_var,
-                                           meas_var=self.meas_var, 
-                                           dist_thresh=self.dist_thresh,
-                                           max_age=self.max_age)
-            else:
-                self.tracker = build_filter(filter_name)
-        except Exception as e:
-            self.get_logger().error(f"Failed to initialize filter '{filter_name}': {e}")
-            self.get_logger().info("Falling back to centroid filter")
-            self.tracker = build_filter("centroid")
-        
-        self.get_logger().info(f"Using filter: {filter_name}")
-        self.get_logger().info(f"Tracker ready (track ids={self.track_ids})")
+        # No internal tracker needed - using Memory-SORT track IDs
+        self.get_logger().info(f"3D converter ready (track ids={self.track_ids})")
         
         # Debug: store point clouds for visualization
         self.debug_pointclouds = []
@@ -431,13 +403,16 @@ class ObjectDepthTracker(Node):
         # Convert depth image
         depth = self.bridge.imgmsg_to_cv2(depth_msg, "32FC1")
         stamp = depth_msg.header.stamp
-        stamp_sec = stamp.sec + stamp.nanosec * 1e-9
-        frame = depth_msg.header.frame_id or "zed_left_camera"
+        frame = depth_msg.header.frame_id or "zed_camera_link"
 
-        measurements = []
+        tracked_objects = []
 
-        # Process detections
+        # Process detections with Memory-SORT track IDs
         for det in detection_msg.detections:
+            # Skip if no valid track ID from Memory-SORT
+            if det.track_id < 0:
+                continue
+                
             # Check class filter
             class_name = det.class_name.lower()
             cls_id = self.class_map.get(class_name, -1)
@@ -464,9 +439,7 @@ class ObjectDepthTracker(Node):
                         
                     # Use center as tracking point
                     center_3d = bbox_3d_info['center']
-                    u_bar = int(cx + center_3d[0] * fx / center_3d[2])
-                    v_bar = int(cy + center_3d[1] * fy / center_3d[2])
-                    Z = float(center_3d[2])
+                    X, Y, Z = center_3d[0], center_3d[1], center_3d[2]
                     
                 except Exception as e:
                     self.get_logger().warn(f"Mask processing failed: {e}")
@@ -489,80 +462,184 @@ class ObjectDepthTracker(Node):
                                 Z = float(depth[v_bar, u_bar])
                                 if Z <= 0 or Z > 50.0:  # Filter unrealistic depths
                                     continue
+                                    
+                                # Convert to 3D coordinates
+                                X = (u_bar - cx) * Z / fx
+                                Y = (v_bar - cy) * Z / fy
                             else:
                                 continue
                         else:
                             center_3d = bbox_3d_info['center']
-                            u_bar = int((bbox[0].x + bbox[2].x) / 2)
-                            v_bar = int((bbox[0].y + bbox[2].y) / 2)
-                            Z = float(center_3d[2])
+                            X, Y, Z = center_3d[0], center_3d[1], center_3d[2]
                     else:
                         continue
                 except (IndexError, ValueError) as e:
                     self.get_logger().warn(f"Bounding box processing failed: {e}")
                     continue
 
-            # Convert to 3D coordinates with error checking
-            try:
-                if fx == 0 or fy == 0:
-                    self.get_logger().error("Invalid camera parameters (fx or fy is zero)")
-                    continue
-                    
-                X = (u_bar - cx) * Z / fx
-                Y = (v_bar - cy) * Z / fy
-                
-                # Sanity check for 3D coordinates
-                if abs(X) > 100 or abs(Y) > 100 or abs(Z) > 100:
-                    self.get_logger().debug(f"Unrealistic 3D coordinates: ({X:.2f}, {Y:.2f}, {Z:.2f})", throttle_duration_sec=5.0)
-                    continue
-                    
-                if bbox_3d_info is not None:
-                    # Include full bbox info: (xyz, cls_id, size, class_name, bbox_info_dict)
-                    measurements.append((np.array([X, Y, Z]), cls_id, bbox_3d_info['size'], det.class_name, bbox_3d_info))
-                    
-                    # Store debug pointcloud info
-                    if 'debug_pointcloud' in bbox_3d_info:
-                        debug_pc = bbox_3d_info['debug_pointcloud']
-                        debug_pc['class_name'] = det.class_name
-                        debug_pc['track_id'] = len(measurements) - 1  # Temporary ID
-                        self.debug_pointclouds.append(debug_pc)
-                else:
-                    measurements.append((np.array([X, Y, Z]), cls_id))
-            except Exception as e:
-                self.get_logger().warn(f"3D coordinate calculation failed: {e}")
+            # Sanity check for 3D coordinates
+            if abs(X) > 100 or abs(Y) > 100 or abs(Z) > 100:
+                self.get_logger().debug(f"Unrealistic 3D coordinates: ({X:.2f}, {Y:.2f}, {Z:.2f})", throttle_duration_sec=5.0)
                 continue
-
-        # Update tracker with error handling
-        try:
-            tracks = self.tracker.update(measurements, stamp_sec)
-        except Exception as e:
-            self.get_logger().error(f"Tracker update failed: {e}")
-            tracks = []
+                
+            # Create tracked object with Memory-SORT track ID
+            tracked_obj = {
+                'id': det.track_id,  # Use Memory-SORT track ID directly
+                'xyz': np.array([X, Y, Z]),
+                'class_name': det.class_name,
+                'cls_id': cls_id,
+                'bbox_3d': bbox_3d_info['size'] if bbox_3d_info else None,
+                'confidence': det.confidence
+            }
+            tracked_objects.append(tracked_obj)
+            
+            # Store debug pointcloud info
+            if bbox_3d_info and 'debug_pointcloud' in bbox_3d_info:
+                debug_pc = bbox_3d_info['debug_pointcloud']
+                debug_pc['class_name'] = det.class_name
+                debug_pc['track_id'] = det.track_id
+                self.debug_pointclouds.append(debug_pc)
         
         # Debug: Log track IDs
-        track_ids = [trk.id for trk in tracks]
+        track_ids = [obj['id'] for obj in tracked_objects]
         self.get_logger().info(f"Publishing tracks with IDs: {track_ids}", throttle_duration_sec=2.0)
         
-        # Publish markers (use original frame where coordinates were calculated)
-        marker_arr = self.to_markers(tracks, stamp, frame)
+        # Publish markers
+        marker_arr = self.to_markers_simple(tracked_objects, stamp, frame)
         self.marker_pub.publish(marker_arr)
         
-        # Publish BEV markers (same tracks, same original frame, but Z=0)
-        bev_arr = self.create_bev_markers(tracks, stamp, frame)
+        # Publish BEV markers
+        bev_arr = self.create_bev_markers_simple(tracked_objects, stamp, frame)
         self.bev_pub.publish(bev_arr)
         
         # Publish debug point clouds
         if self.debug_pointclouds:
             debug_pc_msg = self._create_debug_pointcloud_msg(stamp, frame)
             self.pointcloud_pub.publish(debug_pc_msg)
-            self.debug_pointclouds.clear()  # Clear for next frame
         
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         self.get_logger().info(
-            f"[obj_depth_tracker] Frame: {elapsed_ms:.1f}ms, Detections: {len(detection_msg.detections)}, "
-            f"Measurements: {len(measurements)}, Tracks: {len(tracks)}", 
+            f"[3d_converter] Frame: {elapsed_ms:.1f}ms, Detections: {len(detection_msg.detections)}, "
+            f"Valid 3D objects: {len(tracked_objects)}", 
             throttle_duration_sec=1.0
         )
+
+    def to_markers_simple(self, tracked_objects, stamp, frame):
+        arr = MarkerArray()
+
+        # Clear previous markers
+        clear = Marker()
+        clear.header.stamp = stamp
+        clear.header.frame_id = frame
+        clear.action = Marker.DELETEALL
+        arr.markers.append(clear)
+
+        # Add current tracked objects
+        for obj in tracked_objects:
+            # Center sphere marker
+            m = Marker()
+            m.header.stamp = stamp
+            m.header.frame_id = frame
+            m.ns = "tracked_pts"
+            m.id = obj['id']
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = float(obj['xyz'][0])
+            m.pose.position.y = float(obj['xyz'][1])
+            m.pose.position.z = float(obj['xyz'][2])
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = m.scale.z = 0.15
+            m.color.r, m.color.g, m.color.b, m.color.a = 0.0, 0.8, 1.0, 0.8
+            arr.markers.append(m)
+
+            # 3D Bounding Box
+            if obj['bbox_3d'] is not None:
+                bbox = Marker()
+                bbox.header.stamp = stamp
+                bbox.header.frame_id = frame
+                bbox.ns = "bbox_3d"
+                bbox.id = obj['id']
+                bbox.type = Marker.CUBE
+                bbox.action = Marker.ADD
+                bbox.pose.position.x = float(obj['xyz'][0])
+                bbox.pose.position.y = float(obj['xyz'][1])
+                bbox.pose.position.z = float(obj['xyz'][2])
+                bbox.pose.orientation.w = 1.0
+                
+                # Set size
+                bbox.scale.x = max(0.1, float(obj['bbox_3d'][0]))
+                bbox.scale.y = max(0.1, float(obj['bbox_3d'][1]))
+                bbox.scale.z = max(0.1, float(obj['bbox_3d'][2]))
+                
+                bbox.color.r, bbox.color.g, bbox.color.b, bbox.color.a = 1.0, 0.0, 0.0, 0.3
+                arr.markers.append(bbox)
+
+            # Text label
+            text = Marker()
+            text.header.stamp = stamp
+            text.header.frame_id = frame
+            text.ns = "labels"
+            text.id = obj['id']
+            text.type = Marker.TEXT_VIEW_FACING
+            text.action = Marker.ADD
+            text.pose.position.x = float(obj['xyz'][0])
+            text.pose.position.y = float(obj['xyz'][1])
+            text.pose.position.z = float(obj['xyz'][2]) + 0.3  # Above object
+            text.pose.orientation.w = 1.0
+            text.scale.z = 0.2
+            text.color.r, text.color.g, text.color.b, text.color.a = 1.0, 1.0, 1.0, 1.0
+            text.text = f"ID:{obj['id']} {obj['class_name']}"
+            arr.markers.append(text)
+            
+        return arr
+
+    def create_bev_markers_simple(self, tracked_objects, stamp, frame):
+        arr = MarkerArray()
+
+        # Clear previous markers
+        clear = Marker()
+        clear.header.stamp = stamp
+        clear.header.frame_id = frame
+        clear.action = Marker.DELETEALL
+        arr.markers.append(clear)
+
+        # Add current tracked objects for BEV (Bird's Eye View)
+        for obj in tracked_objects:
+            # BEV center marker (Z=0 for top-down view)
+            bev = Marker()
+            bev.header.stamp = stamp
+            bev.header.frame_id = frame
+            bev.ns = "bev_tracked_pts"
+            bev.id = obj['id']
+            bev.type = Marker.CYLINDER
+            bev.action = Marker.ADD
+            bev.pose.position.x = float(obj['xyz'][0])
+            bev.pose.position.y = float(obj['xyz'][1])
+            bev.pose.position.z = 0.0  # BEV: Z=0
+            bev.pose.orientation.w = 1.0
+            bev.scale.x = bev.scale.y = 0.3
+            bev.scale.z = 0.1
+            bev.color.r, bev.color.g, bev.color.b, bev.color.a = 0.0, 1.0, 0.0, 0.8
+            arr.markers.append(bev)
+
+            # BEV text label
+            bev_text = Marker()
+            bev_text.header.stamp = stamp
+            bev_text.header.frame_id = frame
+            bev_text.ns = "bev_labels"
+            bev_text.id = obj['id']
+            bev_text.type = Marker.TEXT_VIEW_FACING
+            bev_text.action = Marker.ADD
+            bev_text.pose.position.x = float(obj['xyz'][0])
+            bev_text.pose.position.y = float(obj['xyz'][1])
+            bev_text.pose.position.z = 0.2  # Slightly above BEV marker
+            bev_text.pose.orientation.w = 1.0
+            bev_text.scale.z = 0.15
+            bev_text.color.r, bev_text.color.g, bev_text.color.b, bev_text.color.a = 1.0, 1.0, 1.0, 1.0
+            bev_text.text = f"ID:{obj['id']}"
+            arr.markers.append(bev_text)
+            
+        return arr
 
     def to_markers(self, tracks, stamp, frame):
         arr = MarkerArray()

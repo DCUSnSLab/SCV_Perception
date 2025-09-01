@@ -13,7 +13,6 @@ def generate_launch_description():
     detection_topic = LaunchConfiguration("detection_topic")
     depth_topic = LaunchConfiguration("depth_topic")
     camera_info_topic = LaunchConfiguration("camera_info_topic")
-    filter_type = LaunchConfiguration("filter_type")
 
     return LaunchDescription([
         DeclareLaunchArgument(
@@ -33,11 +32,6 @@ def generate_launch_description():
             "camera_info_topic", 
             default_value="/zed/zed_node/left/camera_info"
         ),
-        DeclareLaunchArgument(
-            "filter_type", 
-            default_value="kalman_6d_v2",
-            description="Filter type: centroid, kalman_6d_v2"
-        ),
 
         Node(
             package="object_depth_tracker",
@@ -49,7 +43,6 @@ def generate_launch_description():
                 "detection_topic": detection_topic,
                 "depth_topic": depth_topic,
                 "camera_info_topic": camera_info_topic,
-                "filter_type": filter_type,
             }],
         ),
     ])
