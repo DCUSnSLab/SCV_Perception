@@ -1,1 +1,0 @@
-/home/jay/sort/build/perception_interface/ament_cmake_python/perception_interface/perception_interface.egg-info/top_level.txt

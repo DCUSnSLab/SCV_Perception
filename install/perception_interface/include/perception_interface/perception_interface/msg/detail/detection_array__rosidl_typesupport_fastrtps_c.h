@@ -1,1 +1,0 @@
-/home/jay/sort/build/perception_interface/rosidl_typesupport_fastrtps_c/perception_interface/msg/detail/detection_array__rosidl_typesupport_fastrtps_c.h

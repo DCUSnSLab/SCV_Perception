@@ -1,1 +1,0 @@
-/home/jay/sort/build/perception_interface/rosidl_generator_py/perception_interface/_perception_interface_s.ep.rosidl_typesupport_fastrtps_c.c

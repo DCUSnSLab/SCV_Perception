@@ -1,1 +1,0 @@
-/home/jay/sort/build/perception_interface/rosidl_typesupport_introspection_cpp/perception_interface/msg/detail/detection_result__rosidl_typesupport_introspection_cpp.hpp

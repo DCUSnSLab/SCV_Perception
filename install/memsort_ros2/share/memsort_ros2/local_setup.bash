@@ -1,1 +1,0 @@
-/home/jay/sort/build/memsort_ros2/ament_cmake_environment_hooks/local_setup.bash
