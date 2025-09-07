@@ -336,7 +336,7 @@ class MemorySortNode(Node):
         self.det           = p('det', 'v11').value                 # v11, v8, v11seg, v8seg
         self.weights       = p('weights', 'yolo11n.pt').value
         self.classes_str   = p('classes', 'person').value
-        self.conf          = float(p('conf', 0.25).value)
+        self.conf          = float(p('conf', 0.5).value)
         self.diou          = float(p('diou', 0.45).value)
         self.imgsz         = int(p('imgsz', 640).value)
         self.device        = p('device', None).value
@@ -362,15 +362,10 @@ class MemorySortNode(Node):
         self.pub_detections = self.create_publisher(DetectionArray,'detection_results',10)
 
         # class filter
-        self.COCO = ['person','bicycle','car','motorcycle','airplane','bus','train','truck','boat',
-                     'traffic light','fire hydrant','stop sign','parking meter','bench','bird','cat','dog','horse',
-                     'sheep','cow','elephant','bear','zebra','giraffe','backpack','umbrella','handbag','tie','suitcase',
-                     'frisbee','skis','snowboard','sports ball','kite','baseball bat','baseball glove','skateboard',
-                     'surfboard','tennis racket','bottle','wine glass','cup','fork','knife','spoon','bowl','banana',
-                     'apple','sandwich','orange','broccoli','carrot','hot dog','pizza','donut','cake','chair','couch',
-                     'potted plant','bed','dining table','toilet','tv','laptop','mouse','remote','keyboard','cell phone',
-                     'microwave','oven','toaster','sink','refrigerator','book','clock','vase','scissors','teddy bear',
-                     'hair drier','toothbrush']
+        self.COCO = ['person','vehicle','car','motorcycle','airplane','bus','train','truck']
+        print(self.COCO[2])
+        print(self.COCO[3])
+        print(self.COCO[7])
         self.class_filter = None
         if self.classes_str.strip():
             names = [s.strip() for s in self.classes_str.split(',') if s.strip()]
@@ -467,8 +462,24 @@ class MemorySortNode(Node):
             self.video_writer = cv2.VideoWriter(self.save_path, fourcc, fps_out, (W, H))
             self.vw_w, self.vw_h = W, H
 
+        
+
         # detector
         dets = self.detector.detect(frame)
+
+        # === 클래스 통합: car(2), motorcycle(3), truck(7) → vehicle(1) ===
+        vehicle_class_ids = {2, 3, 7}  # COCO 기준: car, motorcycle, truck
+        vehicle_cls_id = 1            # 통합 후 class_id로 사용할 값
+
+        dets_merged = []
+        for det in dets:
+            x1, y1, x2, y2, conf, cls = det[:6]
+            if int(cls) in vehicle_class_ids:
+                cls = vehicle_cls_id
+            dets_merged.append([x1, y1, x2, y2, conf, cls])
+
+        dets = dets_merged
+
         if self.class_filter is not None:
             dets = [d for d in dets if int(d[5]) in self.class_filter]
         dets = [d for d in dets if d[4] >= self.conf]
@@ -502,6 +513,9 @@ class MemorySortNode(Node):
             # add class name (if available)
             if 0 <= int(cls_id) < len(self.COCO):
                 label += f' {self.COCO[int(cls_id)]}'
+            else:
+                label += ' unknown'
+                print(f"[경고] 정의되지 않은 클래스 ID: {cls_id}")
 
             # draw rectangle and label
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
