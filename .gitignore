@@ -1,1 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+
+# IDE
+.vscode/
+.idea/
+
+# Experiments / models / datasets / videos / bags
+runs/
+**/runs/
+data/
+datasets/
 *.pt
+*.onnx
+*.engine
+*.trt
+*.mp4
+*.avi
+*.bag
+*.db3
