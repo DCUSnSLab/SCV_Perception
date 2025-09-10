@@ -85,7 +85,7 @@ class RoiInfer(Node):
         self.declare_parameter('debug_topic', '/tl/debug_image')
         self.declare_parameter('state_id_topic', '/tl/state_id')
 
-        self.declare_parameter('imgsz', 960)
+        self.declare_parameter('imgsz', 1088)
         self.declare_parameter('conf', 0.25)
         self.declare_parameter('iou', 0.50)
         self.declare_parameter('agnostic_nms', False)
