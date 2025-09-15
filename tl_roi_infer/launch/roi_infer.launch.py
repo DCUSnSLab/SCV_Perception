@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 # launch/roi_infer.launch.py
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -99,7 +100,7 @@ def generate_launch_description():
         DeclareLaunchArgument('img_lpf_bilateral_sigma_color', default_value='20.0'),
         DeclareLaunchArgument('img_lpf_bilateral_sigma_space', default_value='2.0'),
 
-        # ✅ 상태 퍼블리시 정책 기본값 (CLI 없이도 아래가 적용됨)
+        # 상태 퍼블리시 정책 기본값 (CLI 없이도 아래가 적용됨)
         DeclareLaunchArgument('state_pub_on_change', default_value='False'),
         DeclareLaunchArgument('state_pub_rate_hz',   default_value='20.0'),
 

@@ -1,56 +1,26 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# ---- hard switch: make cv_bridge bind to system NumPy (1.x), then restore user site ----
-import sys, os, glob
+# ── Standard ──
+import os
+import time
 
-MAJOR, MINOR = sys.version_info[:2]
-HOME = os.path.expanduser("~")
-USR_BASE = os.path.join(HOME, ".local", "lib", f"python{MAJOR}.{MINOR}")
-USR_SITE = os.path.join(USR_BASE, "site-packages")
-SYS_DIST = "/usr/lib/python3/dist-packages"   # Ubuntu/ROS Humble의 기본 dist-packages
+# ── Third-party ──
+import cv2
+import numpy as np
+import cv_bridge
+from ultralytics import YOLO
+import torch
 
-# 1) 시스템 dist-packages 우선
-if SYS_DIST not in sys.path:
-    sys.path.insert(0, SYS_DIST)
-
-# 2) 사용자 site 경로 일단 전부 제거 (NumPy 2.x 차단)
-_removed_user_paths = []
-for p in list(sys.path):
-    if p.startswith(USR_BASE):
-        _removed_user_paths.append(p)
-        sys.path.remove(p)
-
-# 3) 이제 cv_bridge를 로드 (NumPy 1.x에 결속)
-from cv_bridge import CvBridge  # <-- 여기서 numpy 1.x을 사용하게 강제
-
-# 4) 사용자 site 경로 복원 (YOLO/torch는 ~/.local 것을 쓰게)
-for p in [USR_SITE] + sorted(set(_removed_user_paths) - {USR_SITE}):
-    if p not in sys.path:
-        sys.path.append(p)
-
-# --------------------------------------------------------------------
+# ── ROS 2 core ──
 import rclpy
 from rclpy.node import Node
-try:
-    from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
-except ImportError:
-    # Humble에서의 백워드 호환
-    from rclpy.qos import QoSProfile, QoSReliabilityPolicy as ReliabilityPolicy, QoSHistoryPolicy as HistoryPolicy
-    try:
-        from rclpy.qos import QoSDurabilityPolicy as DurabilityPolicy
-    except Exception:
-        DurabilityPolicy = None
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
+from ament_index_python.packages import get_package_share_directory
 
+# ── ROS 2 msgs ──
 from sensor_msgs.msg import Image, CompressedImage
 from std_msgs.msg import Int32
-from ultralytics import YOLO
-import torch, cv2
-
-try:
-    from ament_index_python.packages import get_package_share_directory
-except Exception:
-    get_package_share_directory = None
 
 # ---------------------- 라벨 정규화 ----------------------
 def norm_label(s: str) -> str:
@@ -180,7 +150,7 @@ class RoiInfer(Node):
         self.state_pub_on_change = bool(g('state_pub_on_change'))
         self.state_keepalive_ms  = int(g('state_keepalive_ms'))
 
-        self.bridge = CvBridge()
+        self.bridge = cv_bridge.CvBridge()
         self.model = YOLO(self.model_path)
 
         # 카메라 구독 QoS (BEST_EFFORT)
