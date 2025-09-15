@@ -110,6 +110,8 @@ class DepthProcessor:
             
             # Compute centroid
             centroid = np.mean(points_3d, axis=0)
+            # Set Z coordinate to 0 (ground level)
+            centroid[1] = 0.0
             return centroid.astype(np.float32)
             
         except Exception as e:

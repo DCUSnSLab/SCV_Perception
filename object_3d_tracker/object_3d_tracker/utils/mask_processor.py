@@ -38,6 +38,13 @@ class MaskProcessor:
             # Get largest connected component
             binary_mask = self._get_largest_component(binary_mask)
             
+            # Erode mask by 10% to use more stable center region
+            binary_mask = self._erode_mask_by_percentage(binary_mask, erosion_percentage=0.1)
+            
+            # Final check for minimum pixels after erosion
+            if np.sum(binary_mask) < self.min_mask_pixels:
+                return None
+            
             return binary_mask
             
         except Exception as e:
@@ -68,6 +75,49 @@ class MaskProcessor:
         largest_label = int(np.argmax(areas)) + 1
         
         return (labels == largest_label).astype(np.uint8)
+    
+    def _erode_mask_by_percentage(self, mask, erosion_percentage=0.1):
+        """
+        Erode mask by a percentage to focus on stable center region
+        Args:
+            mask: binary mask
+            erosion_percentage: percentage to erode (0.1 = 10%)
+        Returns:
+            eroded binary mask
+        """
+        if np.sum(mask) < self.min_mask_pixels:
+            return mask
+        
+        # Find bounding box of the mask
+        coords = np.nonzero(mask)
+        if len(coords[0]) == 0:
+            return mask
+            
+        min_row, max_row = np.min(coords[0]), np.max(coords[0])
+        min_col, max_col = np.min(coords[1]), np.max(coords[1])
+        
+        # Calculate erosion amount based on bounding box size
+        height = max_row - min_row + 1
+        width = max_col - min_col + 1
+        
+        # Use smaller dimension for erosion calculation
+        min_dimension = min(height, width)
+        erosion_pixels = max(1, int(min_dimension * erosion_percentage / 2))
+        
+        # Create erosion kernel
+        kernel_size = 2 * erosion_pixels + 1
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        
+        # Apply erosion
+        eroded_mask = cv2.erode(mask, kernel, iterations=1)
+        
+        # If erosion removed too much, use smaller kernel
+        if np.sum(eroded_mask) < self.min_mask_pixels and erosion_pixels > 1:
+            kernel_size = 3
+            kernel = np.ones((kernel_size, kernel_size), np.uint8)
+            eroded_mask = cv2.erode(mask, kernel, iterations=1)
+        
+        return eroded_mask
     
     def get_mask_pixels(self, mask):
         """Get (y, x) coordinates of mask pixels"""

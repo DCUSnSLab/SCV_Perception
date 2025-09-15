@@ -7,7 +7,7 @@ import time
 
 class TrackingHistory:
     """Individual object tracking history"""
-    def __init__(self, max_history_size=10):
+    def __init__(self, max_history_size=20):
         self.positions = deque(maxlen=max_history_size)  # (timestamp, x, y, z)
         self.velocities = deque(maxlen=max_history_size-1)  # (timestamp, vx, vy, vz, speed)
         self.track_id = None
@@ -116,7 +116,7 @@ class TrackingHistory:
 class VelocityTracker:
     """Tracks velocities of multiple objects"""
     
-    def __init__(self, history_size=10, smoothing_window=3, min_velocity_threshold=0.05, 
+    def __init__(self, history_size=20, smoothing_window=3, min_velocity_threshold=0.05, 
                  velocity_outlier_threshold=10.0, cleanup_timeout=5.0):
         self.history_size = history_size
         self.smoothing_window = smoothing_window

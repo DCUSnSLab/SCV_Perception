@@ -415,3 +415,83 @@ class Visualizer:
                     marker_id += 1
         
         return markers
+    
+    def create_collision_markers(self, collision_predictions, frame_id, stamp):
+        """Create markers for collision predictions"""
+        marker_array = MarkerArray()
+        
+        if not collision_predictions:
+            return marker_array
+        
+        for i, collision in enumerate(collision_predictions):
+            # Color based on severity
+            if collision['severity'] == 'critical':
+                color = (1.0, 0.0, 0.0, 0.8)  # Red
+            elif collision['severity'] == 'warning':
+                color = (1.0, 0.5, 0.0, 0.8)  # Orange
+            else:
+                color = (1.0, 1.0, 0.0, 0.6)  # Yellow
+            
+            # Create warning sphere at collision point
+            collision_marker = Marker()
+            collision_marker.header.frame_id = frame_id
+            collision_marker.header.stamp = stamp
+            collision_marker.ns = "collision_points"
+            collision_marker.id = collision['track_id']
+            collision_marker.type = Marker.SPHERE
+            collision_marker.action = Marker.ADD
+            
+            # Position at predicted collision point
+            collision_marker.pose.position.x = float(collision['collision_point'][0])
+            collision_marker.pose.position.y = float(collision['collision_point'][1])
+            collision_marker.pose.position.z = float(collision['collision_point'][2])
+            collision_marker.pose.orientation.w = 1.0
+            
+            # Scale based on severity
+            if collision['severity'] == 'critical':
+                scale = 0.5
+            elif collision['severity'] == 'warning':
+                scale = 0.4
+            else:
+                scale = 0.3
+                
+            collision_marker.scale.x = scale
+            collision_marker.scale.y = scale
+            collision_marker.scale.z = scale
+            
+            # Set color
+            collision_marker.color.r = color[0]
+            collision_marker.color.g = color[1] 
+            collision_marker.color.b = color[2]
+            collision_marker.color.a = color[3]
+            
+            marker_array.markers.append(collision_marker)
+            
+            # Create TTC text marker
+            ttc_text_marker = Marker()
+            ttc_text_marker.header.frame_id = frame_id
+            ttc_text_marker.header.stamp = stamp
+            ttc_text_marker.ns = "collision_text"
+            ttc_text_marker.id = collision['track_id']
+            ttc_text_marker.type = Marker.TEXT_VIEW_FACING
+            ttc_text_marker.action = Marker.ADD
+            
+            # Position above collision point
+            ttc_text_marker.pose.position.x = float(collision['collision_point'][0])
+            ttc_text_marker.pose.position.y = float(collision['collision_point'][1])
+            ttc_text_marker.pose.position.z = float(collision['collision_point'][2]) + 0.5
+            ttc_text_marker.pose.orientation.w = 1.0
+            
+            # Text content
+            ttc_text_marker.text = f"TTC: {collision['ttc']:.1f}s\n{collision['severity'].upper()}"
+            
+            # Text properties
+            ttc_text_marker.scale.z = 0.2
+            ttc_text_marker.color.r = 1.0
+            ttc_text_marker.color.g = 1.0
+            ttc_text_marker.color.b = 1.0
+            ttc_text_marker.color.a = 1.0
+            
+            marker_array.markers.append(ttc_text_marker)
+        
+        return marker_array

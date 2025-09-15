@@ -5,10 +5,11 @@ import time
 import numpy as np
 import cv_bridge
 import rclpy
+import torch
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile
 from ament_index_python.packages import get_package_share_directory
-
+from ultralytics.engine.results import Boxes
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import Point, Polygon, Point32
 from perception_interface.msg import DetectionResult, DetectionArray
@@ -155,7 +156,23 @@ class SegNode(Node):
             return
 
         res = results[0]
-        
+        if res.boxes is not None:
+            class_ids = res.boxes.cls.cpu().numpy().astype(int)
+            vehicle_class_ids = {1, 2, 3, 5, 6, 7, 28}
+            vehicle_cls_id = 1
+            for i in range(len(class_ids)):
+                if class_ids[i] in vehicle_class_ids:
+                    class_ids[i] = vehicle_cls_id
+
+            # numpy → tensor 변환
+            new_cls = torch.tensor(class_ids, device=res.boxes.data.device).unsqueeze(1).float()
+            # 기존 data에서 cls 컬럼만 교체
+            new_data = res.boxes.data.clone()
+            new_data[:, 5:6] = new_cls  # xyxy, conf, cls 순서이므로 마지막 col이 cls
+
+            # 새로운 Boxes 객체로 교체
+            res.boxes = Boxes(new_data, res.boxes.orig_shape)
+
         # Prepare detections for tracker
         dets_for_tracker = []
         if res.boxes is not None:
