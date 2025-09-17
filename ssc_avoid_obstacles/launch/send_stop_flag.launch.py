@@ -25,7 +25,10 @@ def generate_launch_description():
         'max_z', default_value='1.5', description='ROI max Z (m)'
     )
     num_points_arg = DeclareLaunchArgument(
-        'num_of_points', default_value='500', description='장애물 판단 기준 점 개수'
+        'num_of_points', default_value='300', description='장애물 판단 기준 점 개수'
+    )
+    debug = DeclareLaunchArgument(
+        'debug', default_value='False', description='로그 출력 여부'
     )
 
     send_stop_flag_node = Node(
@@ -41,10 +44,11 @@ def generate_launch_description():
             'min_z': LaunchConfiguration('min_z'),
             'max_z': LaunchConfiguration('max_z'),
             'num_of_points': LaunchConfiguration('num_of_points'),
+            'debug': LaunchConfiguration('debug'),
         }],
     )
 
     return LaunchDescription([
-        min_x_arg, max_x_arg, min_y_arg, max_y_arg, min_z_arg, max_z_arg, num_points_arg,
+        min_x_arg, max_x_arg, min_y_arg, max_y_arg, min_z_arg, max_z_arg, num_points_arg, debug,
         send_stop_flag_node,
     ])
