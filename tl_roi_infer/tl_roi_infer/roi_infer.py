@@ -100,7 +100,15 @@ class RoiInfer(Node):
         self.declare_parameter('state_pub_on_change', True)  # 변경 시에만 전송
         self.declare_parameter('state_keepalive_ms', 1000)   # 변경 없을 때 keepalive 간격(ms), 0이면 keepalive 없음
 
+        # ----- 좌회전 우선순위 옵션 -----
+        self.declare_parameter('priority_left_enable', True)
+        self.declare_parameter('priority_left_margin', 0.10)  # left가 1등보다 이만큼 덜 세도 left로 선택
+
         g = lambda k: self.get_parameter(k).value
+
+        self.priority_left_enable = bool(g('priority_left_enable'))
+        self.priority_left_margin = float(g('priority_left_margin'))
+
         self.model_path = str(g('model_path'))
         self.image_topic = str(g('image_topic'))
         self.debug_topic = str(g('debug_topic'))
@@ -307,6 +315,21 @@ class RoiInfer(Node):
 
         # --- 상태 결정 ---
         best_lab, best_val = max(self.scores.items(), key=lambda kv: kv[1])
+
+        # 좌회전 우선 규칙: 같은 프레임에서 left와 다른 신호가 함께 잡히면(left 프레임 점수>0),
+        # left의 지수평활 점수가 1등보다 priority_left_margin 만큼만 덜 약해도(left_val + margin >= best)
+        # 혹은 left가 tau_hi를 넘겼다면 => left를 강제로 우선 선택.
+        if self.priority_left_enable:
+            left_val = self.scores.get('left', 0.0)
+            co_detected = (frame_score.get('left', 0.0) > 0.0) and any(
+                (k != 'left' and v > 0.0) for k, v in frame_score.items()
+            )
+            if co_detected and ((left_val + self.priority_left_margin) >= best_val or left_val >= self.lp_tau_hi):
+                if best_lab != 'left':
+                    self.get_logger().info(
+                        f"[PRIO] forcing LEFT over {best_lab} (left={left_val:.2f}, best={best_val:.2f}, margin={self.priority_left_margin:.2f})"
+                    )
+                best_lab, best_val = 'left', left_val
         now = self.get_clock().now()
         ms_since_change = (now - self.last_change).nanoseconds / 1e6
         ms_since_seen   = (now - self.last_seen).nanoseconds / 1e6
