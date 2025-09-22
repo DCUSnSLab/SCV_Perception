@@ -24,6 +24,7 @@ TOPIC_ROI_PUB = '/roi_vis'
 TOPIC_FLAG_PUB = '/stop_flag'
 STANDARD_FRAME = 'zed_camera_center'    ## ROI 영역이 시각화될 기준 프레임
 PUB_HZ = 10
+MAX_NUM = 0                             ## 가장 많이 검출된 점의 개수(계속 갱신됨)
 
 MIN_X, MAX_X = 4.0, 8.0                 ## 3차원 ROI가 시작/끝나는 지점과 기준 프레임과의 거리(X)
 MIN_Y, MAX_Y = -1.0, 1.0                ## 2차원 ROI의 우측/좌측 끝(Y)
@@ -181,7 +182,7 @@ class PointCloudSubscriber(Node):
             self.get_logger().info(f"[Info] flag = {flag.data}")
 
     def check_obstacles(self, data: PointCloud2) -> bool:
-        global NUM_OF_POINTS
+        global NUM_OF_POINTS, MAX_NUM
         try:
             arr = pc2.read_points_numpy(data, field_names=("x","y","z"))
             k = 4
@@ -197,8 +198,11 @@ class PointCloudSubscriber(Node):
             )
 
             cnt = int(in_roi.sum())
+            if cnt > MAX_NUM:
+                MAX_NUM = cnt
             if DEBUG:
                 self.get_logger().info(f"[Info] points = {cnt} / {NUM_OF_POINTS}")
+                self.get_logger().info(f"[Info] max_num = {MAX_NUM}")
             return cnt >= NUM_OF_POINTS
 
         except AttributeError:
