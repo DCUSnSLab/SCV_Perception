@@ -7,25 +7,25 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     min_x_arg = DeclareLaunchArgument(
-        'min_x', default_value='4.0', description='ROI min X (m)'
+        'min_x', default_value='2.0', description='ROI min X (m)'
     )
     max_x_arg = DeclareLaunchArgument(
-        'max_x', default_value='7.0', description='ROI max X (m)'
+        'max_x', default_value='3.5', description='ROI max X (m)'
     )
     min_y_arg = DeclareLaunchArgument(
-        'min_y', default_value='-2.0', description='ROI min Y (m)'
+        'min_y', default_value='-1.0', description='ROI min Y (m)'
     )
     max_y_arg = DeclareLaunchArgument(
-        'max_y', default_value='2.0', description='ROI max Y (m)'
+        'max_y', default_value='0.5', description='ROI max Y (m)'
     )
     min_z_arg = DeclareLaunchArgument(
-        'min_z', default_value='0.5', description='ROI min Z (m)'
+        'min_z', default_value='-1.0', description='ROI min Z (m)'
     )
     max_z_arg = DeclareLaunchArgument(
-        'max_z', default_value='3.0', description='ROI max Z (m)'
+        'max_z', default_value='0.5', description='ROI max Z (m)'
     )
-    num_points_arg = DeclareLaunchArgument(
-        'num_of_points', default_value='520', description='장애물 판단 기준 점 개수'
+    min_cluster_size_arg = DeclareLaunchArgument(
+        'min_cluster_size', default_value='1200', description='장애물 판단 기준 점 개수'
     )
     debug = DeclareLaunchArgument(
         'debug', default_value='False', description='로그 출력 여부'
@@ -43,12 +43,12 @@ def generate_launch_description():
             'max_y': LaunchConfiguration('max_y'),
             'min_z': LaunchConfiguration('min_z'),
             'max_z': LaunchConfiguration('max_z'),
-            'num_of_points': LaunchConfiguration('num_of_points'),
+            'min_cluster_size': LaunchConfiguration('min_cluster_size'),
             'debug': LaunchConfiguration('debug'),
         }],
     )
 
     return LaunchDescription([
-        min_x_arg, max_x_arg, min_y_arg, max_y_arg, min_z_arg, max_z_arg, num_points_arg, debug,
+        min_x_arg, max_x_arg, min_y_arg, max_y_arg, min_z_arg, max_z_arg, min_cluster_size_arg, debug,
         send_stop_flag_node,
     ])

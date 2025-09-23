@@ -26,7 +26,7 @@ TOPIC_PNT_SUB = '/zed/zed_node/point_cloud/cloud_registered'
 TOPIC_ROI_PUB = '/roi_vis'
 TOPIC_FLAG_PUB = '/stop_flag'
 TOPIC_CLUSTER_PUB = '/clusters_vis'
-STANDARD_FRAME = 'base_link'
+STANDARD_FRAME = 'zed_camera_center'
 PUB_HZ = 10
 MAX_NUM = 0
 
@@ -38,7 +38,7 @@ MIN_Z, MAX_Z = 1.5, 3.0
 # DBSCAN 파라미터
 DBSCAN_EPS = 0.2
 DBSCAN_MIN_SAMPLES = 5
-MIN_CLUSTER_SIZE = 250
+MIN_CLUSTER_SIZE = 1300
 
 DEBUG = False
 
@@ -200,6 +200,7 @@ class PointCloudSubscriber(Node):
         if self.debug:
             elapsed = (self.get_clock().now() - start).nanoseconds / 1e6
             self.get_logger().info(f"[Time] callback took {elapsed:.2f} ms | flag={flag.data}")
+            
 
     def check_obstacles_with_dbscan(self, data: PointCloud2):
         global MAX_NUM
@@ -228,6 +229,9 @@ class PointCloudSubscriber(Node):
             )
             roi_pts = pts[in_roi_mask]
             cnt = int(roi_pts.shape[0])
+            if self.debug:
+                self.get_logger().info(f"[Info] {cnt}")
+                
             if cnt > MAX_NUM:
                 MAX_NUM = cnt
 
