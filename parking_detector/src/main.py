@@ -23,20 +23,21 @@ class ParkingAreaDetect(Node):
         self.bridge = CvBridge()
         
         try:
-            self.model = YOLO('/home/pgw/SCV/src/perception/parking_detector/model/yellow_box/last.pt')
+            self.model = YOLO('/home/ssc/SCV/src/perception/parking_detector/model/yellow_box/last.pt')
             self.get_logger().info('YOLO model loaded successfully')
         except Exception as e:
             self.get_logger().error(f'Failed to load YOLO model: {str(e)}')
             self.model = None
         
         self.zed_img_sub = self.create_subscription(Image, '/zed/zed_node/left/image_rect_color', self._img_callback, 10)
-        self.waypoints_sub = self.create_subscription(MultipleWaypoints, '/MultipleWaypoints', self._waypoints_callback, 10)
-        self.tp_area_pub = self.create_publisher(Bool, '/parking/TP_area', 10)
+        self.waypoints_sub = self.create_subscription(MultipleWaypoints, '/multiple_waypoints', self._waypoints_callback, 10)
+
+        self.tp_area_pub = self.create_publisher(Bool, '/path_availability', 10)
         self.img_pub = self.create_publisher(Image, '/parking/img', 10)
 
         self.section = None
         self.decisions = []  # 1초 동안 수집할 리스트
-        self.start_time = None 
+        self.start_time = None
                 
     def _img_callback(self, msg):
         if self.model is None or self.section is None:
