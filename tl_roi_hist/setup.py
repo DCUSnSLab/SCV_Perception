@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', ['config/tl_crop_only.param.yaml']),
-        ('share/' + package_name + '/launch', ['launch/roi_hist.launch.py']),
+        ('share/' + package_name + '/launch', ['launch/roi_hist.launch.py', 'launch/combo.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
