@@ -13,19 +13,19 @@ def generate_launch_description():
         'max_x', default_value='3.5', description='ROI max X (m)'
     )
     min_y_arg = DeclareLaunchArgument(
-        'min_y', default_value='-1.0', description='ROI min Y (m)'
+        'min_y', default_value='-1.5', description='ROI min Y (m)'
     )
     max_y_arg = DeclareLaunchArgument(
-        'max_y', default_value='0.5', description='ROI max Y (m)'
+        'max_y', default_value='1.5', description='ROI max Y (m)'
     )
     min_z_arg = DeclareLaunchArgument(
-        'min_z', default_value='-1.0', description='ROI min Z (m)'
+        'min_z', default_value='-0.5', description='ROI min Z (m)'
     )
     max_z_arg = DeclareLaunchArgument(
-        'max_z', default_value='0.5', description='ROI max Z (m)'
+        'max_z', default_value='1.0', description='ROI max Z (m)'
     )
     min_cluster_size_arg = DeclareLaunchArgument(
-        'min_cluster_size', default_value='1200', description='장애물 판단 기준 점 개수'
+        'min_cluster_size', default_value='1300', description='장애물 판단 기준 점 개수'
     )
     debug = DeclareLaunchArgument(
         'debug', default_value='False', description='로그 출력 여부'

@@ -10,7 +10,7 @@ setup(
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         ('share/' + package_name + '/config', ['config/tl_crop_only.param.yaml']),
-        ('share/' + package_name + '/launch', ['launch/tl_crop_only.launch.py']),
+        ('share/' + package_name + '/launch', ['launch/roi_hist.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,7 +20,7 @@ setup(
     license='MIT',
     entry_points={
         'console_scripts': [
-            'tl_crop_only = tl_roi_hist.tl_crop_only_node:main',
+            'tl_crop_only = tl_roi_hist.tl_roi_hist:main',
         ],
     },
 )
