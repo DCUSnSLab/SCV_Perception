@@ -12,7 +12,7 @@ runs/
 **/runs/
 data/
 datasets/
-*.pt
+#*.pt
 *.onnx
 *.engine
 *.trt
