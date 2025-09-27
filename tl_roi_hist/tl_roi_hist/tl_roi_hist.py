@@ -155,6 +155,13 @@ class TLCropOnlyNode(Node):
         self.lt_y_max  = float(self.get_parameter('lt_y_max').value)
         self.lt_valid_min = int(self.get_parameter('lt_valid_min').value)
 
+        # ---- 퍼블리시 주기 / GO 홀드(새 파라미터) ----
+        self.declare_parameter('pub_rate_hz', 10.0)   # 퍼블리시 고정 주기(기본 10Hz)
+        self.declare_parameter('go_hold_s', 0.3)      # G/좌회전 유지 시간(기본 0.3s)
+
+        self.pub_rate_hz = float(self.get_parameter('pub_rate_hz').value)
+        self.go_hold_s   = float(self.get_parameter('go_hold_s').value)
+
         # Fetch params
         self.model_path  = self.get_parameter('model_path').value
         self.image_topic = self.get_parameter('image_topic').value
@@ -226,6 +233,13 @@ class TLCropOnlyNode(Node):
         self.current_state = 0
         self.last_change_ns = self.now_ns()
         self.last_seen_box_ns = self.now_ns()
+
+        # ---- 퍼블리시 상태(타이머가 이 값만 반복 송신) ----
+        self.mapped_output = None   # None=정지, 1 또는 3이면 해당 값 반복 퍼블리시
+
+        # ---- 타이머 퍼블리셔(고정 주기) ----
+        period = 1.0 / max(1e-3, self.pub_rate_hz)
+        self.pub_timer = self.create_timer(period, self._pub_tick)
 
     # ---------- Utilities ----------
     def now_ns(self):
@@ -310,6 +324,13 @@ class TLCropOnlyNode(Node):
         candidates.sort(key=lambda t: t[0], reverse=True)
         return candidates[0][1]
 
+    # ---------- 고정 주기 퍼블리셔 ----------
+    def _pub_tick(self):
+        if self.mapped_output is not None:
+            try:
+                self.pub_state.publish(Int32(data=int(self.mapped_output)))
+            except Exception as e:
+                self.get_logger().warn(f'pub state_id: {e}')
 
     # ---------- Main Callback ----------
     def cb(self, msg: Image):
@@ -335,6 +356,7 @@ class TLCropOnlyNode(Node):
         roi_dbg = roi.copy()
 
         try:
+            # NOTE: classes=[9]는 모델 클래스 맵에 의존함. 필요시 조정/해제.
             results = self.model.predict(roi, classes=[9], verbose=False)
         except Exception as e:
             self.get_logger().warn(f'YOLO predict error: {e}')
@@ -399,7 +421,8 @@ class TLCropOnlyNode(Node):
         self.ema = (1.0 - alpha) * self.ema + alpha * scores
 
         # ---------- 상태 판정 ----------
-        proposed = 0  # 0=UNK, 1=R, 2=Y, 3=G, 4=R+G
+        # 0=UNK, 1=R, 2=Y, 3=G, 4=R+G
+        proposed = 0
 
         missing_ms = self.ns_to_ms(t_ns - self.last_seen_box_ns)
         if not has_box and missing_ms < self.missing_timeout_ms:
@@ -448,6 +471,7 @@ class TLCropOnlyNode(Node):
             self.current_state = new_state
             self.last_change_ns = t_ns
 
+        # ---------- 디버그 이미지 퍼블리시 ----------
         try:
             self.pub_roi_dbg.publish(self.bridge.cv2_to_imgmsg(roi_dbg, 'bgr8'))
         except Exception as e:
@@ -456,10 +480,31 @@ class TLCropOnlyNode(Node):
             self.pub_zoom.publish(self.bridge.cv2_to_imgmsg(zoom, 'bgr8'))
         except Exception as e:
             self.get_logger().warn(f'pub zoom_image: {e}')
-        try:
-            self.pub_state.publish(Int32(data=int(self.current_state)))
-        except Exception as e:
-            self.get_logger().warn(f'pub state_id: {e}')
+
+        # ---------- 최종 출력 매핑 (타이머가 반복 퍼블리시) ----------
+        cur = int(self.current_state)
+        age_s = self.ns_to_ms(t_ns - self.last_change_ns) / 1000.0
+
+        if cur in (1, 2):
+            # 빨강/노랑은 즉시 '정지'로 매핑 → 1을 고정 주기로 반복 퍼블리시
+            self.mapped_output = 1
+
+        elif cur in (3, 4):
+            # 초록/좌회전은 go_hold_s 이상 연속 유지되면 '진행' → 3 반복 퍼블리시
+            if age_s >= self.go_hold_s:
+                self.mapped_output = 3
+            # 유지 시간 미만이면 이전 mapped_output 유지 (전환 보류)
+
+        else:
+            # UNK: 퍼블리시 중지
+            self.mapped_output = None
+
+    def main_quit_cleanup(self):
+        if self.show_windows:
+            try:
+                cv2.destroyAllWindows()
+            except:
+                pass
 
 def main():
     rclpy.init()
@@ -468,11 +513,7 @@ def main():
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    if node.show_windows:
-        try:
-            cv2.destroyAllWindows()
-        except:
-            pass
+    node.main_quit_cleanup()
     node.destroy_node()
     rclpy.shutdown()
 
