@@ -6,18 +6,15 @@ find_package(ament_cmake_python REQUIRED)
 find_package(rclpy REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
-find_package(rosidl_default_generators REQUIRED)
+find_package(command_center_interfaces REQUIRED)  # 이 라인 추가
 
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-  "msg/MultipleWaypoints.msg"
-  DEPENDENCIES geometry_msgs std_msgs
-)
+# rosidl_generate_interfaces() 부분을 완전히 제거
 
 install(PROGRAMS
   src/main.py
   src/test_T_area.py
   src/test_P_area.py
+  src/main_test.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -205,7 +205,7 @@ class TLCropOnlyNode(Node):
         self.pub_roi_dbg = self.create_publisher(Image, '/tl/debug_image', 10)
         self.pub_zoom    = self.create_publisher(Image, '/tl/zoom_image', 10)
         self.pub_state   = self.create_publisher(Int32, '/tl/state', 10)
-        self.pub_hist    = self.create_publisher(Image, '/tl/hist_image', 10)
+        self.pub_hist    = self.create_publisher(Image, '/tl/hist_image', 10) # del
 
         # ---------------- YOLO ----------------
         self.get_logger().info(f'Loading YOLO model: {self.model_path}')

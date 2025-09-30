@@ -37,12 +37,13 @@ class ParkingAreaDetect(Node):
             self.model = None
         
         self.zed_img_sub = self.create_subscription(Image, '/zed/zed_node/left/image_rect_color', self._img_callback, 10)
+        #self.img_sub = self.create_subscription(Image, '/image_raw', self._img_callback, 10)
         self.waypoints_sub = self.create_subscription(MultipleWaypoints, '/multiple_waypoints', self._waypoints_callback, self.reliable_qos)
 
         self.tp_area_pub = self.create_publisher(Bool, '/path_availability', 10)
         self.img_pub = self.create_publisher(Image, '/parking/img', 10)
 
-        self.section = None
+        self.section = 'T'
         self.decisions = []  # 1초 동안 수집할 리스트
         self.start_time = None
                 
@@ -160,12 +161,18 @@ class ParkingAreaDetect(Node):
         # 녹색 (35-85) - 추가
         green_mask = cv2.inRange(hsv_roi, np.array([35, 50, 50]), np.array([85, 255, 255]))
         
+        lower_white = np.array([0, 0, 200])
+        upper_white = np.array([180, 40, 255])
+
+        white_mask = cv2.inRange(hsv_roi, lower_white, upper_white)
+        
         # 픽셀 수 계산
         blue_count = np.sum(blue_mask > 0)
         red_count = np.sum(red_mask > 0)
         orange_count = np.sum(orange_mask > 0)
         yellow_count = np.sum(yellow_mask > 0)
         green_count = np.sum(green_mask > 0)
+        white_count = np.sum(white_mask > 0)
         
         # 전체 픽셀 수
         total_pixels = hsv_roi.shape[0] * hsv_roi.shape[1]
@@ -180,9 +187,10 @@ class ParkingAreaDetect(Node):
         orange_percent = (orange_count / total_pixels) * 100
         yellow_percent = (yellow_count / total_pixels) * 100
         green_percent = (green_count / total_pixels) * 100
+        white_percent = (white_count / total_pixels) * 100
         
         # 기타 색상 (위 색상들에 해당하지 않는 픽셀)
-        colored_pixels = blue_count + red_count + orange_count + yellow_count + green_count
+        colored_pixels = blue_count + red_count + orange_count + yellow_count + green_count + white_count
         other_percent = ((total_pixels - colored_pixels) / total_pixels) * 100
         
         # 지배적인 색상 찾기
@@ -192,6 +200,7 @@ class ParkingAreaDetect(Node):
             'Orange': orange_percent,
             'Yellow': yellow_percent,
             'Green': green_percent,
+            'White': white_percent,
             'Other': other_percent
         }
         dominant_color = max(color_percentages, key=color_percentages.get)
@@ -203,11 +212,12 @@ class ParkingAreaDetect(Node):
         print(f"Orange: {orange_percent:.1f}% ({orange_count} pixels)")
         print(f"Yellow: {yellow_percent:.1f}% ({yellow_count} pixels)")
         print(f"Green:  {green_percent:.1f}% ({green_count} pixels)")
+        print(f"White:  {white_percent:.1f}% ({white_count} pixels)")
         print(f"Other:  {other_percent:.1f}% ({total_pixels - colored_pixels} pixels)")
         print(f"Dominant Color: {dominant_color} ({color_percentages[dominant_color]:.1f}%)")
         print("-" * 40)
 
-        return (blue_percent, red_percent, orange_percent, yellow_percent, green_percent), dominant_color
+        return (blue_percent, red_percent, orange_percent, yellow_percent, green_percent, white_percent), dominant_color
         
     def _get_t_roi(self, detection):
         x1, y1, x2, y2 = detection['bbox']
@@ -216,7 +226,7 @@ class ParkingAreaDetect(Node):
         beta = y2 - y1
         
         roi_x1 = x1 - (alpha // 2)
-        roi_y1 = y1 + (beta // 2)
+        roi_y1 = y1 + (beta // 3)
         roi_x2 = x2
         roi_y2 = y2
         
