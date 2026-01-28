@@ -1,0 +1,24 @@
+# Cliff Edge Detector Configuration
+
+/**:
+  ros__parameters:
+    input_topic: '/velodyne_points'
+    output_topic: '/cliff_edge'
+    base_frame: 'base_link'
+    sensor_frame: 'velodyne'
+
+    range_x: 15.0           # X range (meters)
+    range_y: 5.0            # Y range (meters)
+
+    # Ground detection (z ≈ 0)
+    ground_z_min: -0.1      # Ground z minimum
+    ground_z_max: 0.1       # Ground z maximum
+
+    # Negative obstacle detection
+    negative_z_max: -0.15   # Below this z = negative obstacle
+
+    num_sectors: 90         # Azimuth sectors
+
+    # Clustering & Interpolation
+    cluster_tolerance: 0.5          # 클러스터 분리 거리 (m)
+    interpolation_resolution: 0.1   # 보간 해상도 (m)
