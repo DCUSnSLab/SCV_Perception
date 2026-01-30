@@ -55,6 +55,7 @@ private:
   int num_sectors_;
   double cluster_tolerance_;
   double interpolation_res_;
+  double interpolation_max_dist_;
 
   // ROS
   rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr pc_sub_;

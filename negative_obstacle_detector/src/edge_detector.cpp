@@ -12,7 +12,7 @@ namespace negative_obstacle_detector
 
 void EdgeDetector::initialize(double range_x, double range_y, double ground_z_min, double ground_z_max,
                               double negative_z_max, int num_sectors,
-                              double cluster_tolerance, double interpolation_resolution)
+                              double cluster_tolerance, double interpolation_resolution, double interpolation_max_distance)
 {
   range_x_ = range_x / 2.0;
   range_y_ = range_y / 2.0;
@@ -23,6 +23,7 @@ void EdgeDetector::initialize(double range_x, double range_y, double ground_z_mi
   sector_width_ = 2.0 * M_PI / num_sectors_;
   cluster_tolerance_ = cluster_tolerance;
   interpolation_res_ = interpolation_resolution;
+  interpolation_max_dist_ = interpolation_max_distance;
 }
 
 int EdgeDetector::getSectorIndex(float azimuth) const
@@ -108,7 +109,7 @@ std::vector<Point3D> EdgeDetector::clusterAndInterpolate(const std::vector<Point
       float dz = p2.z - p1.z;
       float dist = std::sqrt(dx * dx + dy * dy);
 
-      if (dist > interpolation_res_) {
+      if (dist > interpolation_res_ && dist <= interpolation_max_dist_) {
         int num_interp = static_cast<int>(dist / interpolation_res_);
         for (int j = 1; j < num_interp; ++j) {
           float t = static_cast<float>(j) / num_interp;

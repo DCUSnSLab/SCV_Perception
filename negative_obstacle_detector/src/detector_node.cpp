@@ -24,6 +24,7 @@ DetectorNode::DetectorNode(const rclcpp::NodeOptions& options)
   this->declare_parameter("num_sectors", 360);
   this->declare_parameter("cluster_tolerance", 0.5);
   this->declare_parameter("interpolation_resolution", 0.1);
+  this->declare_parameter("interpolation_max_distance", 1.0);
 
   input_topic_ = this->get_parameter("input_topic").as_string();
   output_topic_ = this->get_parameter("output_topic").as_string();
@@ -37,6 +38,7 @@ DetectorNode::DetectorNode(const rclcpp::NodeOptions& options)
   num_sectors_ = this->get_parameter("num_sectors").as_int();
   cluster_tolerance_ = this->get_parameter("cluster_tolerance").as_double();
   interpolation_res_ = this->get_parameter("interpolation_resolution").as_double();
+  interpolation_max_dist_ = this->get_parameter("interpolation_max_distance").as_double();
 
   // TF
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(this->get_clock());
@@ -45,7 +47,7 @@ DetectorNode::DetectorNode(const rclcpp::NodeOptions& options)
   // Detector
   detector_ = std::make_unique<EdgeDetector>();
   detector_->initialize(range_x_, range_y_, ground_z_min_, ground_z_max_, negative_z_max_, num_sectors_,
-                        cluster_tolerance_, interpolation_res_);
+                        cluster_tolerance_, interpolation_res_, interpolation_max_dist_);
 
   // ROS
   rclcpp::QoS qos(10);
@@ -66,6 +68,7 @@ DetectorNode::DetectorNode(const rclcpp::NodeOptions& options)
   RCLCPP_INFO(this->get_logger(), "  Sectors: %d", num_sectors_);
   RCLCPP_INFO(this->get_logger(), "  Cluster tolerance: %.2f m", cluster_tolerance_);
   RCLCPP_INFO(this->get_logger(), "  Interpolation res: %.2f m", interpolation_res_);
+  RCLCPP_INFO(this->get_logger(), "  Interpolation max dist: %.2f m", interpolation_max_dist_);
 }
 
 bool DetectorNode::lookupTransform(

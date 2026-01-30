@@ -20,7 +20,7 @@ class EdgeDetector
 public:
   void initialize(double range_x, double range_y, double ground_z_min, double ground_z_max,
                   double negative_z_max, int num_sectors,
-                  double cluster_tolerance, double interpolation_resolution);
+                  double cluster_tolerance, double interpolation_resolution, double interpolation_max_distance);
 
   std::vector<Point3D> filter(const std::vector<Point3D>& points);
 
@@ -32,8 +32,10 @@ private:
   double negative_z_max_ = -0.15;
   int num_sectors_ = 360;
   double sector_width_;
-  double cluster_tolerance_ = 0.5;       // 클러스터 거리 허용치 (m)
-  double interpolation_res_ = 0.1;       // 보간 해상도 (m)
+  double cluster_tolerance_ = 0.5;
+  double interpolation_res_ = 0.1;
+  double interpolation_max_dist_ =2.0;
+  double max_connect_dist_ = 2.0;        // 클러스터 연결 최대 거리
 
   int getSectorIndex(float azimuth) const;
 
