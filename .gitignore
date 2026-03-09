@@ -3,3 +3,6 @@
 *.onnx
 *.pth
 *.pyc
+__pycache__/
+logs/
+*vscode*
