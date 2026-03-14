@@ -2,10 +2,7 @@
 
 from pathlib import Path
 
-try:
-    import matplotlib.pyplot as plt
-except Exception:
-    plt = None
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 

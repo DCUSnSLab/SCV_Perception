@@ -14,12 +14,8 @@ from pathlib import Path
 
 import cv2
 import math
-try:
-    import matplotlib
-    import matplotlib.pyplot as plt
-except Exception:
-    matplotlib = None
-    plt = None
+import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torch.nn as nn

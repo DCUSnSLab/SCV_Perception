@@ -1,8 +1,5 @@
 ## 处理pred结果的.json文件,画图
-try:
-    import matplotlib.pyplot as plt
-except Exception:
-    plt = None
+import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 import random
