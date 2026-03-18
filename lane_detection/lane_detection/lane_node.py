@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import os
-from collections import deque
 import numpy as np
 import cv2
 from scipy.spatial import KDTree
@@ -31,7 +30,6 @@ class LaneDetectionNode(Node):
         # SOR 파라미터
         self.declare_parameter('sor_k',        50)    # 이웃 포인트 수
         self.declare_parameter('sor_std_mul',  1.0)   # 표준편차 배수 (낮을수록 공격적 제거)
-        self.declare_parameter('temporal_frames', 5)  # 누적 프레임 수
 
         model_path  = self.get_parameter('model_path').get_parameter_value().string_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
@@ -43,8 +41,6 @@ class LaneDetectionNode(Node):
         self.ground_proj  = self.get_parameter('ground_proj').get_parameter_value().bool_value
         self.sor_k        = self.get_parameter('sor_k').get_parameter_value().integer_value
         self.sor_std_mul  = self.get_parameter('sor_std_mul').get_parameter_value().double_value
-        temporal_frames   = self.get_parameter('temporal_frames').get_parameter_value().integer_value
-        self.point_buffer = deque(maxlen=temporal_frames)  # 최근 N프레임 포인트 누적
 
         # ── 내부 상태 ─────────────────────────────────────────────────────────
         self.bridge = CvBridge()
@@ -57,6 +53,7 @@ class LaneDetectionNode(Node):
         # ── YOLO-seg 모델 로드 ────────────────────────────────────────────────
         self.get_logger().info(f'모델 로드 중: {model_path}')
         self.model = YOLO(model_path)
+        self.model.to('cuda')
         self.get_logger().info('YOLO-seg 모델 로드 완료')
 
         # ── 구독 ──────────────────────────────────────────────────────────────
@@ -67,12 +64,14 @@ class LaneDetectionNode(Node):
         sub_color = Subscriber(self, Image, image_topic)
         sub_depth = Subscriber(self, Image, depth_topic)
         self.sync = ApproximateTimeSynchronizer(
-            [sub_color, sub_depth], queue_size=5, slop=0.05)
+            [sub_color, sub_depth], queue_size=2, slop=0.05)
         self.sync.registerCallback(self._callback)
+
+        # ── TF 캐시 (static transform 캐싱) ──────────────────────────────────
+        self._tf_cache: dict = {}  # frame_id → (R, T)
 
         # ── 발행 ──────────────────────────────────────────────────────────────
         self.pub_mask    = self.create_publisher(Image,       '/lane_detection/lane_mask',        1)
-        self.pub_overlay = self.create_publisher(Image,       '/lane_detection/overlay',          1)
         self.pub_cloud   = self.create_publisher(PointCloud2, '/lane_detection/lane_pointcloud',  1)
 
         self.get_logger().info(
@@ -111,15 +110,7 @@ class LaneDetectionNode(Node):
         mask_msg.header = color_msg.header
         self.pub_mask.publish(mask_msg)
 
-        # 3) 오버레이 이미지 발행 (초록색으로 차선 표시)
-        overlay = img_bgr.copy()
-        overlay[lane_mask > 0] = (0, 255, 0)
-        overlay_img = cv2.addWeighted(overlay, 0.5, img_bgr, 0.5, 0)
-        overlay_msg = self.bridge.cv2_to_imgmsg(overlay_img, encoding='bgr8')
-        overlay_msg.header = color_msg.header
-        self.pub_overlay.publish(overlay_msg)
-
-        # 4) 포인트클라우드 발행
+        # 3) 포인트클라우드 발행
         self._publish_pointcloud(lane_mask, depth_img, color_msg.header)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -129,19 +120,16 @@ class LaneDetectionNode(Node):
     def _infer_lane_mask(self, img_bgr: np.ndarray) -> np.ndarray:
         """YOLO-seg 추론 → 원본 해상도 바이너리 마스크 (uint8 0/1)"""
         h, w = img_bgr.shape[:2]
-        results = self.model.predict(img_bgr, verbose=False, conf=self.conf)
+        results = self.model.predict(img_bgr, verbose=False, conf=self.conf, half=True, device='cuda')
 
-        mask = np.zeros((h, w), dtype=np.uint8)
         result = results[0]
         if result.masks is None:
-            return mask
+            return np.zeros((h, w), dtype=np.uint8)
 
-        # masks.data: (N, mask_h, mask_w)  float32 in [0, 1]
-        for seg in result.masks.data.cpu().numpy():
-            seg_resized = cv2.resize(seg, (w, h), interpolation=cv2.INTER_LINEAR)
-            mask = np.maximum(mask, (seg_resized > 0.5).astype(np.uint8))
-
-        return mask
+        # masks.data: (N, mask_h, mask_w) — N개 마스크를 axis=0으로 max 합성 후 단 1회 resize
+        combined = result.masks.data.max(dim=0).values.cpu().numpy()  # (mask_h, mask_w)
+        resized  = cv2.resize(combined, (w, h), interpolation=cv2.INTER_LINEAR)
+        return (resized > 0.5).astype(np.uint8)
 
     # ──────────────────────────────────────────────────────────────────────────
     # 포인트클라우드 생성 · 발행
@@ -158,7 +146,7 @@ class LaneDetectionNode(Node):
             self.get_logger().warn(
                 f'TF 조회 실패: {e}', throttle_duration_sec=5.0)
             return
-
+        self.get_logger().info('TF 조회 성공: base_link ← ')
         # ② 마스크를 뎁스 해상도에 맞게 리사이즈
         dh, dw = depth_img.shape[:2]
         if lane_mask.shape != (dh, dw):
@@ -175,6 +163,19 @@ class LaneDetectionNode(Node):
         valid  = (depths > self.depth_min) & (depths < self.depth_max)
         if not np.any(valid):
             return
+
+        # ④-1 마스크 내 depth 구멍 보간
+        #     invalid 픽셀 → 마스크 내 가장 가까운 valid 픽셀의 depth 사용
+        #     ground_proj=True 이므로 z는 버리고 x,y 계산에만 쓰임 → 근사값으로 충분
+        if not np.all(valid):
+            valid_coords = np.stack([xs[valid], ys[valid]], axis=1)
+            invalid_mask = ~valid
+            invalid_coords = np.stack([xs[invalid_mask], ys[invalid_mask]], axis=1)
+            tree = KDTree(valid_coords)
+            _, nn_idx = tree.query(invalid_coords, workers=-1)
+            depths[invalid_mask] = depths[valid][nn_idx]
+            valid = np.ones(len(xs), dtype=bool)  # 모두 유효
+
         xs, ys, depths = xs[valid], ys[valid], depths[valid]
 
         # ⑤ 픽셀 → 카메라 광학 좌표계 역투영 (핀홀 모델)
@@ -206,12 +207,8 @@ class LaneDetectionNode(Node):
         # ⑧ SOR — 뎁스 카메라 노이즈 제거
         pts_base = self._sor_filter(pts_base, self.sor_k, self.sor_std_mul)
 
-        # ⑨ 프레임 버퍼에 추가 후 누적 포인트 합치기
-        self.point_buffer.append(pts_base.astype(np.float32))
-        pts_accum = np.concatenate(list(self.point_buffer), axis=0)
-
-        # ⑩ 복셀 다운샘플링 (누적 포인트 전체)
-        pts_f32 = self._voxel_downsample(pts_accum)
+        # ⑨ 복셀 다운샘플링
+        pts_f32 = self._voxel_downsample(pts_base.astype(np.float32))
         if len(pts_f32) == 0:
             return
 

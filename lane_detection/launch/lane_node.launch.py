@@ -46,9 +46,9 @@ def generate_launch_description():
                 'depth_max':   10.0,
                 'voxel_size':  0.03,
                 'ground_proj': True,
-                'sor_k':          50,
-                'sor_std_mul':    1.0,
-                'temporal_frames': 5,
+                'sor_k':          20,
+                'sor_std_mul':    1.5,
+                'temporal_frames': 3,
             }]
         ),
     ])
