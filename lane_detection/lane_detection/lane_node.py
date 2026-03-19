@@ -68,7 +68,7 @@ class LaneDetectionNode(Node):
         self.sync.registerCallback(self._callback)
 
         # ── TF 캐시 (static transform 캐싱) ──────────────────────────────────
-        self._tf_cache: dict = {}  # frame_id → (R, T)
+        self._tf_cache: dict = {}  # frame_id → (R, T numpy arrays)
 
         # ── 발행 ──────────────────────────────────────────────────────────────
         self.pub_mask    = self.create_publisher(Image,       '/lane_detection/lane_mask',        1)
@@ -138,15 +138,28 @@ class LaneDetectionNode(Node):
     def _publish_pointcloud(self, lane_mask: np.ndarray,
                             depth_img: np.ndarray, header) -> None:
         # ① TF 조회: 카메라 광학 프레임 → base_link
-        #    여기서 카메라 틸트·롤·요 등 모든 장착 각도가 자동으로 반영된다.
-        try:
-            tf_stamped = self.tf_buffer.lookup_transform(
-                'base_link', header.frame_id, rclpy.time.Time())
-        except TransformException as e:
-            self.get_logger().warn(
-                f'TF 조회 실패: {e}', throttle_duration_sec=5.0)
-            return
-        self.get_logger().info('TF 조회 성공: base_link ← ')
+        #    static transform이므로 첫 프레임에만 조회 후 캐싱
+        frame_id = header.frame_id
+        if frame_id not in self._tf_cache:
+            try:
+                tf_stamped = self.tf_buffer.lookup_transform(
+                    'base_link', frame_id, rclpy.time.Time())
+            except TransformException as e:
+                self.get_logger().warn(
+                    f'TF 조회 실패: {e}', throttle_duration_sec=5.0)
+                return
+            q  = tf_stamped.transform.rotation
+            tv = tf_stamped.transform.translation
+            qx, qy, qz, qw = q.x, q.y, q.z, q.w
+            R = np.array([
+                [1 - 2*(qy**2 + qz**2),   2*(qx*qy - qz*qw),   2*(qx*qz + qy*qw)],
+                [    2*(qx*qy + qz*qw), 1 - 2*(qx**2 + qz**2),   2*(qy*qz - qx*qw)],
+                [    2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw), 1 - 2*(qx**2 + qy**2)],
+            ], dtype=np.float32)
+            T = np.array([tv.x, tv.y, tv.z], dtype=np.float32)
+            self._tf_cache[frame_id] = (R, T)
+            self.get_logger().info(f'TF 캐시 완료: base_link ← {frame_id}')
+        R, T = self._tf_cache[frame_id]
         # ② 마스크를 뎁스 해상도에 맞게 리사이즈
         dh, dw = depth_img.shape[:2]
         if lane_mask.shape != (dh, dw):
@@ -186,7 +199,7 @@ class LaneDetectionNode(Node):
             (xs - cx) * depths / fx,   # X_cam
             (ys - cy) * depths / fy,   # Y_cam
             depths,                    # Z_cam
-        ], axis=-1).astype(np.float64)  # (N, 3)
+        ], axis=-1).astype(np.float32)  # (N, 3) — float32로 통일 (코스트맵 0.1m 해상도에 충분)
 
         # RealSense 180° 소프트웨어 회전 보정
         # URDF TF에 roll=π가 이미 있는데 RealSense config에서도 180° 회전하면
@@ -194,9 +207,8 @@ class LaneDetectionNode(Node):
         pts_cam[:, 0] *= -1
         pts_cam[:, 1] *= -1
 
-        # ⑥ TF 변환: 카메라 → base_link
-        #    쿼터니언 → 회전행렬로 카메라 장착 각도(틸트 포함)가 올바르게 적용된다.
-        pts_base = self._apply_tf(pts_cam, tf_stamped)  # (N, 3)
+        # ⑥ TF 변환: 카메라 → base_link (캐싱된 R, T 사용)
+        pts_base = (R @ pts_cam.T).T + T  # (N, 3)
 
         # ⑦ 지면 투영 옵션
         #    차선은 지면 위에 있으므로 z=0 강제 → 뎁스 노이즈 제거 효과
@@ -208,7 +220,7 @@ class LaneDetectionNode(Node):
         pts_base = self._sor_filter(pts_base, self.sor_k, self.sor_std_mul)
 
         # ⑨ 복셀 다운샘플링
-        pts_f32 = self._voxel_downsample(pts_base.astype(np.float32))
+        pts_f32 = self._voxel_downsample(pts_base)
         if len(pts_f32) == 0:
             return
 
@@ -219,22 +231,6 @@ class LaneDetectionNode(Node):
     # ──────────────────────────────────────────────────────────────────────────
     # 유틸
     # ──────────────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _apply_tf(pts: np.ndarray, tf_stamped) -> np.ndarray:
-        """TF stamped transform을 (N, 3) 포인트 배열에 적용"""
-        q  = tf_stamped.transform.rotation
-        tv = tf_stamped.transform.translation
-        qx, qy, qz, qw = q.x, q.y, q.z, q.w
-
-        R = np.array([
-            [1 - 2*(qy**2 + qz**2),   2*(qx*qy - qz*qw),   2*(qx*qz + qy*qw)],
-            [    2*(qx*qy + qz*qw), 1 - 2*(qx**2 + qz**2),   2*(qy*qz - qx*qw)],
-            [    2*(qx*qz - qy*qw),     2*(qy*qz + qx*qw), 1 - 2*(qx**2 + qy**2)],
-        ], dtype=np.float64)
-        T = np.array([tv.x, tv.y, tv.z], dtype=np.float64)
-
-        return (R @ pts.T).T + T
 
     @staticmethod
     def _sor_filter(pts: np.ndarray, k: int = 50, std_mul: float = 1.0) -> np.ndarray:
