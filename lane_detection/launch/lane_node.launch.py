@@ -8,6 +8,7 @@ import os
 def generate_launch_description():
     model_path = LaunchConfiguration('model_path')
     image_topic = LaunchConfiguration('image_topic')
+    camera_info_topic = LaunchConfiguration('camera_info_topic')
     depth_topic = LaunchConfiguration('depth_topic')
     conf = LaunchConfiguration('conf')
 
@@ -19,12 +20,17 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'image_topic',
-            default_value='/camera/camera/color/image_raw',
+            default_value='/camera/camera/image_raw',
             description='컬러 이미지 토픽'
         ),
         DeclareLaunchArgument(
+            'camera_info_topic',
+            default_value='/camera/camera/camera_info',
+            description='카메라 정보 토픽'
+        ),
+        DeclareLaunchArgument(
             'depth_topic',
-            default_value='/camera/camera/aligned_depth_to_color/image_raw',
+            default_value='/camera/camera/depth/image_raw',
             description='뎁스 이미지 토픽'
         ),
         DeclareLaunchArgument(
@@ -40,6 +46,7 @@ def generate_launch_description():
             parameters=[{
                 'model_path':  model_path,
                 'image_topic': image_topic,
+                'camera_info_topic': camera_info_topic,
                 'depth_topic': depth_topic,
                 'conf':        conf,
                 'depth_min':   0.1,

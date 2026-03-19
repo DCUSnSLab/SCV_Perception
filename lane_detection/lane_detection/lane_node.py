@@ -20,6 +20,7 @@ class LaneDetectionNode(Node):
         # ── 파라미터 ──────────────────────────────────────────────────────────
         self.declare_parameter('model_path',   '/lane_ws/models/best.pt')
         self.declare_parameter('image_topic',  '/camera/camera/color/image_raw')
+        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
         self.declare_parameter('depth_topic',  '/camera/camera/aligned_depth_to_color/image_raw')
         self.declare_parameter('conf',         0.3)
         self.declare_parameter('depth_min',    0.1)   # m
@@ -33,6 +34,7 @@ class LaneDetectionNode(Node):
 
         model_path  = self.get_parameter('model_path').get_parameter_value().string_value
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
+        camera_info_topic = self.get_parameter('camera_info_topic').get_parameter_value().string_value
         depth_topic = self.get_parameter('depth_topic').get_parameter_value().string_value
         self.conf       = self.get_parameter('conf').get_parameter_value().double_value
         self.depth_min  = self.get_parameter('depth_min').get_parameter_value().double_value
@@ -58,7 +60,7 @@ class LaneDetectionNode(Node):
 
         # ── 구독 ──────────────────────────────────────────────────────────────
         self.create_subscription(
-            CameraInfo, '/camera/camera/color/camera_info',
+            CameraInfo, camera_info_topic,
             self._camera_info_cb, 1)
 
         sub_color = Subscriber(self, Image, image_topic)
@@ -76,6 +78,7 @@ class LaneDetectionNode(Node):
 
         self.get_logger().info(
             f'구독: color={image_topic}, depth={depth_topic} | '
+            f'camera_info={camera_info_topic} | '
             f'conf={self.conf}, depth={self.depth_min}~{self.depth_max}m, '
             f'voxel={self.voxel_size}m, ground_proj={self.ground_proj}')
 
@@ -146,7 +149,6 @@ class LaneDetectionNode(Node):
             self.get_logger().warn(
                 f'TF 조회 실패: {e}', throttle_duration_sec=5.0)
             return
-        self.get_logger().info('TF 조회 성공: base_link ← ')
         # ② 마스크를 뎁스 해상도에 맞게 리사이즈
         dh, dw = depth_img.shape[:2]
         if lane_mask.shape != (dh, dw):
@@ -156,12 +158,20 @@ class LaneDetectionNode(Node):
         # ③ 유효 픽셀 좌표 추출
         ys, xs = np.where(lane_mask > 0)
         if len(xs) == 0:
+            self.pub_cloud.publish(self._make_pointcloud2(
+                np.empty((0, 3), dtype=np.float32), header.stamp, 'base_link'))
             return
 
-        # ④ 깊이 추출 및 범위 필터 (RealSense: mm → m)
-        depths = depth_img[ys, xs] * 1e-3
+        # ④ 깊이 추출 및 범위 필터
+        # 16UC1 depth는 mm 단위, 32FC1 depth는 m 단위로 처리한다.
+        if depth_img.dtype == np.uint16:
+            depths = depth_img[ys, xs].astype(np.float32) * 1e-3
+        else:
+            depths = depth_img[ys, xs].astype(np.float32)
         valid  = (depths > self.depth_min) & (depths < self.depth_max)
         if not np.any(valid):
+            self.pub_cloud.publish(self._make_pointcloud2(
+                np.empty((0, 3), dtype=np.float32), header.stamp, 'base_link'))
             return
 
         # ④-1 마스크 내 depth 구멍 보간
@@ -188,12 +198,6 @@ class LaneDetectionNode(Node):
             depths,                    # Z_cam
         ], axis=-1).astype(np.float64)  # (N, 3)
 
-        # RealSense 180° 소프트웨어 회전 보정
-        # URDF TF에 roll=π가 이미 있는데 RealSense config에서도 180° 회전하면
-        # X, Y가 이중으로 반전됨 → 역보정
-        pts_cam[:, 0] *= -1
-        pts_cam[:, 1] *= -1
-
         # ⑥ TF 변환: 카메라 → base_link
         #    쿼터니언 → 회전행렬로 카메라 장착 각도(틸트 포함)가 올바르게 적용된다.
         pts_base = self._apply_tf(pts_cam, tf_stamped)  # (N, 3)
@@ -210,6 +214,8 @@ class LaneDetectionNode(Node):
         # ⑨ 복셀 다운샘플링
         pts_f32 = self._voxel_downsample(pts_base.astype(np.float32))
         if len(pts_f32) == 0:
+            self.pub_cloud.publish(self._make_pointcloud2(
+                np.empty((0, 3), dtype=np.float32), header.stamp, 'base_link'))
             return
 
         # ⑪ PointCloud2 발행
