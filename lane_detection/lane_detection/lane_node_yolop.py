@@ -32,7 +32,7 @@ class YoloPLaneDetectionNode(Node):
         self.declare_parameter('device', 'cuda:0')
         self.declare_parameter('depth_min', 0.1)
         self.declare_parameter('depth_max', 10.0)
-        self.declare_parameter('depth_scale', 0.001)
+        self.declare_parameter('depth_scale', 0.01)
         self.declare_parameter('voxel_size', 0.03)
         self.declare_parameter('ground_proj', True)
         self.declare_parameter('mask_point_stride', 1)
@@ -42,11 +42,11 @@ class YoloPLaneDetectionNode(Node):
         self.declare_parameter('sor_std_mul', 1.5)
         self.declare_parameter('morph_kernel_width', 3)
         self.declare_parameter('morph_kernel_height', 5)
-        self.declare_parameter('manual_roll_deg', 0.0)
-        self.declare_parameter('manual_pitch_deg', 0.0)
+        self.declare_parameter('manual_roll_deg', 0.3)
+        self.declare_parameter('manual_pitch_deg', 0.1)
         self.declare_parameter('manual_yaw_deg', 0.0)
         self.declare_parameter('cloud_offset_x', -0.5)
-        self.declare_parameter('cloud_offset_y', 0.0)
+        self.declare_parameter('cloud_offset_y', 0.05)
         self.declare_parameter('lane_pixel_value', 255)
 
         self.weights_path = os.path.expanduser(self.get_parameter('weights_path').value)
@@ -82,6 +82,8 @@ class YoloPLaneDetectionNode(Node):
         ])
         self.bridge = CvBridge()
         self.K: np.ndarray | None = None
+        self._last_color_msg_time: float | None = None
+        self._last_depth_msg_time: float | None = None
         self._last_callback_time: float | None = None
         self.morph_kernel = np.ones((kernel_h, kernel_w), dtype=np.uint8)
         self.extra_rotation = self._build_rpy_rotation(
@@ -97,6 +99,8 @@ class YoloPLaneDetectionNode(Node):
         self.get_logger().info('YOLOP 모델 로드 완료')
 
         self.create_subscription(CameraInfo, self.camera_info_topic, self._camera_info_cb, 1)
+        self.create_subscription(Image, self.image_topic, self._color_monitor_cb, 1)
+        self.create_subscription(Image, self.depth_topic, self._depth_monitor_cb, 1)
         sub_color = Subscriber(self, Image, self.image_topic)
         sub_depth = Subscriber(self, Image, self.depth_topic)
         self.sync = ApproximateTimeSynchronizer([sub_color, sub_depth], queue_size=2, slop=0.05)
@@ -141,13 +145,37 @@ class YoloPLaneDetectionNode(Node):
                 f'fy={self.K[1, 1]:.1f}, cx={self.K[0, 2]:.1f}, cy={self.K[1, 2]:.1f}'
             )
 
+    def _color_monitor_cb(self, _msg: Image) -> None:
+        now = time.perf_counter()
+        if self._last_color_msg_time is not None:
+            dt = now - self._last_color_msg_time
+            if dt > 0.0:
+                self.get_logger().info(
+                    f'color input rate: {1.0 / dt:.2f} Hz',
+                    throttle_duration_sec=2.0
+                )
+        self._last_color_msg_time = now
+
+    def _depth_monitor_cb(self, _msg: Image) -> None:
+        now = time.perf_counter()
+        if self._last_depth_msg_time is not None:
+            dt = now - self._last_depth_msg_time
+            if dt > 0.0:
+                self.get_logger().info(
+                    f'depth input rate: {1.0 / dt:.2f} Hz',
+                    throttle_duration_sec=2.0
+                )
+        self._last_depth_msg_time = now
+
     def _callback(self, color_msg: Image, depth_msg: Image):
         now = time.perf_counter()
         if self._last_callback_time is not None:
             dt = now - self._last_callback_time
             if dt > 0.0:
-                self.get_logger().info(f'lane_detection rate: {1.0 / dt:.2f} Hz',
-                                       throttle_duration_sec=2.0)
+                self.get_logger().info(
+                    f'sync callback rate: {1.0 / dt:.2f} Hz',
+                    throttle_duration_sec=2.0
+                )
         self._last_callback_time = now
 
         if self.K is None:
@@ -157,7 +185,13 @@ class YoloPLaneDetectionNode(Node):
         img_bgr = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
         depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32)
 
+        infer_start = time.perf_counter()
         lane_mask = self._infer_lane_mask(img_bgr)
+        infer_ms = (time.perf_counter() - infer_start) * 1000.0
+        self.get_logger().info(
+            f'inference time: {infer_ms:.1f} ms',
+            throttle_duration_sec=2.0
+        )
 
         mask_msg = self.bridge.cv2_to_imgmsg((lane_mask * 255).astype(np.uint8), encoding='mono8')
         mask_msg.header = color_msg.header

@@ -21,11 +21,11 @@ def generate_launch_description():
         DeclareLaunchArgument('min_height_ratio', default_value='0.08'),
         DeclareLaunchArgument('max_lane_instances', default_value='8'),
         DeclareLaunchArgument('depth_scale', default_value='0.001'),
-        DeclareLaunchArgument('manual_roll_deg', default_value='0.0'),
+        DeclareLaunchArgument('manual_roll_deg', default_value='0.2'),
         DeclareLaunchArgument('manual_pitch_deg', default_value='0.0'),
         DeclareLaunchArgument('manual_yaw_deg', default_value='0.0'),
         DeclareLaunchArgument('cloud_offset_x', default_value='0.0'),
-        DeclareLaunchArgument('cloud_offset_y', default_value='0.0'),
+        DeclareLaunchArgument('cloud_offset_y', default_value='-0.1'),
         Node(
             package='lane_detection',
             executable='lane_node_yolo26',
