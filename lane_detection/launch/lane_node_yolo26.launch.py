@@ -57,7 +57,6 @@ def generate_launch_description():
                 'manual_yaw_deg': LaunchConfiguration('manual_yaw_deg'),
                 'cloud_offset_x': LaunchConfiguration('cloud_offset_x'),
                 'cloud_offset_y': LaunchConfiguration('cloud_offset_y'),
-                'publish_overlay': True,
             }],
         ),
     ])

@@ -45,7 +45,6 @@ class Yolo26LaneDetectionNode(Node):
         self.declare_parameter('manual_yaw_deg', 0.0)
         self.declare_parameter('cloud_offset_x', 0.0)
         self.declare_parameter('cloud_offset_y', 0.0)
-        self.declare_parameter('publish_overlay', True)
 
         self.model_path = os.path.expanduser(self.get_parameter('model_path').value)
         self.image_topic = self.get_parameter('image_topic').value
@@ -72,7 +71,6 @@ class Yolo26LaneDetectionNode(Node):
         self.manual_yaw_deg = float(self.get_parameter('manual_yaw_deg').value)
         self.cloud_offset_x = float(self.get_parameter('cloud_offset_x').value)
         self.cloud_offset_y = float(self.get_parameter('cloud_offset_y').value)
-        self.publish_overlay = bool(self.get_parameter('publish_overlay').value)
         self.morph_kernel = np.ones((kernel_h, kernel_w), dtype=np.uint8)
         self.extra_rotation = self._build_rpy_rotation(
             self.manual_roll_deg, self.manual_pitch_deg, self.manual_yaw_deg
@@ -98,8 +96,6 @@ class Yolo26LaneDetectionNode(Node):
 
         self.pub_mask = self.create_publisher(Image, '/lane_detection/lane_mask', 1)
         self.pub_cloud = self.create_publisher(PointCloud2, '/lane_detection/lane_pointcloud', 1)
-        self.pub_overlay = self.create_publisher(Image, '/lane_detection/lane_overlay', 1)
-
         self.get_logger().info(
             f'구독: color={self.image_topic}, depth={self.depth_topic}, '
             f'camera_info={self.camera_info_topic} | conf={self.conf:.4f} '
@@ -133,20 +129,15 @@ class Yolo26LaneDetectionNode(Node):
         img_bgr = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
         depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32)
 
-        lane_mask, overlay = self._infer_lane_mask(img_bgr)
+        lane_mask = self._infer_lane_mask(img_bgr)
 
         mask_msg = self.bridge.cv2_to_imgmsg((lane_mask * 255).astype(np.uint8), encoding='mono8')
         mask_msg.header = color_msg.header
         self.pub_mask.publish(mask_msg)
 
-        if self.publish_overlay:
-            overlay_msg = self.bridge.cv2_to_imgmsg(overlay, encoding='bgr8')
-            overlay_msg.header = color_msg.header
-            self.pub_overlay.publish(overlay_msg)
-
         self._publish_pointcloud(lane_mask, depth_img, color_msg.header)
 
-    def _infer_lane_mask(self, img_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    def _infer_lane_mask(self, img_bgr: np.ndarray) -> np.ndarray:
         h, w = img_bgr.shape[:2]
         results = self.model.predict(
             img_bgr,
@@ -159,10 +150,9 @@ class Yolo26LaneDetectionNode(Node):
             retina_masks=True,
         )
         result = results[0]
-        overlay = img_bgr.copy()
 
         if result.masks is None or result.masks.data is None or result.masks.data.shape[0] == 0:
-            return np.zeros((h, w), dtype=np.uint8), overlay
+            return np.zeros((h, w), dtype=np.uint8)
 
         boxes = result.boxes
         masks = result.masks.data
@@ -195,7 +185,7 @@ class Yolo26LaneDetectionNode(Node):
             candidates.append((score, geometry_ok, idx, mask, (x_min, y_min, x_max, y_max), box_conf))
 
         if not candidates:
-            return lane_mask, overlay
+            return lane_mask
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         selected = [c for c in candidates if c[1]]
@@ -206,24 +196,9 @@ class Yolo26LaneDetectionNode(Node):
 
         for rank, (_, _, _, mask, bbox, box_conf) in enumerate(selected, start=1):
             lane_mask = np.maximum(lane_mask, mask)
-            x_min, y_min, x_max, y_max = bbox
-            cv2.rectangle(overlay, (x_min, y_min), (x_max, y_max), (255, 180, 0), 2)
-            cv2.putText(
-                overlay,
-                f'lane {box_conf:.2f} #{rank}',
-                (x_min, max(20, y_min - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                (255, 180, 0),
-                1,
-                cv2.LINE_AA,
-            )
 
         lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_CLOSE, self.morph_kernel)
-        overlay[lane_mask > 0] = cv2.addWeighted(
-            overlay[lane_mask > 0], 0.4, np.full_like(overlay[lane_mask > 0], (255, 0, 0)), 0.6, 0.0
-        )
-        return lane_mask, overlay
+        return lane_mask
 
     def _publish_pointcloud(self, lane_mask: np.ndarray, depth_img: np.ndarray, header) -> None:
         frame_id = header.frame_id
