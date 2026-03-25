@@ -6,6 +6,7 @@ import os
 
 
 def generate_launch_description():
+    default_model_path = os.path.expanduser('~/yolo26m_seg_best.pt')
     model_path = LaunchConfiguration('model_path')
     image_topic = LaunchConfiguration('image_topic')
     depth_topic = LaunchConfiguration('depth_topic')
@@ -14,7 +15,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'model_path',
-            default_value=os.path.expanduser('~/yolo26m_seg_best.pt'),
+            default_value=default_model_path,
             description='YOLO-seg 모델 경로'
         ),
         DeclareLaunchArgument(
@@ -29,7 +30,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'conf',
-            default_value='0.3',
+            default_value='0.00065',
             description='YOLO confidence 임계값'
         ),
         Node(
@@ -48,7 +49,8 @@ def generate_launch_description():
                 'ground_proj': True,
                 'sor_k':          20,
                 'sor_std_mul':    1.5,
-                'temporal_frames': 3,
+                'morph_kernel_width': 5,
+                'morph_kernel_height': 9,
             }]
         ),
     ])

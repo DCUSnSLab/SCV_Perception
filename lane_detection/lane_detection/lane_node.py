@@ -18,10 +18,11 @@ class LaneDetectionNode(Node):
         super().__init__('lane_detection_node')
 
         # ── 파라미터 ──────────────────────────────────────────────────────────
-        self.declare_parameter('model_path',   '/lane_ws/models/best.pt')
+        default_model_path = os.path.expanduser('~/yolo26m_seg_best.pt')
+        self.declare_parameter('model_path',   default_model_path)
         self.declare_parameter('image_topic',  '/camera/camera/color/image_raw')
         self.declare_parameter('depth_topic',  '/camera/camera/aligned_depth_to_color/image_raw')
-        self.declare_parameter('conf',         0.3)
+        self.declare_parameter('conf',         0.00065)  # YOLO-seg confidence threshold
         self.declare_parameter('depth_min',    0.1)   # m
         self.declare_parameter('depth_max',    10.0)  # m
         self.declare_parameter('voxel_size',   0.03)  # m
@@ -30,8 +31,11 @@ class LaneDetectionNode(Node):
         # SOR 파라미터
         self.declare_parameter('sor_k',        50)    # 이웃 포인트 수
         self.declare_parameter('sor_std_mul',  1.0)   # 표준편차 배수 (낮을수록 공격적 제거)
+        self.declare_parameter('morph_kernel_width', 5)
+        self.declare_parameter('morph_kernel_height', 9)
 
-        model_path  = self.get_parameter('model_path').get_parameter_value().string_value
+        model_path  = os.path.expanduser(
+            self.get_parameter('model_path').get_parameter_value().string_value)
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         depth_topic = self.get_parameter('depth_topic').get_parameter_value().string_value
         self.conf       = self.get_parameter('conf').get_parameter_value().double_value
@@ -41,6 +45,11 @@ class LaneDetectionNode(Node):
         self.ground_proj  = self.get_parameter('ground_proj').get_parameter_value().bool_value
         self.sor_k        = self.get_parameter('sor_k').get_parameter_value().integer_value
         self.sor_std_mul  = self.get_parameter('sor_std_mul').get_parameter_value().double_value
+        morph_kernel_width = max(
+            1, self.get_parameter('morph_kernel_width').get_parameter_value().integer_value)
+        morph_kernel_height = max(
+            1, self.get_parameter('morph_kernel_height').get_parameter_value().integer_value)
+        self.morph_kernel = np.ones((morph_kernel_height, morph_kernel_width), dtype=np.uint8)
 
         # ── 내부 상태 ─────────────────────────────────────────────────────────
         self.bridge = CvBridge()
@@ -102,7 +111,8 @@ class LaneDetectionNode(Node):
             depth_msg, desired_encoding='passthrough').astype(np.float32)
 
         # 1) YOLO-seg 차선 마스크 추론
-        lane_mask = self._infer_lane_mask(img_bgr)
+        lane_score = self._infer_lane_score(img_bgr)
+        lane_mask = self._finalize_lane_mask(lane_score)
 
         # 2) 마스크 이미지 발행
         mask_msg = self.bridge.cv2_to_imgmsg(
@@ -117,19 +127,25 @@ class LaneDetectionNode(Node):
     # YOLO-seg 추론
     # ──────────────────────────────────────────────────────────────────────────
 
-    def _infer_lane_mask(self, img_bgr: np.ndarray) -> np.ndarray:
-        """YOLO-seg 추론 → 원본 해상도 바이너리 마스크 (uint8 0/1)"""
+    def _infer_lane_score(self, img_bgr: np.ndarray) -> np.ndarray:
+        """YOLO-seg 추론 → 원본 해상도 점수 맵 (float32 0~1)."""
         h, w = img_bgr.shape[:2]
         results = self.model.predict(img_bgr, verbose=False, conf=self.conf, half=True, device='cuda')
 
         result = results[0]
-        if result.masks is None:
-            return np.zeros((h, w), dtype=np.uint8)
+        if result.masks is None or result.masks.data is None or result.masks.data.shape[0] == 0:
+            return np.zeros((h, w), dtype=np.float32)
 
-        # masks.data: (N, mask_h, mask_w) — N개 마스크를 axis=0으로 max 합성 후 단 1회 resize
+        # 모든 인스턴스 마스크를 합친 뒤 원본 해상도로 복원한다.
         combined = result.masks.data.max(dim=0).values.cpu().numpy()  # (mask_h, mask_w)
-        resized  = cv2.resize(combined, (w, h), interpolation=cv2.INTER_LINEAR)
-        return (resized > 0.5).astype(np.uint8)
+        resized  = cv2.resize(combined, (w, h), interpolation=cv2.INTER_NEAREST).astype(np.float32)
+        return np.clip(resized, 0.0, 1.0)
+
+    def _finalize_lane_mask(self, lane_score: np.ndarray) -> np.ndarray:
+        """현재 프레임 마스크를 morphology close로 다듬는다."""
+        lane_mask = (lane_score > 0.0).astype(np.uint8)
+        lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_CLOSE, self.morph_kernel)
+        return lane_mask
 
     # ──────────────────────────────────────────────────────────────────────────
     # 포인트클라우드 생성 · 발행

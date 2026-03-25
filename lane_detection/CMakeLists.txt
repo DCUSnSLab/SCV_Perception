@@ -15,15 +15,34 @@ find_package(std_msgs REQUIRED)
 # Install Python modules
 ament_python_install_package(${PROJECT_NAME})
 
+# Install Python executables
+install(PROGRAMS
+  lane_detection/lane_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME lane_node
+)
+
+install(PROGRAMS
+  lane_detection/lane_node_yolo26.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME lane_node_yolo26
+)
+
+install(PROGRAMS
+  lane_detection/lane_node_yolop.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME lane_node_yolop
+)
+
+install(PROGRAMS
+  lane_detection/bag_to_images.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME bag_to_images
+)
+
 # Install launch files
 install(DIRECTORY
   launch
-  DESTINATION share/${PROJECT_NAME}/
-)
-
-# Install tools
-install(DIRECTORY
-  tools
   DESTINATION share/${PROJECT_NAME}/
 )
 
