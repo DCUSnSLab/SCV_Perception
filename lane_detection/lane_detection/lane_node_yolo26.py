@@ -31,9 +31,11 @@ class Yolo26LaneDetectionNode(Node):
         self.declare_parameter('min_bottom_y_ratio', 0.45)
         self.declare_parameter('min_height_ratio', 0.08)
         self.declare_parameter('max_lane_instances', 8)
+        self.declare_parameter('bottom_region_ratio', 0.2)
+        self.declare_parameter('lane_outward_offset', 0.2)
         self.declare_parameter('depth_min', 0.1)
         self.declare_parameter('depth_max', 10.0)
-        self.declare_parameter('depth_scale', 0.01)
+        self.declare_parameter('depth_scale', 0.001)
         self.declare_parameter('voxel_size', 0.03)
         self.declare_parameter('ground_proj', True)
         self.declare_parameter('sor_k', 20)
@@ -44,7 +46,7 @@ class Yolo26LaneDetectionNode(Node):
         self.declare_parameter('manual_pitch_deg', 0.0)
         self.declare_parameter('manual_yaw_deg', 0.0)
         self.declare_parameter('cloud_offset_x', 0.0)
-        self.declare_parameter('cloud_offset_y', 0.0)
+        self.declare_parameter('cloud_offset_y', -0.1)
 
         self.model_path = os.path.expanduser(self.get_parameter('model_path').value)
         self.image_topic = self.get_parameter('image_topic').value
@@ -57,6 +59,8 @@ class Yolo26LaneDetectionNode(Node):
         self.min_bottom_y_ratio = float(self.get_parameter('min_bottom_y_ratio').value)
         self.min_height_ratio = float(self.get_parameter('min_height_ratio').value)
         self.max_lane_instances = int(self.get_parameter('max_lane_instances').value)
+        self.bottom_region_ratio = float(self.get_parameter('bottom_region_ratio').value)
+        self.lane_outward_offset = float(self.get_parameter('lane_outward_offset').value)
         self.depth_min = float(self.get_parameter('depth_min').value)
         self.depth_max = float(self.get_parameter('depth_max').value)
         self.depth_scale = float(self.get_parameter('depth_scale').value)
@@ -100,6 +104,8 @@ class Yolo26LaneDetectionNode(Node):
             f'구독: color={self.image_topic}, depth={self.depth_topic}, '
             f'camera_info={self.camera_info_topic} | conf={self.conf:.4f} '
             f'imgsz={self.imgsz} max_det={self.max_det} '
+            f'bottom_region_ratio={self.bottom_region_ratio:.2f} '
+            f'lane_outward_offset={self.lane_outward_offset:.3f} '
             f'depth_scale={self.depth_scale} '
             f'rpy_deg=({self.manual_roll_deg:.2f}, {self.manual_pitch_deg:.2f}, {self.manual_yaw_deg:.2f}) '
             f'cloud_offset=({self.cloud_offset_x:.3f}, {self.cloud_offset_y:.3f})'
@@ -129,15 +135,15 @@ class Yolo26LaneDetectionNode(Node):
         img_bgr = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
         depth_img = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough').astype(np.float32)
 
-        lane_mask = self._infer_lane_mask(img_bgr)
+        lane_mask, offset_map = self._infer_lane_mask(img_bgr)
 
         mask_msg = self.bridge.cv2_to_imgmsg((lane_mask * 255).astype(np.uint8), encoding='mono8')
         mask_msg.header = color_msg.header
         self.pub_mask.publish(mask_msg)
 
-        self._publish_pointcloud(lane_mask, depth_img, color_msg.header)
+        self._publish_pointcloud(lane_mask, offset_map, depth_img, color_msg.header)
 
-    def _infer_lane_mask(self, img_bgr: np.ndarray) -> np.ndarray:
+    def _infer_lane_mask(self, img_bgr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         h, w = img_bgr.shape[:2]
         results = self.model.predict(
             img_bgr,
@@ -152,11 +158,12 @@ class Yolo26LaneDetectionNode(Node):
         result = results[0]
 
         if result.masks is None or result.masks.data is None or result.masks.data.shape[0] == 0:
-            return np.zeros((h, w), dtype=np.uint8)
+            return np.zeros((h, w), dtype=np.uint8), np.zeros((h, w), dtype=np.float32)
 
         boxes = result.boxes
         masks = result.masks.data
         lane_mask = np.zeros((h, w), dtype=np.uint8)
+        offset_map = np.zeros((h, w), dtype=np.float32)
         candidates = []
 
         for idx in range(masks.shape[0]):
@@ -185,7 +192,7 @@ class Yolo26LaneDetectionNode(Node):
             candidates.append((score, geometry_ok, idx, mask, (x_min, y_min, x_max, y_max), box_conf))
 
         if not candidates:
-            return lane_mask
+            return lane_mask, offset_map
 
         candidates.sort(key=lambda item: item[0], reverse=True)
         selected = [c for c in candidates if c[1]]
@@ -194,13 +201,37 @@ class Yolo26LaneDetectionNode(Node):
         else:
             selected = selected[: self.max_lane_instances]
 
+        image_center_x = 0.5 * float(w)
+        bottom_band_top = int(h * max(0.0, 1.0 - self.bottom_region_ratio))
+
         for rank, (_, _, _, mask, bbox, box_conf) in enumerate(selected, start=1):
             lane_mask = np.maximum(lane_mask, mask)
+            lane_pixels = mask > 0
+            if self.lane_outward_offset > 0.0 and np.any(lane_pixels):
+                band_mask = np.zeros_like(mask, dtype=bool)
+                band_mask[bottom_band_top:, :] = lane_pixels[bottom_band_top:, :]
+                band_xs = np.where(band_mask)[1]
+                if band_xs.size == 0:
+                    band_xs = np.where(lane_pixels)[1]
+
+                if band_xs.size > 0:
+                    band_center_x = float(np.mean(band_xs))
+                    if band_center_x < image_center_x:
+                        offset_value = self.lane_outward_offset
+                    else:
+                        offset_value = -self.lane_outward_offset
+                    offset_map[lane_pixels] = offset_value
 
         lane_mask = cv2.morphologyEx(lane_mask, cv2.MORPH_CLOSE, self.morph_kernel)
-        return lane_mask
+        return lane_mask, offset_map
 
-    def _publish_pointcloud(self, lane_mask: np.ndarray, depth_img: np.ndarray, header) -> None:
+    def _publish_pointcloud(
+        self,
+        lane_mask: np.ndarray,
+        offset_map: np.ndarray,
+        depth_img: np.ndarray,
+        header
+    ) -> None:
         frame_id = header.frame_id
         if frame_id not in self._tf_cache:
             try:
@@ -224,6 +255,8 @@ class Yolo26LaneDetectionNode(Node):
         dh, dw = depth_img.shape[:2]
         if lane_mask.shape != (dh, dw):
             lane_mask = cv2.resize(lane_mask, (dw, dh), interpolation=cv2.INTER_NEAREST)
+        if offset_map.shape != (dh, dw):
+            offset_map = cv2.resize(offset_map, (dw, dh), interpolation=cv2.INTER_NEAREST)
 
         ys, xs = np.where(lane_mask > 0)
         if len(xs) == 0:
@@ -271,6 +304,8 @@ class Yolo26LaneDetectionNode(Node):
         pts_cam[:, 0] *= -1
         pts_cam[:, 1] *= -1
         pts_base = (r_mat @ pts_cam.T).T + t_vec
+        if offset_map.size > 0:
+            pts_base[:, 1] += offset_map[ys, xs]
         pts_base[:, 0] += self.cloud_offset_x
         pts_base[:, 1] += self.cloud_offset_y
 
