@@ -15,8 +15,6 @@
 
 ## 모델 경로
 
-모델 파일은 아래 경로에 두고 사용합니다.
-
 - CODa detector model:
   - `~/pcdet_ros2_ws/models/pointpillars_coda.pth`
 - KITTI detector model:
@@ -31,13 +29,11 @@
 
 ## 모델 다운로드
 
-모델 파일은 직접 받아서 아래 경로에 배치하면 됩니다.
-
 ```text
 ~/pcdet_ros2_ws/models/pointpillars_coda.pth
 ~/pcdet_ros2_ws/models/pv-rcnn_kitti.pth
 ```
 
-다운로드 방법과 배포 링크는 나중에 여기에 추가하면 됩니다.
+*모델 다운로드 경로*
 
 
