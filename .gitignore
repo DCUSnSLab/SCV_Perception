@@ -1,0 +1,68 @@
+# ROS 2 / colcon build artifacts
+/build/
+/build_*/
+/install/
+/install_*/
+/log/
+/log_*/
+
+# Local experiment outputs
+/results/
+/models/
+
+# Local backups and restored checkpoints
+/build_py*_backup_*/
+/install_py*_backup_*/
+/log_py*_backup_*/
+/archive_restored.pth
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Packaging metadata
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# IDE / editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.venv/
+venv/
+
+# OpenPCDet runtime outputs only
+third_party/OpenPCDet/output/
+third_party/OpenPCDet/**/__pycache__/
+
+# Model checkpoints and large weights
+*.pth
+*.pt
+*.onnx
+*.engine
+*.ckpt
+
+# Bag / media / generated reports
+*.bag
+*.db3
+*.mcap
+*.mp4
+*.avi
+*.webm
+*.csv
+
+# Keep source tree, docs, and vendored third_party tracked
+!README.md
+!src/**
+!scripts/**
+!third_party/**
+*.pth
+third_party/OpenPCDet/output/
+archive_restored.pth
