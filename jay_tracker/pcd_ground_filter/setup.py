@@ -10,6 +10,9 @@ setup(
         ('share/ament_index/resource_index/packages',
          ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name + '/launch',
+         ['launch/curb_detection.launch.py', 'launch/curb_costmap.launch.py']),
+        ('share/' + package_name + '/config', ['config/curb_params.yaml']),
     ],
     install_requires=['setuptools', 'numpy', 'scikit-learn'],
     zip_safe=True,
@@ -20,6 +23,7 @@ setup(
     entry_points={
         'console_scripts': [
             'ground_removal_node = pcd_ground_filter.ground_removal_node:main',
+            'curb_detection_node = pcd_ground_filter.curb_detection_node:main',
         ],
     },
 )
