@@ -414,6 +414,16 @@ class CurbDetectionNode(Node):
             f"Curb detection ready: {self.in_topic} -> {self.out_topic} "
             f"(curb {self.curb_min:.2f}-{self.curb_max:.2f} m, bins={self.num_bins})")
 
+    def _publish_passthrough(self, xyz, msg):
+        """Fail-safe: forward the original cloud unmodified so positive
+        obstacles always reach the costmap even when curb augmentation is
+        not possible for this frame."""
+        orig = np.empty((xyz.shape[0], 4), dtype=np.float32)
+        orig[:, :3] = xyz
+        orig[:, 3] = 0.0
+        self.pub_.publish(
+            xyzi_to_pointcloud2(orig, msg.header.frame_id, msg.header.stamp))
+
     def cb(self, msg: PointCloud2):
         t0 = time.perf_counter()
         xyz = pointcloud2_to_xyz(msg)
@@ -425,13 +435,23 @@ class CurbDetectionNode(Node):
         m = (r > self.min_range) & (r < self.max_range)
         xf, yf, zf, rf = x[m], y[m], z[m], r[m]
         if xf.shape[0] == 0:
+            self._publish_passthrough(xyz, msg)
             return
 
         if self.method == 'below_grade':
             a, c, ok = fit_ahead_plane(xf, yf, zf, self.plane_c_min, self.plane_c_max)
             if self.plane_c is None:
                 if not ok:
-                    return          # no trustworthy plane yet
+                    # No trustworthy plane yet (e.g. parked facing a wall).
+                    # CRITICAL: still republish the raw cloud — downstream
+                    # local_costmap consumes ONLY our output topic, so an
+                    # early return here would starve the whole obstacle
+                    # pipeline and the vehicle would drive blind.
+                    self._publish_passthrough(xyz, msg)
+                    self.get_logger().warn(
+                        'below_grade plane not initialised — passthrough '
+                        '(no curb walls yet)', throttle_duration_sec=5.0)
+                    return
                 self.plane_a, self.plane_c = a, c
             elif ok and abs(c - self.plane_c) <= self.plane_max_jump:
                 al = self.plane_ema_alpha

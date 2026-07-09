@@ -13,6 +13,8 @@ def generate_launch_description():
             executable='curb_detection_node',
             name='curb_detection_node',
             output='screen',
+            respawn=True,
+            respawn_delay=1.0,
             parameters=[cfg],
         ),
     ])

@@ -18,6 +18,8 @@ def generate_launch_description():
             executable='curb_detection_node',
             name='curb_detection_node',
             output='screen',
+            respawn=True,
+            respawn_delay=1.0,
             parameters=[curb_cfg],
         ),
         # 2) local costmap consuming the curb-augmented cloud
@@ -26,6 +28,8 @@ def generate_launch_description():
             executable='costmap_node',
             name='local_costmap_node',
             output='screen',
+            respawn=True,
+            respawn_delay=1.0,
             parameters=[
                 costmap_cfg,
                 {'point_cloud_topic': '/velodyne_points_curb'},
