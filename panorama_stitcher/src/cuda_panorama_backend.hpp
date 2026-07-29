@@ -43,8 +43,11 @@ struct CudaPanoramaConfig
   float occlusion_switch_margin_m{0.0F};
   bool depth_aware_color{true};
   bool render_depth_reprojected_color{true};
+  bool depth_color_overlap_only{false};
   bool allow_color_fallback{true};
   bool prefer_seam_camera_when_both_depth_valid{false};
+  int depth_color_min_x{0};
+  int depth_color_max_x{-1};
   int seam_x{0};
   int seam_feather_px{0};
   int depth_splat_radius_px{1};

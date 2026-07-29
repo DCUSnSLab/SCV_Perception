@@ -363,13 +363,17 @@ __global__ void compose_panorama_kernel(
     right_projection_keys, x, y, config) : kInvalidProjectionKey;
   const bool left_depth_valid = left_key != kInvalidProjectionKey;
   const bool right_depth_valid = right_key != kInvalidProjectionKey;
+  const bool render_depth_color_here =
+    config.render_depth_reprojected_color &&
+    (!config.depth_color_overlap_only ||
+    (x >= config.depth_color_min_x && x <= config.depth_color_max_x));
 
   // RGB and range serve different downstream purposes. The range image keeps
   // the full metric reprojection, while RGB may remain in one smooth
   // rotation-based projection so depth holes and silhouette noise do not
   // make the visible image shimmer across the entire field of view.
   if (!config.depth_aware_color ||
-    !config.render_depth_reprojected_color)
+    !render_depth_color_here)
   {
     if (left_depth_valid || right_depth_valid) {
       bool range_uses_left = left_depth_valid;

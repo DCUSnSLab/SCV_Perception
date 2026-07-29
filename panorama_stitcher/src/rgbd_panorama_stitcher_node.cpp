@@ -150,6 +150,8 @@ public:
       "depth_aware_color", true);
     render_depth_reprojected_color_ = declare_parameter<bool>(
       "render_depth_reprojected_color", true);
+    depth_color_overlap_only_ = declare_parameter<bool>(
+      "depth_color_overlap_only", false);
     use_rgbd_synchronization_ = declare_parameter<bool>(
       "use_rgbd_synchronization", true);
     depth_temporal_stabilization_ = declare_parameter<bool>(
@@ -667,6 +669,20 @@ private:
       throw std::runtime_error("invalid panorama projection geometry");
     }
 
+    const auto panorama_x_for_angle = [this](double angle) {
+        return projection_model_ == "rectilinear" ?
+          virtual_fx_px_ * std::tan(angle) + virtual_cx_px_ :
+          (angle - panorama_min_angle_) * panorama_focal_px_;
+      };
+    depth_color_min_x_ = std::clamp(
+      static_cast<int>(std::ceil(
+        panorama_x_for_angle(overlap_min_angle_))),
+      0, panorama_width_ - 1);
+    depth_color_max_x_ = std::clamp(
+      static_cast<int>(std::floor(
+        panorama_x_for_angle(overlap_max_angle_))),
+      0, panorama_width_ - 1);
+
     build_inverse_map(
       left_model_, left_map_x_, left_map_y_, left_base_mask_);
     build_inverse_map(
@@ -691,12 +707,13 @@ private:
     RCLCPP_INFO(
       get_logger(),
       "Projection (%s): %dx%d, angular view %.1f..%.1f deg, "
-      "overlap %.1f..%.1f deg, seam x=%d",
+      "overlap %.1f..%.1f deg (x=%d..%d), seam x=%d",
       projection_model_.c_str(), panorama_width_, panorama_height_,
       panorama_min_angle_ * 180.0 / kPi,
       panorama_max_angle_ * 180.0 / kPi,
       overlap_min_angle_ * 180.0 / kPi,
       overlap_max_angle_ * 180.0 / kPi,
+      depth_color_min_x_, depth_color_max_x_,
       seam_x_);
   }
 
@@ -1206,6 +1223,9 @@ private:
     config.depth_aware_color = depth_aware_color_;
     config.render_depth_reprojected_color =
       render_depth_reprojected_color_;
+    config.depth_color_overlap_only = depth_color_overlap_only_;
+    config.depth_color_min_x = depth_color_min_x_;
+    config.depth_color_max_x = depth_color_max_x_;
     config.allow_color_fallback = allow_color_fallback_;
     config.prefer_seam_camera_when_both_depth_valid =
       prefer_seam_camera_when_both_depth_valid_;
@@ -1325,8 +1345,23 @@ private:
       fill_projected_holes(right_projected, projected_hole_radius_px_);
 
       if (render_depth_reprojected_color_) {
-        left_projected.color.copyTo(left_base, left_projected.mask);
-        right_projected.color.copyTo(right_base, right_projected.mask);
+        const auto render_projected_color =
+          [this](const ProjectedDepth & projected, cv::Mat & base) {
+            if (!depth_color_overlap_only_) {
+              projected.color.copyTo(base, projected.mask);
+              return;
+            }
+            if (depth_color_max_x_ < depth_color_min_x_) {
+              return;
+            }
+            const cv::Rect band(
+              depth_color_min_x_, 0,
+              depth_color_max_x_ - depth_color_min_x_ + 1,
+              panorama_height_);
+            projected.color(band).copyTo(base(band), projected.mask(band));
+          };
+        render_projected_color(left_projected, left_base);
+        render_projected_color(right_projected, right_base);
       }
     }
 
@@ -1355,7 +1390,11 @@ private:
         // center. With a real baseline, close objects move to opposite sides
         // of that seam and central content is dropped. In the calibrated
         // overlap, preserve the union of both depth-reprojected views instead.
-        if (depth_aware_color_ && render_depth_reprojected_color_) {
+        const bool render_depth_color_here =
+          render_depth_reprojected_color_ &&
+          (!depth_color_overlap_only_ ||
+          (x >= depth_color_min_x_ && x <= depth_color_max_x_));
+        if (depth_aware_color_ && render_depth_color_here) {
           const bool left_depth_valid =
             left_projected.mask.at<uint8_t>(y, x) != 0;
           const bool right_depth_valid =
@@ -1885,6 +1924,7 @@ private:
   int seam_feather_px_{2};
   bool depth_aware_color_{true};
   bool render_depth_reprojected_color_{true};
+  bool depth_color_overlap_only_{false};
   bool use_rgbd_synchronization_{true};
   bool depth_temporal_stabilization_{true};
   double depth_temporal_alpha_{0.35};
@@ -1921,6 +1961,8 @@ private:
   double right_max_angle_{0.0};
   double overlap_min_angle_{0.0};
   double overlap_max_angle_{0.0};
+  int depth_color_min_x_{0};
+  int depth_color_max_x_{-1};
   cv::Mat left_map_x_;
   cv::Mat left_map_y_;
   cv::Mat right_map_x_;

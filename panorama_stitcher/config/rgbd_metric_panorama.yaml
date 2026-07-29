@@ -97,10 +97,11 @@ metric_panorama_stitcher:
     # Reproject every valid RGB-D pixel from both cameras into the rig-centered
     # virtual camera for the metric range and validity topics.
     depth_aware_color: true
-    # Keep RGB in the smooth cylindrical projection. Full-frame depth-colored
-    # rendering makes every depth hole and moving silhouette shimmer, while
-    # range/validity still retain the complete 3D reprojection below.
-    render_depth_reprojected_color: false
+    # Depth-correct only the true two-camera overlap. Outside that band RGB
+    # stays in the smooth cylindrical projection, while range/validity retain
+    # full-frame metric 3D reprojection.
+    render_depth_reprojected_color: true
+    depth_color_overlap_only: true
     use_rgbd_synchronization: true
     # Keep the metric path low-latency for moving obstacles. The previous
     # full-resolution CPU median+EMA pass cost about 35-40 ms per frame and

@@ -150,6 +150,20 @@ ros2 launch panorama_stitcher rectified_panorama.launch.py
 `CameraInfo`는 회전되지 않습니다. 노드가 주점을
 `(width-1-cx, height-1-cy)`로 변환해서 사용합니다.
 
+주행용 metric 파노라마는 다음처럼 실행합니다.
+
+```bash
+ros2 launch panorama_stitcher rgbd_metric_panorama.launch.py
+```
+
+- `/panorama/metric/image_raw`: 실제 양안 중첩각 안에서만 RGB-D 3D 재투영
+- `/panorama/metric/range`: 전 시야 rig 중심 거리 영상(`32FC1`, m)
+- `/panorama/metric/validity`: 전 시야 유효 깊이 마스크(`mono8`)
+
+중첩 구간의 픽셀 범위는 외부 캘리브레이션과 출력 투영에서 자동
+계산됩니다. `depth_color_overlap_only: true`는 색상 렌더링만 제한하며,
+`full_depth_reprojection: true`인 거리/유효성 출력은 제한하지 않습니다.
+
 ## Fixed calibration
 
 기본 `panorama_stitcher_node`의 값은 초기 bag 검토 때 추정한 컬러 전용
