@@ -148,6 +148,8 @@ public:
     seam_feather_px_ = declare_parameter<int>("seam_feather_px", 2);
     depth_aware_color_ = declare_parameter<bool>(
       "depth_aware_color", true);
+    render_depth_reprojected_color_ = declare_parameter<bool>(
+      "render_depth_reprojected_color", true);
     use_rgbd_synchronization_ = declare_parameter<bool>(
       "use_rgbd_synchronization", true);
     depth_temporal_stabilization_ = declare_parameter<bool>(
@@ -1202,6 +1204,8 @@ private:
     config.occlusion_switch_margin_m =
       static_cast<float>(occlusion_switch_margin_m_);
     config.depth_aware_color = depth_aware_color_;
+    config.render_depth_reprojected_color =
+      render_depth_reprojected_color_;
     config.allow_color_fallback = allow_color_fallback_;
     config.prefer_seam_camera_when_both_depth_valid =
       prefer_seam_camera_when_both_depth_valid_;
@@ -1320,8 +1324,10 @@ private:
       fill_projected_holes(left_projected, projected_hole_radius_px_);
       fill_projected_holes(right_projected, projected_hole_radius_px_);
 
-      left_projected.color.copyTo(left_base, left_projected.mask);
-      right_projected.color.copyTo(right_base, right_projected.mask);
+      if (render_depth_reprojected_color_) {
+        left_projected.color.copyTo(left_base, left_projected.mask);
+        right_projected.color.copyTo(right_base, right_projected.mask);
+      }
     }
 
     right_base = apply_gain(right_base, gain);
@@ -1349,7 +1355,7 @@ private:
         // center. With a real baseline, close objects move to opposite sides
         // of that seam and central content is dropped. In the calibrated
         // overlap, preserve the union of both depth-reprojected views instead.
-        if (depth_aware_color_) {
+        if (depth_aware_color_ && render_depth_reprojected_color_) {
           const bool left_depth_valid =
             left_projected.mask.at<uint8_t>(y, x) != 0;
           const bool right_depth_valid =
@@ -1486,8 +1492,13 @@ private:
       float * output_range_row = last_range_m_.ptr<float>(y);
       for (int x = 0; x < panorama_width_; ++x) {
         if (left_mask_row[x] && right_mask_row[x]) {
-          output_range_row[x] = std::min(
-            left_range_row[x], right_range_row[x]);
+          if (prefer_seam_camera_when_both_depth_valid_) {
+            output_range_row[x] =
+              x <= seam_x_ ? left_range_row[x] : right_range_row[x];
+          } else {
+            output_range_row[x] = std::min(
+              left_range_row[x], right_range_row[x]);
+          }
         } else if (left_mask_row[x]) {
           output_range_row[x] = left_range_row[x];
         } else if (right_mask_row[x]) {
@@ -1873,6 +1884,7 @@ private:
   bool auto_seam_center_{false};
   int seam_feather_px_{2};
   bool depth_aware_color_{true};
+  bool render_depth_reprojected_color_{true};
   bool use_rgbd_synchronization_{true};
   bool depth_temporal_stabilization_{true};
   double depth_temporal_alpha_{0.35};

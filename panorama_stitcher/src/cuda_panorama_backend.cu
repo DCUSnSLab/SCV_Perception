@@ -355,12 +355,37 @@ __global__ void compose_panorama_kernel(
     return;
   }
 
-  // A color-only panorama must remain in one projection model. Mixing a
-  // depth-reprojected center band with rotation-warped outer views creates
-  // hidden cut boundaries wherever an object crosses the band edge.
-  if (!config.depth_aware_color) {
-    validity[pixel_index] = 0U;
-    output_range_m[pixel_index] = 0.0F;
+  const unsigned long long left_key = config.depth_aware_color ?
+    nearest_projection_key(
+    left_projection_keys, x, y, config) : kInvalidProjectionKey;
+  const unsigned long long right_key = config.depth_aware_color ?
+    nearest_projection_key(
+    right_projection_keys, x, y, config) : kInvalidProjectionKey;
+  const bool left_depth_valid = left_key != kInvalidProjectionKey;
+  const bool right_depth_valid = right_key != kInvalidProjectionKey;
+
+  // RGB and range serve different downstream purposes. The range image keeps
+  // the full metric reprojection, while RGB may remain in one smooth
+  // rotation-based projection so depth holes and silhouette noise do not
+  // make the visible image shimmer across the entire field of view.
+  if (!config.depth_aware_color ||
+    !config.render_depth_reprojected_color)
+  {
+    if (left_depth_valid || right_depth_valid) {
+      bool range_uses_left = left_depth_valid;
+      if (left_depth_valid && right_depth_valid) {
+        range_uses_left =
+          config.prefer_seam_camera_when_both_depth_valid ?
+          x <= seam_x :
+          projection_range(left_key) <= projection_range(right_key);
+      }
+      validity[pixel_index] = 255U;
+      output_range_m[pixel_index] = range_uses_left ?
+        projection_range(left_key) : projection_range(right_key);
+    } else {
+      validity[pixel_index] = 0U;
+      output_range_m[pixel_index] = 0.0F;
+    }
     const int blend_left = seam_x - config.seam_feather_px;
     const int blend_right = seam_x + config.seam_feather_px;
     if (!right_base_valid || (left_base_valid && x < blend_left)) {
@@ -400,13 +425,6 @@ __global__ void compose_panorama_kernel(
       right_gain_r);
     return;
   }
-
-  const unsigned long long left_key = nearest_projection_key(
-    left_projection_keys, x, y, config);
-  const unsigned long long right_key = nearest_projection_key(
-    right_projection_keys, x, y, config);
-  const bool left_depth_valid = left_key != kInvalidProjectionKey;
-  const bool right_depth_valid = right_key != kInvalidProjectionKey;
 
   if (left_depth_valid || right_depth_valid) {
     if (config.prefer_seam_camera_when_both_depth_valid) {

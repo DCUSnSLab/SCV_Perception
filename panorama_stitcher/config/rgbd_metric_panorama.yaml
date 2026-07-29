@@ -95,9 +95,12 @@ metric_panorama_stitcher:
     # Hard ownership boundary: never average pixels from the two viewpoints.
     seam_feather_px: 0
     # Reproject every valid RGB-D pixel from both cameras into the rig-centered
-    # virtual camera. This is a separate topic; the proven color-only panorama
-    # remains unchanged.
+    # virtual camera for the metric range and validity topics.
     depth_aware_color: true
+    # Keep RGB in the smooth cylindrical projection. Full-frame depth-colored
+    # rendering makes every depth hole and moving silhouette shimmer, while
+    # range/validity still retain the complete 3D reprojection below.
+    render_depth_reprojected_color: false
     use_rgbd_synchronization: true
     # Keep the metric path low-latency for moving obstacles. The previous
     # full-resolution CPU median+EMA pass cost about 35-40 ms per frame and
@@ -108,8 +111,9 @@ metric_panorama_stitcher:
     depth_temporal_reset_m: 0.05
     depth_median_kernel: 1
     occlusion_switch_margin_m: 0.05
-    # Select the nearest measured surface when the two views disagree.
-    prefer_seam_camera_when_both_depth_valid: false
+    # Keep metric range ownership coherent instead of alternating between
+    # cameras pixel-by-pixel when both measure the same output region.
+    prefer_seam_camera_when_both_depth_valid: true
 
     enable_exposure_compensation: true
     exposure_smoothing: 0.15
