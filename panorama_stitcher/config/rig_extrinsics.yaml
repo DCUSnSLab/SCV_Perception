@@ -1,0 +1,41 @@
+schema_version: 1
+accepted: true
+created_local_time: '2026-07-29T15:57:09.039807+09:00'
+method: unconstrained_metric_multiboard_bundle_adjustment
+convention: X_right_virtual_optical = R_right_from_left * X_left_virtual_optical + t_right_from_left_m
+inputs:
+  capture_root: /home/ssc/lidar_cam_calib/captures_yaw30_recal_20260729_2
+  capture_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  boards: [2, 5]
+  square_length_m: 0.073
+  marker_length_m: 0.056
+  baseline_hint_m: 0.11
+  baseline_hint_use: initialization_only
+quality:
+  primary_reprojection_rms_px: 0.5601701299303962
+  primary_reprojection_p95_px: 1.038776386137947
+  validation_reprojection_rms_px: 1.956573867159464
+  validation_reprojection_p95_px: 3.0113325612003985
+  validation_rotation_delta_deg: 0.18160392823289373
+  validation_translation_delta_m: 0.006004407841681177
+  primary_even_odd_rotation_delta_deg: 0.04649422636374184
+  primary_even_odd_translation_delta_m: 0.004093575856438189
+result:
+  R_right_from_left:
+    - [0.49964945638620556, -0.012675149397975396, -0.8661349556049036]
+    - [0.04250752714427419, 0.999047083975797, -0.009901218891418945]
+    - [0.8651841022979145, -0.041764393772638464, 0.499712121669823]
+  t_right_from_left_m: [-0.11041506392908218, -0.0026947907093596043, -0.032753410831279965]
+  estimated_color_lens_baseline_m: 0.11520214477392841
+  relative_rotation_angle_deg: 60.052627089438936
+  left_yaw_deg: -30.0
+  right_yaw_deg: 29.9901743224445
+  right_pitch_deg: 2.3936196923094024
+  R_right_virtual_optical_to_panorama_optical:
+    - [0.8657766000199907, 0.03186198891328858, 0.49941535070551707]
+    - [-0.012675149397975396, 0.999047083975797, -0.041764393772638464]
+    - [-0.5002701464664507, 0.0298284706605363, 0.8653554430940442]
+  baseline_left_to_right_in_panorama_optical_m: [0.11203819618832149, -0.0000752309783319167, -0.026813636375550502]
+  left_lens_center_in_panorama_optical_m: [-0.056019098094160745, 0.00003761548916595835, 0.013406818187775251]
+  right_lens_center_in_panorama_optical_m: [0.056019098094160745, -0.00003761548916595835, -0.013406818187775251]
+rejection_reasons: []

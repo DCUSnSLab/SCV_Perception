@@ -1,0 +1,1010 @@
+#include "cuda_panorama_backend.hpp"
+
+#include <algorithm>
+#include <cstdint>
+#include <limits>
+#include <sstream>
+#include <utility>
+
+#include <cuda_runtime.h>
+
+namespace panorama_stitcher
+{
+namespace
+{
+
+constexpr unsigned long long kInvalidProjectionKey =
+  0xffffffffffffffffULL;
+
+std::string cuda_error_message(
+  const char * operation, cudaError_t result)
+{
+  std::ostringstream stream;
+  stream << operation << ": " << cudaGetErrorString(result);
+  return stream.str();
+}
+
+bool check_cuda(
+  cudaError_t result, const char * operation, std::string & error)
+{
+  if (result == cudaSuccess) {
+    return true;
+  }
+  error = cuda_error_message(operation, result);
+  return false;
+}
+
+__device__ __forceinline__ float clamp_channel(float value)
+{
+  return fminf(fmaxf(value, 0.0F), 255.0F);
+}
+
+__device__ __forceinline__ unsigned char gained_channel(
+  unsigned char value, float gain)
+{
+  return static_cast<unsigned char>(
+    __float2int_rn(clamp_channel(static_cast<float>(value) * gain)));
+}
+
+__device__ __forceinline__ unsigned char float_channel(float value)
+{
+  return static_cast<unsigned char>(
+    __float2int_rn(clamp_channel(value)));
+}
+
+__global__ void project_depth_kernel(
+  const float * depth_m,
+  unsigned long long * projection_keys,
+  unsigned int * accepted_points,
+  CudaCameraModel camera,
+  CudaPanoramaConfig config)
+{
+  const int column_count =
+    camera.maximum_depth_column - camera.minimum_depth_column + 1;
+  const int work_items = column_count * config.source_height;
+  const int item = blockIdx.x * blockDim.x + threadIdx.x;
+  if (item >= work_items || column_count <= 0) {
+    return;
+  }
+
+  const int v = item / column_count;
+  const int u = camera.minimum_depth_column + item % column_count;
+  const int source_index = v * config.source_width + u;
+  const float depth = depth_m[source_index];
+  if (
+    !isfinite(depth) ||
+    depth < config.minimum_depth_m ||
+    depth > config.maximum_depth_m)
+  {
+    return;
+  }
+
+  const float local_x =
+    (static_cast<float>(u) - camera.cx) / camera.fx * depth;
+  const float local_y =
+    (static_cast<float>(v) - camera.cy) / camera.fy * depth;
+  const float rig_x =
+    camera.rotation_camera_to_rig[0] * local_x +
+    camera.rotation_camera_to_rig[1] * local_y +
+    camera.rotation_camera_to_rig[2] * depth +
+    camera.translation_camera_in_rig[0];
+  const float rig_y =
+    camera.rotation_camera_to_rig[3] * local_x +
+    camera.rotation_camera_to_rig[4] * local_y +
+    camera.rotation_camera_to_rig[5] * depth +
+    camera.translation_camera_in_rig[1];
+  const float rig_z =
+    camera.rotation_camera_to_rig[6] * local_x +
+    camera.rotation_camera_to_rig[7] * local_y +
+    camera.rotation_camera_to_rig[8] * depth +
+    camera.translation_camera_in_rig[2];
+  if (rig_z <= 0.0F) {
+    return;
+  }
+
+  const float horizontal_range = hypotf(rig_x, rig_z);
+  int output_x;
+  int output_y;
+  if (config.projection_model == 1) {
+    output_x = __float2int_rn(
+      config.virtual_fx_px * rig_x / rig_z +
+      config.virtual_cx_px);
+    output_y = __float2int_rn(
+      config.virtual_fy_px * rig_y / rig_z +
+      config.virtual_cy_px);
+  } else {
+    const float global_angle = atan2f(rig_x, rig_z);
+    output_x = __float2int_rn(
+      (global_angle - config.panorama_min_angle) *
+      config.panorama_focal_px);
+    output_y = __float2int_rn(
+      config.panorama_focal_px * rig_y / horizontal_range -
+      config.panorama_min_vertical);
+  }
+  if (
+    output_x < 0 || output_x >= config.panorama_width ||
+    output_y < 0 || output_y >= config.panorama_height)
+  {
+    return;
+  }
+
+  const unsigned int range_bits = __float_as_uint(horizontal_range);
+  const unsigned long long key =
+    (static_cast<unsigned long long>(range_bits) << 32) |
+    static_cast<unsigned int>(source_index);
+  atomicMin(
+    &projection_keys[output_y * config.panorama_width + output_x],
+    key);
+  atomicAdd(accepted_points, 1U);
+}
+
+__global__ void remap_color_kernel(
+  const unsigned char * source,
+  const float * map_x,
+  const float * map_y,
+  const unsigned char * valid_mask,
+  unsigned char * remapped,
+  CudaPanoramaConfig config)
+{
+  const int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const int y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= config.panorama_width || y >= config.panorama_height) {
+    return;
+  }
+
+  const int output_index = y * config.panorama_width + x;
+  const int output_color_index = output_index * 3;
+  if (valid_mask[output_index] == 0U) {
+    remapped[output_color_index] = 0U;
+    remapped[output_color_index + 1] = 0U;
+    remapped[output_color_index + 2] = 0U;
+    return;
+  }
+
+  const float source_x = map_x[output_index];
+  const float source_y = map_y[output_index];
+  const int x0 = __float2int_rd(source_x);
+  const int y0 = __float2int_rd(source_y);
+  const int x1 = x0 + 1 < config.source_width ? x0 + 1 : x0;
+  const int y1 = y0 + 1 < config.source_height ? y0 + 1 : y0;
+  const float weight_x = source_x - static_cast<float>(x0);
+  const float weight_y = source_y - static_cast<float>(y0);
+  const float weight_00 = (1.0F - weight_x) * (1.0F - weight_y);
+  const float weight_10 = weight_x * (1.0F - weight_y);
+  const float weight_01 = (1.0F - weight_x) * weight_y;
+  const float weight_11 = weight_x * weight_y;
+  const int index_00 = (y0 * config.source_width + x0) * 3;
+  const int index_10 = (y0 * config.source_width + x1) * 3;
+  const int index_01 = (y1 * config.source_width + x0) * 3;
+  const int index_11 = (y1 * config.source_width + x1) * 3;
+  for (int channel = 0; channel < 3; ++channel) {
+    remapped[output_color_index + channel] = float_channel(
+      weight_00 * static_cast<float>(source[index_00 + channel]) +
+      weight_10 * static_cast<float>(source[index_10 + channel]) +
+      weight_01 * static_cast<float>(source[index_01 + channel]) +
+      weight_11 * static_cast<float>(source[index_11 + channel]));
+  }
+}
+
+__device__ __forceinline__ unsigned long long nearest_projection_key(
+  const unsigned long long * keys,
+  int x,
+  int y,
+  const CudaPanoramaConfig & config)
+{
+  const int index = y * config.panorama_width + x;
+  unsigned long long key = keys[index];
+  if (
+    key != kInvalidProjectionKey ||
+    config.projected_hole_radius <= 0)
+  {
+    return key;
+  }
+
+  unsigned long long closest = kInvalidProjectionKey;
+  int closest_distance = 2147483647;
+  for (
+    int offset_y = -config.projected_hole_radius;
+    offset_y <= config.projected_hole_radius;
+    ++offset_y)
+  {
+    const int neighbor_y = y + offset_y;
+    if (neighbor_y < 0 || neighbor_y >= config.panorama_height) {
+      continue;
+    }
+    for (
+      int offset_x = -config.projected_hole_radius;
+      offset_x <= config.projected_hole_radius;
+      ++offset_x)
+    {
+      const int neighbor_x = x + offset_x;
+      if (neighbor_x < 0 || neighbor_x >= config.panorama_width) {
+        continue;
+      }
+      const unsigned long long candidate =
+        keys[neighbor_y * config.panorama_width + neighbor_x];
+      if (candidate == kInvalidProjectionKey) {
+        continue;
+      }
+      const int distance =
+        offset_x * offset_x + offset_y * offset_y;
+      if (distance < closest_distance ||
+        (distance == closest_distance && candidate < closest))
+      {
+        closest_distance = distance;
+        closest = candidate;
+      }
+    }
+  }
+  return closest;
+}
+
+__device__ __forceinline__ void source_color(
+  const unsigned char * source,
+  unsigned long long key,
+  float gain_b,
+  float gain_g,
+  float gain_r,
+  unsigned char & blue,
+  unsigned char & green,
+  unsigned char & red)
+{
+  const unsigned int source_index =
+    static_cast<unsigned int>(key & 0xffffffffULL);
+  const unsigned int color_index = source_index * 3U;
+  blue = gained_channel(source[color_index], gain_b);
+  green = gained_channel(source[color_index + 1U], gain_g);
+  red = gained_channel(source[color_index + 2U], gain_r);
+}
+
+__device__ __forceinline__ float projection_range(
+  unsigned long long key)
+{
+  return __uint_as_float(static_cast<unsigned int>(key >> 32));
+}
+
+__global__ void compose_panorama_kernel(
+  const unsigned char * left_source,
+  const unsigned char * right_source,
+  const unsigned char * left_base,
+  const unsigned char * right_base,
+  const unsigned char * left_base_mask,
+  const unsigned char * right_base_mask,
+  const unsigned long long * left_projection_keys,
+  const unsigned long long * right_projection_keys,
+  unsigned char * output,
+  float right_gain_b,
+  float right_gain_g,
+  float right_gain_r,
+  CudaPanoramaConfig config)
+{
+  const int x = blockIdx.x * blockDim.x + threadIdx.x;
+  const int y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (x >= config.panorama_width || y >= config.panorama_height) {
+    return;
+  }
+
+  const int pixel_index = y * config.panorama_width + x;
+  const int color_index = pixel_index * 3;
+  const int seam_x = config.seam_x;
+  const bool left_base_valid = left_base_mask[pixel_index] != 0U;
+  const bool right_base_valid = right_base_mask[pixel_index] != 0U;
+  if (!left_base_valid && !right_base_valid) {
+    output[color_index] = 0U;
+    output[color_index + 1] = 0U;
+    output[color_index + 2] = 0U;
+    return;
+  }
+
+  // A color-only panorama must remain in one projection model. Mixing a
+  // depth-reprojected center band with rotation-warped outer views creates
+  // hidden cut boundaries wherever an object crosses the band edge.
+  if (!config.depth_aware_color) {
+    const int blend_left = seam_x - config.seam_feather_px;
+    const int blend_right = seam_x + config.seam_feather_px;
+    if (!right_base_valid || (left_base_valid && x < blend_left)) {
+      output[color_index] = left_base[color_index];
+      output[color_index + 1] = left_base[color_index + 1];
+      output[color_index + 2] = left_base[color_index + 2];
+      return;
+    }
+    if (!left_base_valid || x > blend_right) {
+      output[color_index] = gained_channel(
+        right_base[color_index], right_gain_b);
+      output[color_index + 1] = gained_channel(
+        right_base[color_index + 1], right_gain_g);
+      output[color_index + 2] = gained_channel(
+        right_base[color_index + 2], right_gain_r);
+      return;
+    }
+
+    const int feather_width = 2 * config.seam_feather_px;
+    const float denominator =
+      static_cast<float>(feather_width > 1 ? feather_width : 1);
+    const float right_weight = fminf(fmaxf(
+        static_cast<float>(x - blend_left) / denominator,
+        0.0F), 1.0F);
+    const float left_weight = 1.0F - right_weight;
+    output[color_index] = float_channel(
+      left_weight * static_cast<float>(left_base[color_index]) +
+      right_weight * static_cast<float>(right_base[color_index]) *
+      right_gain_b);
+    output[color_index + 1] = float_channel(
+      left_weight * static_cast<float>(left_base[color_index + 1]) +
+      right_weight * static_cast<float>(right_base[color_index + 1]) *
+      right_gain_g);
+    output[color_index + 2] = float_channel(
+      left_weight * static_cast<float>(left_base[color_index + 2]) +
+      right_weight * static_cast<float>(right_base[color_index + 2]) *
+      right_gain_r);
+    return;
+  }
+
+  const unsigned long long left_key = nearest_projection_key(
+    left_projection_keys, x, y, config);
+  const unsigned long long right_key = nearest_projection_key(
+    right_projection_keys, x, y, config);
+  const bool left_depth_valid = left_key != kInvalidProjectionKey;
+  const bool right_depth_valid = right_key != kInvalidProjectionKey;
+
+  if (left_depth_valid || right_depth_valid) {
+    if (config.prefer_seam_camera_when_both_depth_valid) {
+      const bool owner_is_left = x <= seam_x;
+      if (left_depth_valid && right_depth_valid) {
+        const float left_range = projection_range(left_key);
+        const float right_range = projection_range(right_key);
+        const int blend_left = seam_x - config.seam_feather_px;
+        const int blend_right = seam_x + config.seam_feather_px;
+        if (
+          config.seam_feather_px > 0 &&
+          x >= blend_left && x <= blend_right &&
+          fabsf(left_range - right_range) <=
+          config.occlusion_switch_margin_m)
+        {
+          unsigned char left_blue;
+          unsigned char left_green;
+          unsigned char left_red;
+          unsigned char right_blue;
+          unsigned char right_green;
+          unsigned char right_red;
+          source_color(
+            left_source, left_key, 1.0F, 1.0F, 1.0F,
+            left_blue, left_green, left_red);
+          source_color(
+            right_source, right_key,
+            right_gain_b, right_gain_g, right_gain_r,
+            right_blue, right_green, right_red);
+          const float right_weight = static_cast<float>(
+            x - blend_left) /
+            static_cast<float>(2 * config.seam_feather_px);
+          output[color_index] = static_cast<unsigned char>(
+            (1.0F - right_weight) * left_blue +
+            right_weight * right_blue);
+          output[color_index + 1] = static_cast<unsigned char>(
+            (1.0F - right_weight) * left_green +
+            right_weight * right_green);
+          output[color_index + 2] = static_cast<unsigned char>(
+            (1.0F - right_weight) * left_red +
+            right_weight * right_red);
+          return;
+        }
+      }
+
+      // Keep one camera owner on each side of the seam. If that camera has a
+      // depth hole, its rotation-warped color is safer than injecting a
+      // fragment from the other viewpoint into the foreground object.
+      if (owner_is_left && left_base_valid) {
+        if (left_depth_valid) {
+          source_color(
+            left_source, left_key, 1.0F, 1.0F, 1.0F,
+            output[color_index], output[color_index + 1],
+            output[color_index + 2]);
+        } else {
+          output[color_index] = left_base[color_index];
+          output[color_index + 1] = left_base[color_index + 1];
+          output[color_index + 2] = left_base[color_index + 2];
+        }
+        return;
+      }
+      if (!owner_is_left && right_base_valid) {
+        if (right_depth_valid) {
+          source_color(
+            right_source, right_key,
+            right_gain_b, right_gain_g, right_gain_r,
+            output[color_index], output[color_index + 1],
+            output[color_index + 2]);
+        } else {
+          output[color_index] = gained_channel(
+            right_base[color_index], right_gain_b);
+          output[color_index + 1] = gained_channel(
+            right_base[color_index + 1], right_gain_g);
+          output[color_index + 2] = gained_channel(
+            right_base[color_index + 2], right_gain_r);
+        }
+        return;
+      }
+    }
+
+    bool use_left = left_depth_valid;
+    if (left_depth_valid && right_depth_valid) {
+      const float left_range = projection_range(left_key);
+      const float right_range = projection_range(right_key);
+      if (
+        fabsf(left_range - right_range) <=
+        config.occlusion_switch_margin_m)
+      {
+        use_left = x <= seam_x;
+      } else {
+        use_left = left_range <= right_range;
+      }
+    }
+
+    unsigned char blue;
+    unsigned char green;
+    unsigned char red;
+    if (use_left) {
+      source_color(
+        left_source, left_key, 1.0F, 1.0F, 1.0F,
+        blue, green, red);
+    } else {
+      source_color(
+        right_source, right_key,
+        right_gain_b, right_gain_g, right_gain_r,
+        blue, green, red);
+    }
+    output[color_index] = blue;
+    output[color_index + 1] = green;
+    output[color_index + 2] = red;
+    return;
+  }
+
+  const int blend_left =
+    seam_x - config.seam_feather_px;
+  const int blend_right =
+    seam_x + config.seam_feather_px;
+  if (!right_base_valid || (left_base_valid && x < blend_left)) {
+    output[color_index] = left_base[color_index];
+    output[color_index + 1] = left_base[color_index + 1];
+    output[color_index + 2] = left_base[color_index + 2];
+    return;
+  }
+  if (!left_base_valid || x > blend_right) {
+    output[color_index] = gained_channel(
+      right_base[color_index], right_gain_b);
+    output[color_index + 1] = gained_channel(
+      right_base[color_index + 1], right_gain_g);
+    output[color_index + 2] = gained_channel(
+      right_base[color_index + 2], right_gain_r);
+    return;
+  }
+
+  const int feather_width = 2 * config.seam_feather_px;
+  const float denominator =
+    static_cast<float>(feather_width > 1 ? feather_width : 1);
+  const float right_weight = fminf(fmaxf(
+      static_cast<float>(x - blend_left) / denominator,
+      0.0F), 1.0F);
+  const float left_weight = 1.0F - right_weight;
+  output[color_index] = float_channel(
+    left_weight * static_cast<float>(left_base[color_index]) +
+    right_weight * static_cast<float>(right_base[color_index]) *
+    right_gain_b);
+  output[color_index + 1] = float_channel(
+    left_weight * static_cast<float>(left_base[color_index + 1]) +
+    right_weight * static_cast<float>(right_base[color_index + 1]) *
+    right_gain_g);
+  output[color_index + 2] = float_channel(
+    left_weight * static_cast<float>(left_base[color_index + 2]) +
+    right_weight * static_cast<float>(right_base[color_index + 2]) *
+    right_gain_r);
+}
+
+}  // namespace
+
+struct CudaPanoramaBackend::Impl
+{
+  CudaPanoramaConfig config;
+  CudaCameraModel left_camera;
+  CudaCameraModel right_camera;
+  bool configured{false};
+  cudaStream_t stream{nullptr};
+  cudaEvent_t start_event{nullptr};
+  cudaEvent_t stop_event{nullptr};
+
+  unsigned char * left_source{nullptr};
+  unsigned char * right_source{nullptr};
+  float * left_depth{nullptr};
+  float * right_depth{nullptr};
+  unsigned char * left_base{nullptr};
+  unsigned char * right_base{nullptr};
+  unsigned char * left_base_mask{nullptr};
+  unsigned char * right_base_mask{nullptr};
+  float * left_map_x{nullptr};
+  float * left_map_y{nullptr};
+  float * right_map_x{nullptr};
+  float * right_map_y{nullptr};
+  unsigned long long * left_projection_keys{nullptr};
+  unsigned long long * right_projection_keys{nullptr};
+  unsigned int * left_accepted_points{nullptr};
+  unsigned int * right_accepted_points{nullptr};
+  unsigned char * output{nullptr};
+
+  void release()
+  {
+    cudaFree(left_source);
+    cudaFree(right_source);
+    cudaFree(left_depth);
+    cudaFree(right_depth);
+    cudaFree(left_base);
+    cudaFree(right_base);
+    cudaFree(left_base_mask);
+    cudaFree(right_base_mask);
+    cudaFree(left_map_x);
+    cudaFree(left_map_y);
+    cudaFree(right_map_x);
+    cudaFree(right_map_y);
+    cudaFree(left_projection_keys);
+    cudaFree(right_projection_keys);
+    cudaFree(left_accepted_points);
+    cudaFree(right_accepted_points);
+    cudaFree(output);
+    left_source = nullptr;
+    right_source = nullptr;
+    left_depth = nullptr;
+    right_depth = nullptr;
+    left_base = nullptr;
+    right_base = nullptr;
+    left_base_mask = nullptr;
+    right_base_mask = nullptr;
+    left_map_x = nullptr;
+    left_map_y = nullptr;
+    right_map_x = nullptr;
+    right_map_y = nullptr;
+    left_projection_keys = nullptr;
+    right_projection_keys = nullptr;
+    left_accepted_points = nullptr;
+    right_accepted_points = nullptr;
+    output = nullptr;
+    configured = false;
+  }
+};
+
+CudaPanoramaBackend::CudaPanoramaBackend()
+: impl_(std::make_unique<Impl>())
+{
+  cudaStreamCreateWithFlags(&impl_->stream, cudaStreamNonBlocking);
+  cudaEventCreate(&impl_->start_event);
+  cudaEventCreate(&impl_->stop_event);
+}
+
+CudaPanoramaBackend::~CudaPanoramaBackend()
+{
+  impl_->release();
+  if (impl_->start_event != nullptr) {
+    cudaEventDestroy(impl_->start_event);
+  }
+  if (impl_->stop_event != nullptr) {
+    cudaEventDestroy(impl_->stop_event);
+  }
+  if (impl_->stream != nullptr) {
+    cudaStreamDestroy(impl_->stream);
+  }
+}
+
+bool CudaPanoramaBackend::runtime_available(std::string & description)
+{
+  int device_count = 0;
+  const cudaError_t count_result = cudaGetDeviceCount(&device_count);
+  if (count_result != cudaSuccess || device_count <= 0) {
+    description = count_result == cudaSuccess ?
+      "no CUDA device found" :
+      cuda_error_message("cudaGetDeviceCount", count_result);
+    return false;
+  }
+  cudaDeviceProp properties{};
+  const cudaError_t property_result =
+    cudaGetDeviceProperties(&properties, 0);
+  if (property_result != cudaSuccess) {
+    description = cuda_error_message(
+      "cudaGetDeviceProperties", property_result);
+    return false;
+  }
+  std::ostringstream stream;
+  stream << properties.name << " sm_" << properties.major <<
+    properties.minor;
+  description = stream.str();
+  return true;
+}
+
+bool CudaPanoramaBackend::configure(
+  const CudaPanoramaConfig & config,
+  const CudaCameraModel & left_camera,
+  const CudaCameraModel & right_camera,
+  const cv::Mat & left_base_mask,
+  const cv::Mat & right_base_mask,
+  const cv::Mat & left_map_x,
+  const cv::Mat & left_map_y,
+  const cv::Mat & right_map_x,
+  const cv::Mat & right_map_y,
+  std::string & error)
+{
+  impl_->release();
+  impl_->config = config;
+  impl_->left_camera = left_camera;
+  impl_->right_camera = right_camera;
+
+  const std::size_t source_pixels =
+    static_cast<std::size_t>(config.source_width) *
+    static_cast<std::size_t>(config.source_height);
+  const std::size_t panorama_pixels =
+    static_cast<std::size_t>(config.panorama_width) *
+    static_cast<std::size_t>(config.panorama_height);
+  const std::size_t source_color_bytes = source_pixels * 3U;
+  const std::size_t source_depth_bytes = source_pixels * sizeof(float);
+  const std::size_t panorama_color_bytes = panorama_pixels * 3U;
+  const std::size_t panorama_mask_bytes = panorama_pixels;
+  const std::size_t panorama_map_bytes =
+    panorama_pixels * sizeof(float);
+  const std::size_t projection_key_bytes =
+    panorama_pixels * sizeof(unsigned long long);
+
+  auto allocate = [&error](void ** pointer, std::size_t bytes, const char * name) {
+      const cudaError_t result = cudaMalloc(pointer, bytes);
+      if (result == cudaSuccess) {
+        return true;
+      }
+      error = cuda_error_message(name, result);
+      return false;
+    };
+  if (
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_source),
+      source_color_bytes, "cudaMalloc left source") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_source),
+      source_color_bytes, "cudaMalloc right source") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_depth),
+      source_depth_bytes, "cudaMalloc left depth") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_depth),
+      source_depth_bytes, "cudaMalloc right depth") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_base),
+      panorama_color_bytes, "cudaMalloc left base") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_base),
+      panorama_color_bytes, "cudaMalloc right base") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_base_mask),
+      panorama_mask_bytes, "cudaMalloc left mask") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_base_mask),
+      panorama_mask_bytes, "cudaMalloc right mask") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_map_x),
+      panorama_map_bytes, "cudaMalloc left map x") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_map_y),
+      panorama_map_bytes, "cudaMalloc left map y") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_map_x),
+      panorama_map_bytes, "cudaMalloc right map x") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_map_y),
+      panorama_map_bytes, "cudaMalloc right map y") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_projection_keys),
+      projection_key_bytes, "cudaMalloc left keys") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_projection_keys),
+      projection_key_bytes, "cudaMalloc right keys") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_accepted_points),
+      sizeof(unsigned int), "cudaMalloc left count") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_accepted_points),
+      sizeof(unsigned int), "cudaMalloc right count") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->output),
+      panorama_color_bytes, "cudaMalloc output"))
+  {
+    impl_->release();
+    return false;
+  }
+
+  if (
+    !check_cuda(
+      cudaMemcpy2D(
+        impl_->left_base_mask,
+        config.panorama_width,
+        left_base_mask.data,
+        left_base_mask.step,
+        config.panorama_width,
+        config.panorama_height,
+        cudaMemcpyHostToDevice),
+      "copy left base mask", error) ||
+    !check_cuda(
+      cudaMemcpy2D(
+        impl_->right_base_mask,
+        config.panorama_width,
+        right_base_mask.data,
+        right_base_mask.step,
+        config.panorama_width,
+        config.panorama_height,
+        cudaMemcpyHostToDevice),
+      "copy right base mask", error))
+  {
+    impl_->release();
+    return false;
+  }
+  auto copy_map = [
+    &config, &error](
+    float * destination, const cv::Mat & source,
+    const char * operation)
+    {
+      return check_cuda(
+        cudaMemcpy2D(
+          destination,
+          static_cast<std::size_t>(config.panorama_width) *
+          sizeof(float),
+          source.data,
+          source.step,
+          static_cast<std::size_t>(config.panorama_width) *
+          sizeof(float),
+          config.panorama_height,
+          cudaMemcpyHostToDevice),
+        operation, error);
+    };
+  if (
+    !copy_map(impl_->left_map_x, left_map_x, "copy left map x") ||
+    !copy_map(impl_->left_map_y, left_map_y, "copy left map y") ||
+    !copy_map(impl_->right_map_x, right_map_x, "copy right map x") ||
+    !copy_map(impl_->right_map_y, right_map_y, "copy right map y"))
+  {
+    impl_->release();
+    return false;
+  }
+  impl_->configured = true;
+  return true;
+}
+
+bool CudaPanoramaBackend::process(
+  const cv::Mat & left_source_color,
+  const cv::Mat & left_depth_m,
+  const cv::Mat & right_source_color,
+  const cv::Mat & right_depth_m,
+  const cv::Vec3d & right_gain_bgr,
+  cv::Mat & panorama,
+  CudaPanoramaStats & stats,
+  std::string & error)
+{
+  if (!impl_->configured) {
+    error = "CUDA backend is not configured";
+    return false;
+  }
+  const auto & config = impl_->config;
+  if (
+    left_source_color.type() != CV_8UC3 ||
+    right_source_color.type() != CV_8UC3)
+  {
+    error = "CUDA backend received an unsupported color cv::Mat type";
+    return false;
+  }
+  if (
+    config.depth_aware_color &&
+    (left_depth_m.type() != CV_32FC1 ||
+    right_depth_m.type() != CV_32FC1))
+  {
+    error = "CUDA backend received an unsupported depth cv::Mat type";
+    return false;
+  }
+  panorama.create(
+    config.panorama_height, config.panorama_width, CV_8UC3);
+  const std::size_t source_color_row_bytes =
+    static_cast<std::size_t>(config.source_width) * 3U;
+  const std::size_t source_depth_row_bytes =
+    static_cast<std::size_t>(config.source_width) * sizeof(float);
+  const std::size_t panorama_color_row_bytes =
+    static_cast<std::size_t>(config.panorama_width) * 3U;
+  const std::size_t panorama_pixels =
+    static_cast<std::size_t>(config.panorama_width) *
+    static_cast<std::size_t>(config.panorama_height);
+  const std::size_t projection_key_bytes =
+    panorama_pixels * sizeof(unsigned long long);
+
+  cudaEventRecord(impl_->start_event, impl_->stream);
+  auto copy_to_device = [
+    this, &error](
+    void * destination,
+    std::size_t destination_pitch,
+    const cv::Mat & source,
+    std::size_t row_bytes,
+    int rows,
+    const char * operation)
+    {
+      return check_cuda(
+        cudaMemcpy2DAsync(
+          destination,
+          destination_pitch,
+          source.data,
+          source.step,
+          row_bytes,
+          rows,
+          cudaMemcpyHostToDevice,
+          impl_->stream),
+        operation,
+        error);
+    };
+  if (
+    !copy_to_device(
+      impl_->left_source, source_color_row_bytes,
+      left_source_color, source_color_row_bytes,
+      config.source_height, "upload left source") ||
+    !copy_to_device(
+      impl_->right_source, source_color_row_bytes,
+      right_source_color, source_color_row_bytes,
+      config.source_height, "upload right source"))
+  {
+    return false;
+  }
+  if (
+    config.depth_aware_color &&
+    (!copy_to_device(
+      impl_->left_depth, source_depth_row_bytes,
+      left_depth_m, source_depth_row_bytes,
+      config.source_height, "upload left depth") ||
+    !copy_to_device(
+      impl_->right_depth, source_depth_row_bytes,
+      right_depth_m, source_depth_row_bytes,
+      config.source_height, "upload right depth")))
+  {
+    return false;
+  }
+
+  if (
+    !check_cuda(
+      cudaMemsetAsync(
+        impl_->left_projection_keys, 0xff,
+        projection_key_bytes, impl_->stream),
+      "clear left projection keys", error) ||
+    !check_cuda(
+      cudaMemsetAsync(
+        impl_->right_projection_keys, 0xff,
+        projection_key_bytes, impl_->stream),
+      "clear right projection keys", error) ||
+    !check_cuda(
+      cudaMemsetAsync(
+        impl_->left_accepted_points, 0,
+        sizeof(unsigned int), impl_->stream),
+      "clear left count", error) ||
+    !check_cuda(
+      cudaMemsetAsync(
+        impl_->right_accepted_points, 0,
+        sizeof(unsigned int), impl_->stream),
+      "clear right count", error))
+  {
+    return false;
+  }
+
+  if (config.depth_aware_color) {
+    constexpr int projection_threads = 256;
+    const int left_work_items =
+      (impl_->left_camera.maximum_depth_column -
+      impl_->left_camera.minimum_depth_column + 1) *
+      config.source_height;
+    const int right_work_items =
+      (impl_->right_camera.maximum_depth_column -
+      impl_->right_camera.minimum_depth_column + 1) *
+      config.source_height;
+    project_depth_kernel<<<
+      (left_work_items + projection_threads - 1) / projection_threads,
+      projection_threads, 0, impl_->stream>>>(
+      impl_->left_depth,
+      impl_->left_projection_keys,
+      impl_->left_accepted_points,
+      impl_->left_camera,
+      config);
+    project_depth_kernel<<<
+      (right_work_items + projection_threads - 1) / projection_threads,
+      projection_threads, 0, impl_->stream>>>(
+      impl_->right_depth,
+      impl_->right_projection_keys,
+      impl_->right_accepted_points,
+      impl_->right_camera,
+      config);
+  }
+
+  const dim3 compose_threads(16, 16);
+  const dim3 compose_blocks(
+    (config.panorama_width + compose_threads.x - 1) /
+    compose_threads.x,
+    (config.panorama_height + compose_threads.y - 1) /
+    compose_threads.y);
+  remap_color_kernel<<<
+    compose_blocks, compose_threads, 0, impl_->stream>>>(
+    impl_->left_source,
+    impl_->left_map_x,
+    impl_->left_map_y,
+    impl_->left_base_mask,
+    impl_->left_base,
+    config);
+  remap_color_kernel<<<
+    compose_blocks, compose_threads, 0, impl_->stream>>>(
+    impl_->right_source,
+    impl_->right_map_x,
+    impl_->right_map_y,
+    impl_->right_base_mask,
+    impl_->right_base,
+    config);
+  compose_panorama_kernel<<<
+    compose_blocks, compose_threads, 0, impl_->stream>>>(
+    impl_->left_source,
+    impl_->right_source,
+    impl_->left_base,
+    impl_->right_base,
+    impl_->left_base_mask,
+    impl_->right_base_mask,
+    impl_->left_projection_keys,
+    impl_->right_projection_keys,
+    impl_->output,
+    static_cast<float>(right_gain_bgr[0]),
+    static_cast<float>(right_gain_bgr[1]),
+    static_cast<float>(right_gain_bgr[2]),
+    config);
+  if (!check_cuda(
+      cudaGetLastError(), "launch CUDA panorama kernels", error))
+  {
+    return false;
+  }
+
+  unsigned int left_count = 0;
+  unsigned int right_count = 0;
+  if (
+    !check_cuda(
+      cudaMemcpy2DAsync(
+        panorama.data,
+        panorama.step,
+        impl_->output,
+        panorama_color_row_bytes,
+        panorama_color_row_bytes,
+        config.panorama_height,
+        cudaMemcpyDeviceToHost,
+        impl_->stream),
+      "download panorama", error) ||
+    !check_cuda(
+      cudaMemcpyAsync(
+        &left_count,
+        impl_->left_accepted_points,
+        sizeof(unsigned int),
+        cudaMemcpyDeviceToHost,
+        impl_->stream),
+      "download left count", error) ||
+    !check_cuda(
+      cudaMemcpyAsync(
+        &right_count,
+        impl_->right_accepted_points,
+        sizeof(unsigned int),
+        cudaMemcpyDeviceToHost,
+        impl_->stream),
+      "download right count", error))
+  {
+    return false;
+  }
+  cudaEventRecord(impl_->stop_event, impl_->stream);
+  if (!check_cuda(
+      cudaEventSynchronize(impl_->stop_event),
+      "synchronize CUDA panorama", error))
+  {
+    return false;
+  }
+  float elapsed_ms = 0.0F;
+  cudaEventElapsedTime(
+    &elapsed_ms, impl_->start_event, impl_->stop_event);
+  stats.left_depth_points = left_count;
+  stats.right_depth_points = right_count;
+  stats.gpu_time_ms = elapsed_ms;
+  return true;
+}
+
+}  // namespace panorama_stitcher

@@ -1,0 +1,67 @@
+rectified_panorama_stitcher:
+  ros__parameters:
+    left_color_topic: /front/front/color/image_raw
+    left_depth_topic: /front/front/aligned_depth_to_color/image_raw
+    left_camera_info_topic: /front/front/color/camera_info
+    right_color_topic: /camera/camera/color/image_raw
+    right_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    right_camera_info_topic: /camera/camera/color/camera_info
+    output_topic: /panorama/rectified/image_raw
+    output_frame_id: panorama_rectified_optical_frame
+
+    # Same calibrated extrinsics as rgbd_panorama.yaml.
+    left_rotation_camera_to_rig: [
+      0.8480480961564254, 0.0, -0.5299192642332047,
+      0.0, 1.0, 0.0,
+      0.5299192642332045, 0.0, 0.8480480961564253
+    ]
+    left_translation_camera_in_rig_m: [
+      -0.058734896141919, -0.001736533395082, 0.015397903644691
+    ]
+    right_rotation_camera_to_rig: [
+      0.834669471517431, 0.036533840520820, 0.549538125896293,
+      -0.040767499407825, 0.999158503589446, -0.004505074575678,
+      -0.549240279211971, -0.018643047006827, 0.835456493474948
+    ]
+    right_translation_camera_in_rig_m: [
+      0.058734896141919, 0.001736533395082, -0.015397903644691
+    ]
+    projection_model: rectilinear
+    rectilinear_width: 3754
+    rectilinear_height: 1071
+    rectilinear_fy_px: 1373.0
+    rectilinear_auto_height: true
+
+    input_images_rotated_180: true
+    rotate_aligned_depth_180: false
+
+    left_fx: 1369.7860107421875
+    left_fy: 1369.6165771484375
+    left_cx: 967.3739013671875
+    left_cy: 566.1657104492188
+    left_width: 1920
+    left_height: 1080
+    right_fx: 1375.93896484375
+    right_fy: 1376.0078125
+    right_cx: 962.9755859375
+    right_cy: 539.9728393554688
+    right_width: 1920
+    right_height: 1080
+
+    sync_queue_size: 50
+    sync_slop_ms: 45.0
+    projection_scale: 1.0
+    depth_scale_m: 0.001
+    min_depth_m: 0.20
+    max_depth_m: 15.0
+    depth_overlap_margin_deg: 2.0
+    auto_seam_center: true
+    seam_angle_deg: 0.0
+    seam_feather_px: 8
+    depth_aware_color: false
+
+    enable_exposure_compensation: true
+    exposure_smoothing: 0.15
+    min_exposure_gain: 0.75
+    max_exposure_gain: 1.33
+    diagnostics_period_sec: 2.0

@@ -1,0 +1,64 @@
+charuco_rig_calibrator:
+  ros__parameters:
+    front_color_topic: /front/front/color/image_raw
+    front_depth_topic: /front/front/aligned_depth_to_color/image_raw
+    front_camera_info_topic: /front/front/color/camera_info
+    camera_color_topic: /camera/camera/color/image_raw
+    camera_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_camera_info_topic: /camera/camera/color/camera_info
+
+    # The central 7x5 ChArUco board is board 5 (IDs 500-516). Each outward-
+    # looking camera may see a different half. The marker IDs do not have to
+    # overlap because all IDs are expressed in this same metric board frame.
+    board_params_file: /home/ssc/lidar_cam_calib/board_params.yaml
+    board_index: 5
+
+    capture_duration_sec: 20.0
+    sample_period_sec: 0.10
+    front_roi_min_x: 0.82
+    front_roi_max_x: 1.0
+    camera_roi_min_x: 0.0
+    camera_roi_max_x: 0.18
+    roi_scale: 3.0
+
+    # The image_raw streams are physically upside-down on this rig while
+    # CameraInfo remains native. Rotate color and aligned depth together before
+    # detection, then map detections back to native CameraInfo pixels.
+    input_images_rotated_180: true
+    rotate_live_streams_180: true
+    depth_scale_m: 0.001
+    max_color_depth_delta_ms: 80.0
+
+    min_corner_observations: 5
+    min_markers_per_camera: 4
+    min_depth_markers_per_camera: 4
+    # Same-ID depth points are optional cross-checks, not solve prerequisites.
+    min_common_depth_points: 0
+    min_common_markers: 0
+    min_common_second_axis_rms_m: 0.03
+    marker_inner_fraction: 0.60
+    depth_patch_radius_px: 2
+    pixel_sigma: 1.5
+    depth_xy_sigma_m: 0.03
+    depth_z_sigma_m: 0.08
+
+    # Installation knowledge is used only as a rejection gate, not forced into
+    # the optimizer. This is the native CameraInfo optical-frame convention.
+    nominal_native_relative_yaw_deg: 64.0
+    max_rotation_prior_error_deg: 15.0
+    housing_center_distance_m: 0.11
+    min_optical_baseline_m: 0.02
+    max_optical_baseline_m: 0.19
+
+    max_reprojection_rms_px: 3.0
+    max_depth_residual_median_m: 0.05
+    max_depth_residual_p95_m: 0.12
+    max_split_rotation_delta_deg: 2.0
+    max_split_translation_delta_m: 0.03
+
+    front_serial: "239122073045"
+    camera_serial: "239122071306"
+    device_model: Intel RealSense D435if
+
+    output_calibration_file: /home/ssc/SSC/src/perception/panorama_stitcher/config/rig_extrinsics.yaml
+    output_report_file: /home/ssc/SSC/src/perception/panorama_stitcher/config/rig_calibration_report.yaml

@@ -1,0 +1,30 @@
+panorama_stitcher:
+  ros__parameters:
+    left_topic: /front/front/color/image_raw
+    right_topic: /camera/camera/color/image_raw
+    output_topic: /panorama/image_raw
+    output_frame_id: panorama_optical_frame
+
+    # Approximate synchronization measured from the 2026-07-28 bags.
+    sync_queue_size: 30
+    sync_slop_ms: 25.0
+
+    # Camera-mount alignment view. Far-scene SIFT correspondences give
+    # 1869/15 px. Use the upper board and ceiling lines for pitch/roll;
+    # the closer Board 5 has ~26 px of unavoidable baseline parallax.
+    right_x_offset_px: 1869
+    right_y_offset_px: 15
+    blend_width_px: 20
+    crop_to_common_height: true
+
+    rotate_left_180: false
+    rotate_right_180: false
+
+    enable_exposure_compensation: true
+    exposure_smoothing: 0.15
+    min_exposure_gain: 0.75
+    max_exposure_gain: 1.33
+
+    # Keep full resolution so the distant alignment target stays legible.
+    output_scale: 1.0
+    diagnostics_period_sec: 2.0
