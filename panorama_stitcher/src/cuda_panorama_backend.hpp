@@ -38,12 +38,17 @@ struct CudaPanoramaConfig
   float virtual_cy_px{0.0F};
   float minimum_depth_m{0.0F};
   float maximum_depth_m{0.0F};
+  float depth_discontinuity_abs_m{0.08F};
+  float depth_discontinuity_relative{0.04F};
   float occlusion_switch_margin_m{0.0F};
   bool depth_aware_color{true};
+  bool allow_color_fallback{true};
   bool prefer_seam_camera_when_both_depth_valid{false};
   int seam_x{0};
   int seam_feather_px{0};
-  int projected_hole_radius{2};
+  int depth_splat_radius_px{1};
+  int depth_edge_splat_radius_px{0};
+  int projected_hole_radius{0};
 };
 
 struct CudaPanoramaStats
@@ -83,6 +88,8 @@ public:
     const cv::Mat & right_depth_m,
     const cv::Vec3d & right_gain_bgr,
     cv::Mat & panorama,
+    cv::Mat & validity,
+    cv::Mat & range_m,
     CudaPanoramaStats & stats,
     std::string & error);
 

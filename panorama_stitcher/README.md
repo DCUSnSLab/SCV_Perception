@@ -59,6 +59,44 @@ RTX 4060(`sm_89`)용 CUDA backend를 자동으로 함께 빌드합니다.
 진단 로그의 `backend=CUDA`, `gpu=... ms`로 실제 사용 여부를 확인할 수
 있습니다.
 
+## Metric RGB-D wide view
+
+기존 `/panorama/image_raw`는 그대로 유지됩니다. 거리 하나에 맞춘
+homography 대신 양쪽 `aligned_depth_to_color`의 모든 유효 픽셀을 3D로
+역투영하고, 캘리브레이션된 rig 중심 가상 카메라로 다시 투영하는 주행용
+출력은 별도 노드로 실행합니다.
+
+카메라가 이미 실행 중이면:
+
+```bash
+ros2 launch panorama_stitcher rgbd_metric_panorama.launch.py
+```
+
+카메라도 처음부터 켜야 하면 터미널 1에서:
+
+```bash
+ros2 launch bring_up realsense_multi.launch.py
+```
+
+발행 토픽:
+
+- `/panorama/metric/image_raw`: `bgr8`, 3118×972 RGB-D 재투영 컬러
+- `/panorama/metric/range`: `32FC1`, rig 중심에서의 수평 거리(m),
+  무효 픽셀은 `0`
+- `/panorama/metric/validity`: `mono8`, 실제 깊이 재투영 픽셀은 `255`,
+  깊이가 없어 회전 전용 컬러로 대체된 픽셀은 `0`
+
+2026-07-29 실내 라이브 측정에서는 RTX 4060 CUDA backend로 약
+`29–30 FPS`, GPU `13–14 ms`, 전체 처리 `28–30 ms`, 유효 깊이 약
+`94.7–94.9%`였습니다. CPU full-resolution median/EMA는 20 FPS 부근의
+병목과 동적 물체 잔상을 만들어 이 경로에서는 사용하지 않습니다.
+
+렌더러는 가까운 깊이를 선택하는 z-buffer와 깊이 불연속 인지 splatting을
+사용합니다. 평탄한 면은 한 픽셀 확장해 forward-warp 구멍을 막고, 물체
+경계는 확장하지 않아 배경이 전경으로 번지는 것을 줄입니다. 두 카메라가
+여전히 약 10–22 ms 어긋나므로 빠른 물체의 완전한 시간 정합은 외부
+hardware sync 없이는 보장할 수 없습니다.
+
 ## Live cameras
 
 ```bash

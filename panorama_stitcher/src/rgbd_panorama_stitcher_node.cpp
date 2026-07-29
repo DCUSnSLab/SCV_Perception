@@ -80,8 +80,16 @@ public:
       "right_camera_info_topic", "/camera/camera/color/camera_info");
     output_topic_ = declare_parameter<std::string>(
       "output_topic", "/panorama/image_raw");
+    validity_topic_ = declare_parameter<std::string>(
+      "validity_topic", "/panorama/validity");
+    range_topic_ = declare_parameter<std::string>(
+      "range_topic", "/panorama/range");
     output_frame_id_ = declare_parameter<std::string>(
       "output_frame_id", "panorama_optical_frame");
+    publish_auxiliary_outputs_ = declare_parameter<bool>(
+      "publish_auxiliary_outputs", false);
+    publisher_best_effort_ = declare_parameter<bool>(
+      "publisher_best_effort", false);
 
     sync_queue_size_ = declare_parameter<int>("sync_queue_size", 50);
     sync_slop_ms_ = declare_parameter<double>("sync_slop_ms", 45.0);
@@ -120,6 +128,20 @@ public:
     max_depth_m_ = declare_parameter<double>("max_depth_m", 15.0);
     depth_overlap_margin_deg_ = declare_parameter<double>(
       "depth_overlap_margin_deg", 2.0);
+    full_depth_reprojection_ = declare_parameter<bool>(
+      "full_depth_reprojection", false);
+    depth_discontinuity_abs_m_ = declare_parameter<double>(
+      "depth_discontinuity_abs_m", 0.08);
+    depth_discontinuity_relative_ = declare_parameter<double>(
+      "depth_discontinuity_relative", 0.04);
+    depth_splat_radius_px_ = declare_parameter<int>(
+      "depth_splat_radius_px", 1);
+    depth_edge_splat_radius_px_ = declare_parameter<int>(
+      "depth_edge_splat_radius_px", 0);
+    projected_hole_radius_px_ = declare_parameter<int>(
+      "projected_hole_radius_px", 0);
+    allow_color_fallback_ = declare_parameter<bool>(
+      "allow_color_fallback", true);
     seam_angle_deg_ = declare_parameter<double>("seam_angle_deg", 0.0);
     auto_seam_center_ = declare_parameter<bool>(
       "auto_seam_center", false);
@@ -184,9 +206,19 @@ public:
     }
 #endif
 
-    output_publisher_ = create_publisher<Image>(
-      output_topic_,
-      rclcpp::QoS(rclcpp::KeepLast(2)).reliable().durability_volatile());
+    auto output_qos = rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile();
+    if (publisher_best_effort_) {
+      output_qos.best_effort();
+    } else {
+      output_qos.reliable();
+    }
+    output_publisher_ = create_publisher<Image>(output_topic_, output_qos);
+    if (publish_auxiliary_outputs_) {
+      validity_publisher_ = create_publisher<Image>(
+        validity_topic_, output_qos);
+      range_publisher_ = create_publisher<Image>(
+        range_topic_, output_qos);
+    }
 
     const auto camera_info_qos =
       rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
@@ -388,6 +420,15 @@ private:
     min_depth_m_ = std::max(min_depth_m_, 0.01);
     max_depth_m_ = std::max(max_depth_m_, min_depth_m_);
     depth_overlap_margin_deg_ = std::max(depth_overlap_margin_deg_, 0.0);
+    depth_discontinuity_abs_m_ = std::max(
+      depth_discontinuity_abs_m_, 0.0);
+    depth_discontinuity_relative_ = std::max(
+      depth_discontinuity_relative_, 0.0);
+    depth_splat_radius_px_ = std::clamp(depth_splat_radius_px_, 0, 3);
+    depth_edge_splat_radius_px_ = std::clamp(
+      depth_edge_splat_radius_px_, 0, depth_splat_radius_px_);
+    projected_hole_radius_px_ = std::clamp(
+      projected_hole_radius_px_, 0, 3);
     seam_feather_px_ = std::max(seam_feather_px_, 0);
     depth_temporal_alpha_ = std::clamp(
       depth_temporal_alpha_, 0.01, 1.0);
@@ -727,6 +768,9 @@ private:
   std::array<int, 2> depth_source_columns(
     const CameraModel & model) const
   {
+    if (full_depth_reprojection_) {
+      return {0, source_width_ - 1};
+    }
     const double margin = depth_overlap_margin_deg_ * kPi / 180.0;
     const double min_angle = overlap_min_angle_ - margin;
     const double max_angle = overlap_max_angle_ + margin;
@@ -824,12 +868,59 @@ private:
           continue;
         }
 
-        float & previous_range =
-          projected.range.at<float>(output_y, output_x);
-        if (horizontal_range < previous_range) {
-          previous_range = static_cast<float>(horizontal_range);
-          projected.color.at<cv::Vec3b>(output_y, output_x) = color_row[u];
-          projected.mask.at<uint8_t>(output_y, output_x) = 255;
+        const double discontinuity_threshold = std::max(
+          depth_discontinuity_abs_m_,
+          depth_discontinuity_relative_ * depth_m);
+        bool on_depth_edge = false;
+        constexpr int neighbor_offsets[4][2] = {
+          {-1, 0}, {1, 0}, {0, -1}, {0, 1}
+        };
+        for (const auto & offset : neighbor_offsets) {
+          const int neighbor_u = u + offset[0];
+          const int neighbor_v = v + offset[1];
+          if (
+            neighbor_u < 0 || neighbor_u >= source_width_ ||
+            neighbor_v < 0 || neighbor_v >= source_height_)
+          {
+            continue;
+          }
+          const double neighbor_depth_m = depth_is_float ?
+            static_cast<double>(
+            depth.ptr<float>(neighbor_v)[neighbor_u]) :
+            static_cast<double>(
+            depth.ptr<uint16_t>(neighbor_v)[neighbor_u]) * depth_scale_m_;
+          if (
+            neighbor_depth_m < min_depth_m_ ||
+            neighbor_depth_m > max_depth_m_ ||
+            std::abs(neighbor_depth_m - depth_m) >
+            discontinuity_threshold)
+          {
+            on_depth_edge = true;
+            break;
+          }
+        }
+        const int splat_radius = on_depth_edge ?
+          depth_edge_splat_radius_px_ :
+          depth_splat_radius_px_;
+        for (int dy = -splat_radius; dy <= splat_radius; ++dy) {
+          const int target_y = output_y + dy;
+          if (target_y < 0 || target_y >= panorama_height_) {
+            continue;
+          }
+          for (int dx = -splat_radius; dx <= splat_radius; ++dx) {
+            const int target_x = output_x + dx;
+            if (target_x < 0 || target_x >= panorama_width_) {
+              continue;
+            }
+            float & previous_range =
+              projected.range.at<float>(target_y, target_x);
+            if (horizontal_range < previous_range) {
+              previous_range = static_cast<float>(horizontal_range);
+              projected.color.at<cv::Vec3b>(target_y, target_x) =
+                color_row[u];
+              projected.mask.at<uint8_t>(target_y, target_x) = 255;
+            }
+          }
         }
         ++projected.accepted_points;
       }
@@ -1104,14 +1195,21 @@ private:
     config.virtual_cy_px = static_cast<float>(virtual_cy_px_);
     config.minimum_depth_m = static_cast<float>(min_depth_m_);
     config.maximum_depth_m = static_cast<float>(max_depth_m_);
+    config.depth_discontinuity_abs_m =
+      static_cast<float>(depth_discontinuity_abs_m_);
+    config.depth_discontinuity_relative =
+      static_cast<float>(depth_discontinuity_relative_);
     config.occlusion_switch_margin_m =
       static_cast<float>(occlusion_switch_margin_m_);
     config.depth_aware_color = depth_aware_color_;
+    config.allow_color_fallback = allow_color_fallback_;
     config.prefer_seam_camera_when_both_depth_valid =
       prefer_seam_camera_when_both_depth_valid_;
     config.seam_x = seam_x_;
     config.seam_feather_px = seam_feather_px_;
-    config.projected_hole_radius = 2;
+    config.depth_splat_radius_px = depth_splat_radius_px_;
+    config.depth_edge_splat_radius_px = depth_edge_splat_radius_px_;
+    config.projected_hole_radius = projected_hole_radius_px_;
 
     std::string error;
     if (!cuda_backend_->configure(
@@ -1178,7 +1276,8 @@ private:
       if (cuda_backend_->process(
           left_color, left_depth_m,
           right_color, right_depth_m, gain,
-          panorama, stats, error))
+          panorama, last_validity_mask_, last_range_m_,
+          stats, error))
       {
         last_left_depth_points_ = stats.left_depth_points;
         last_right_depth_points_ = stats.right_depth_points;
@@ -1218,8 +1317,8 @@ private:
       right_projected =
         project_depth_overlap(
         right_color, right_projection_depth, right_model_);
-      fill_projected_holes(left_projected, 2);
-      fill_projected_holes(right_projected, 2);
+      fill_projected_holes(left_projected, projected_hole_radius_px_);
+      fill_projected_holes(right_projected, projected_hole_radius_px_);
 
       left_projected.color.copyTo(left_base, left_projected.mask);
       right_projected.color.copyTo(right_base, right_projected.mask);
@@ -1335,6 +1434,9 @@ private:
             }
             continue;
           }
+          if (!allow_color_fallback_) {
+            continue;
+          }
         }
 
         if (!right_valid || (left_valid && x < blend_left)) {
@@ -1361,6 +1463,38 @@ private:
 
     last_left_depth_points_ = left_projected.accepted_points;
     last_right_depth_points_ = right_projected.accepted_points;
+    if (!depth_aware_color_) {
+      last_validity_mask_ = cv::Mat::zeros(
+        panorama_height_, panorama_width_, CV_8UC1);
+      last_range_m_ = cv::Mat::zeros(
+        panorama_height_, panorama_width_, CV_32FC1);
+      return panorama;
+    }
+
+    last_validity_mask_ = left_projected.mask | right_projected.mask;
+    last_range_m_ = cv::Mat::zeros(
+      panorama_height_, panorama_width_, CV_32FC1);
+    for (int y = 0; y < panorama_height_; ++y) {
+      const uint8_t * left_mask_row =
+        left_projected.mask.ptr<uint8_t>(y);
+      const uint8_t * right_mask_row =
+        right_projected.mask.ptr<uint8_t>(y);
+      const float * left_range_row =
+        left_projected.range.ptr<float>(y);
+      const float * right_range_row =
+        right_projected.range.ptr<float>(y);
+      float * output_range_row = last_range_m_.ptr<float>(y);
+      for (int x = 0; x < panorama_width_; ++x) {
+        if (left_mask_row[x] && right_mask_row[x]) {
+          output_range_row[x] = std::min(
+            left_range_row[x], right_range_row[x]);
+        } else if (left_mask_row[x]) {
+          output_range_row[x] = left_range_row[x];
+        } else if (right_mask_row[x]) {
+          output_range_row[x] = right_range_row[x];
+        }
+      }
+    }
     return panorama;
   }
 
@@ -1605,6 +1739,23 @@ private:
         *cv_bridge::CvImage(
           output_header, sensor_msgs::image_encodings::BGR8,
           panorama).toImageMsg());
+      if (
+        publish_auxiliary_outputs_ &&
+        !last_validity_mask_.empty() &&
+        !last_range_m_.empty())
+      {
+        validity_publisher_->publish(
+          *cv_bridge::CvImage(
+            output_header, sensor_msgs::image_encodings::MONO8,
+            last_validity_mask_).toImageMsg());
+        range_publisher_->publish(
+          *cv_bridge::CvImage(
+            output_header, sensor_msgs::image_encodings::TYPE_32FC1,
+            last_range_m_).toImageMsg());
+        last_validity_ratio_ =
+          static_cast<double>(cv::countNonZero(last_validity_mask_)) /
+          static_cast<double>(last_validity_mask_.total());
+      }
 
       const double sync_span_ms =
         static_cast<double>(maximum_stamp - minimum_stamp) / 1e6;
@@ -1660,6 +1811,7 @@ private:
       "input_hz(Lc/Ld/Rc/Rd)=%.1f/%.1f/%.1f/%.1f "
       "depth_age(L/R)=%.1f/%.1f ms "
       "sync_span(avg/max)=%.1f/%.1f ms depth_points(left/right)=%zu/%zu "
+      "validity=%.1f%% "
       "gain(BGR)=%.2f/%.2f/%.2f total=%zu",
       panorama_width_, panorama_height_, count / elapsed_sec,
       processing_time_sum_ms_ / count,
@@ -1669,6 +1821,7 @@ private:
       last_left_depth_age_ms_, last_right_depth_age_ms_,
       sync_span_sum_ms_ / count, sync_span_max_ms_,
       last_left_depth_points_, last_right_depth_points_,
+      100.0 * last_validity_ratio_,
       smoothed_gain_[0], smoothed_gain_[1], smoothed_gain_[2],
       frame_count_);
 
@@ -1686,7 +1839,11 @@ private:
   std::string right_depth_topic_;
   std::string right_camera_info_topic_;
   std::string output_topic_;
+  std::string validity_topic_;
+  std::string range_topic_;
   std::string output_frame_id_;
+  bool publish_auxiliary_outputs_{false};
+  bool publisher_best_effort_{false};
 
   int sync_queue_size_{50};
   double sync_slop_ms_{45.0};
@@ -1705,6 +1862,13 @@ private:
   double min_depth_m_{0.20};
   double max_depth_m_{15.0};
   double depth_overlap_margin_deg_{2.0};
+  bool full_depth_reprojection_{false};
+  double depth_discontinuity_abs_m_{0.08};
+  double depth_discontinuity_relative_{0.04};
+  int depth_splat_radius_px_{1};
+  int depth_edge_splat_radius_px_{0};
+  int projected_hole_radius_px_{0};
+  bool allow_color_fallback_{true};
   double seam_angle_deg_{0.0};
   bool auto_seam_center_{false};
   int seam_feather_px_{2};
@@ -1754,6 +1918,8 @@ private:
   cv::Mat left_stabilized_depth_m_;
   cv::Mat right_stabilized_depth_m_;
   cv::Vec3d smoothed_gain_{1.0, 1.0, 1.0};
+  cv::Mat last_validity_mask_;
+  cv::Mat last_range_m_;
 #ifdef PANORAMA_WITH_CUDA
   std::unique_ptr<CudaPanoramaBackend> cuda_backend_;
   bool cuda_backend_configured_{false};
@@ -1777,6 +1943,8 @@ private:
   rclcpp::Subscription<CameraInfo>::SharedPtr left_camera_info_subscriber_;
   rclcpp::Subscription<CameraInfo>::SharedPtr right_camera_info_subscriber_;
   rclcpp::Publisher<Image>::SharedPtr output_publisher_;
+  rclcpp::Publisher<Image>::SharedPtr validity_publisher_;
+  rclcpp::Publisher<Image>::SharedPtr range_publisher_;
   rclcpp::CallbackGroup::SharedPtr image_callback_group_;
 
   std::mutex projection_mutex_;
@@ -1808,6 +1976,7 @@ private:
   double sync_span_sum_ms_{0.0};
   double sync_span_max_ms_{0.0};
   double processing_time_sum_ms_{0.0};
+  double last_validity_ratio_{0.0};
 };
 
 }  // namespace panorama_stitcher

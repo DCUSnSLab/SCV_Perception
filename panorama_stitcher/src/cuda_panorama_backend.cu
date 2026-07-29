@@ -52,6 +52,48 @@ __device__ __forceinline__ unsigned char float_channel(float value)
     __float2int_rn(clamp_channel(value)));
 }
 
+__device__ __forceinline__ bool valid_depth(
+  float depth, const CudaPanoramaConfig & config)
+{
+  return isfinite(depth) &&
+         depth >= config.minimum_depth_m &&
+         depth <= config.maximum_depth_m;
+}
+
+__device__ __forceinline__ bool depth_discontinuity(
+  const float * depth_m,
+  int u,
+  int v,
+  float center_depth,
+  const CudaPanoramaConfig & config)
+{
+  const float threshold = fmaxf(
+    config.depth_discontinuity_abs_m,
+    config.depth_discontinuity_relative * center_depth);
+  constexpr int offsets[4][2] = {
+    {-1, 0}, {1, 0}, {0, -1}, {0, 1}
+  };
+  for (int index = 0; index < 4; ++index) {
+    const int neighbor_u = u + offsets[index][0];
+    const int neighbor_v = v + offsets[index][1];
+    if (
+      neighbor_u < 0 || neighbor_u >= config.source_width ||
+      neighbor_v < 0 || neighbor_v >= config.source_height)
+    {
+      continue;
+    }
+    const float neighbor_depth =
+      depth_m[neighbor_v * config.source_width + neighbor_u];
+    if (!valid_depth(neighbor_depth, config)) {
+      return true;
+    }
+    if (fabsf(neighbor_depth - center_depth) > threshold) {
+      return true;
+    }
+  }
+  return false;
+}
+
 __global__ void project_depth_kernel(
   const float * depth_m,
   unsigned long long * projection_keys,
@@ -71,11 +113,7 @@ __global__ void project_depth_kernel(
   const int u = camera.minimum_depth_column + item % column_count;
   const int source_index = v * config.source_width + u;
   const float depth = depth_m[source_index];
-  if (
-    !isfinite(depth) ||
-    depth < config.minimum_depth_m ||
-    depth > config.maximum_depth_m)
-  {
+  if (!valid_depth(depth, config)) {
     return;
   }
 
@@ -132,9 +170,26 @@ __global__ void project_depth_kernel(
   const unsigned long long key =
     (static_cast<unsigned long long>(range_bits) << 32) |
     static_cast<unsigned int>(source_index);
-  atomicMin(
-    &projection_keys[output_y * config.panorama_width + output_x],
-    key);
+  const bool on_depth_edge = depth_discontinuity(
+    depth_m, u, v, depth, config);
+  const int splat_radius = on_depth_edge ?
+    config.depth_edge_splat_radius_px :
+    config.depth_splat_radius_px;
+  for (int offset_y = -splat_radius; offset_y <= splat_radius; ++offset_y) {
+    const int target_y = output_y + offset_y;
+    if (target_y < 0 || target_y >= config.panorama_height) {
+      continue;
+    }
+    for (int offset_x = -splat_radius; offset_x <= splat_radius; ++offset_x) {
+      const int target_x = output_x + offset_x;
+      if (target_x < 0 || target_x >= config.panorama_width) {
+        continue;
+      }
+      atomicMin(
+        &projection_keys[target_y * config.panorama_width + target_x],
+        key);
+    }
+  }
   atomicAdd(accepted_points, 1U);
 }
 
@@ -273,6 +328,8 @@ __global__ void compose_panorama_kernel(
   const unsigned long long * left_projection_keys,
   const unsigned long long * right_projection_keys,
   unsigned char * output,
+  unsigned char * validity,
+  float * output_range_m,
   float right_gain_b,
   float right_gain_g,
   float right_gain_r,
@@ -293,6 +350,8 @@ __global__ void compose_panorama_kernel(
     output[color_index] = 0U;
     output[color_index + 1] = 0U;
     output[color_index + 2] = 0U;
+    validity[pixel_index] = 0U;
+    output_range_m[pixel_index] = 0.0F;
     return;
   }
 
@@ -300,6 +359,8 @@ __global__ void compose_panorama_kernel(
   // depth-reprojected center band with rotation-warped outer views creates
   // hidden cut boundaries wherever an object crosses the band edge.
   if (!config.depth_aware_color) {
+    validity[pixel_index] = 0U;
+    output_range_m[pixel_index] = 0.0F;
     const int blend_left = seam_x - config.seam_feather_px;
     const int blend_right = seam_x + config.seam_feather_px;
     if (!right_base_valid || (left_base_valid && x < blend_left)) {
@@ -386,6 +447,8 @@ __global__ void compose_panorama_kernel(
           output[color_index + 2] = static_cast<unsigned char>(
             (1.0F - right_weight) * left_red +
             right_weight * right_red);
+          validity[pixel_index] = 255U;
+          output_range_m[pixel_index] = fminf(left_range, right_range);
           return;
         }
       }
@@ -399,10 +462,17 @@ __global__ void compose_panorama_kernel(
             left_source, left_key, 1.0F, 1.0F, 1.0F,
             output[color_index], output[color_index + 1],
             output[color_index + 2]);
+          validity[pixel_index] = 255U;
+          output_range_m[pixel_index] = projection_range(left_key);
         } else {
-          output[color_index] = left_base[color_index];
-          output[color_index + 1] = left_base[color_index + 1];
-          output[color_index + 2] = left_base[color_index + 2];
+          output[color_index] = config.allow_color_fallback ?
+            left_base[color_index] : 0U;
+          output[color_index + 1] = config.allow_color_fallback ?
+            left_base[color_index + 1] : 0U;
+          output[color_index + 2] = config.allow_color_fallback ?
+            left_base[color_index + 2] : 0U;
+          validity[pixel_index] = 0U;
+          output_range_m[pixel_index] = 0.0F;
         }
         return;
       }
@@ -413,13 +483,17 @@ __global__ void compose_panorama_kernel(
             right_gain_b, right_gain_g, right_gain_r,
             output[color_index], output[color_index + 1],
             output[color_index + 2]);
+          validity[pixel_index] = 255U;
+          output_range_m[pixel_index] = projection_range(right_key);
         } else {
-          output[color_index] = gained_channel(
-            right_base[color_index], right_gain_b);
-          output[color_index + 1] = gained_channel(
-            right_base[color_index + 1], right_gain_g);
-          output[color_index + 2] = gained_channel(
-            right_base[color_index + 2], right_gain_r);
+          output[color_index] = config.allow_color_fallback ?
+            gained_channel(right_base[color_index], right_gain_b) : 0U;
+          output[color_index + 1] = config.allow_color_fallback ?
+            gained_channel(right_base[color_index + 1], right_gain_g) : 0U;
+          output[color_index + 2] = config.allow_color_fallback ?
+            gained_channel(right_base[color_index + 2], right_gain_r) : 0U;
+          validity[pixel_index] = 0U;
+          output_range_m[pixel_index] = 0.0F;
         }
         return;
       }
@@ -455,6 +529,19 @@ __global__ void compose_panorama_kernel(
     output[color_index] = blue;
     output[color_index + 1] = green;
     output[color_index + 2] = red;
+    validity[pixel_index] = 255U;
+    output_range_m[pixel_index] = use_left ?
+      projection_range(left_key) :
+      projection_range(right_key);
+    return;
+  }
+
+  validity[pixel_index] = 0U;
+  output_range_m[pixel_index] = 0.0F;
+  if (!config.allow_color_fallback) {
+    output[color_index] = 0U;
+    output[color_index + 1] = 0U;
+    output[color_index + 2] = 0U;
     return;
   }
 
@@ -528,6 +615,8 @@ struct CudaPanoramaBackend::Impl
   unsigned int * left_accepted_points{nullptr};
   unsigned int * right_accepted_points{nullptr};
   unsigned char * output{nullptr};
+  unsigned char * validity{nullptr};
+  float * output_range_m{nullptr};
 
   void release()
   {
@@ -548,6 +637,8 @@ struct CudaPanoramaBackend::Impl
     cudaFree(left_accepted_points);
     cudaFree(right_accepted_points);
     cudaFree(output);
+    cudaFree(validity);
+    cudaFree(output_range_m);
     left_source = nullptr;
     right_source = nullptr;
     left_depth = nullptr;
@@ -565,6 +656,8 @@ struct CudaPanoramaBackend::Impl
     left_accepted_points = nullptr;
     right_accepted_points = nullptr;
     output = nullptr;
+    validity = nullptr;
+    output_range_m = nullptr;
     configured = false;
   }
 };
@@ -707,7 +800,13 @@ bool CudaPanoramaBackend::configure(
       sizeof(unsigned int), "cudaMalloc right count") ||
     !allocate(
       reinterpret_cast<void **>(&impl_->output),
-      panorama_color_bytes, "cudaMalloc output"))
+      panorama_color_bytes, "cudaMalloc output") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->validity),
+      panorama_mask_bytes, "cudaMalloc validity") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->output_range_m),
+      panorama_pixels * sizeof(float), "cudaMalloc output range"))
   {
     impl_->release();
     return false;
@@ -776,6 +875,8 @@ bool CudaPanoramaBackend::process(
   const cv::Mat & right_depth_m,
   const cv::Vec3d & right_gain_bgr,
   cv::Mat & panorama,
+  cv::Mat & validity,
+  cv::Mat & range_m,
   CudaPanoramaStats & stats,
   std::string & error)
 {
@@ -801,6 +902,10 @@ bool CudaPanoramaBackend::process(
   }
   panorama.create(
     config.panorama_height, config.panorama_width, CV_8UC3);
+  validity.create(
+    config.panorama_height, config.panorama_width, CV_8UC1);
+  range_m.create(
+    config.panorama_height, config.panorama_width, CV_32FC1);
   const std::size_t source_color_row_bytes =
     static_cast<std::size_t>(config.source_width) * 3U;
   const std::size_t source_depth_row_bytes =
@@ -948,6 +1053,8 @@ bool CudaPanoramaBackend::process(
     impl_->left_projection_keys,
     impl_->right_projection_keys,
     impl_->output,
+    impl_->validity,
+    impl_->output_range_m,
     static_cast<float>(right_gain_bgr[0]),
     static_cast<float>(right_gain_bgr[1]),
     static_cast<float>(right_gain_bgr[2]),
@@ -972,6 +1079,28 @@ bool CudaPanoramaBackend::process(
         cudaMemcpyDeviceToHost,
         impl_->stream),
       "download panorama", error) ||
+    !check_cuda(
+      cudaMemcpy2DAsync(
+        validity.data,
+        validity.step,
+        impl_->validity,
+        static_cast<std::size_t>(config.panorama_width),
+        static_cast<std::size_t>(config.panorama_width),
+        config.panorama_height,
+        cudaMemcpyDeviceToHost,
+        impl_->stream),
+      "download validity", error) ||
+    !check_cuda(
+      cudaMemcpy2DAsync(
+        range_m.data,
+        range_m.step,
+        impl_->output_range_m,
+        static_cast<std::size_t>(config.panorama_width) * sizeof(float),
+        static_cast<std::size_t>(config.panorama_width) * sizeof(float),
+        config.panorama_height,
+        cudaMemcpyDeviceToHost,
+        impl_->stream),
+      "download range", error) ||
     !check_cuda(
       cudaMemcpyAsync(
         &left_count,
