@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec python3 -m crosswalk_safety_ros2.crosswalk_safety_node "$@"

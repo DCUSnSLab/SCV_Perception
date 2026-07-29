@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+exec python3 -m yolo_detector_ros2.yolo_detector_node "$@"
