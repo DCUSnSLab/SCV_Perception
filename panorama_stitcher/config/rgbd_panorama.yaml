@@ -94,18 +94,31 @@ panorama_stitcher:
     # This preserves close moving objects as two clean camera halves instead
     # of ghosting or smearing them inside the overlap.
     seam_feather_px: 0
-    # Depth remains active for the content-aware ownership boundary and for
-    # /panorama/range, but RGB itself stays in the stable calibrated
-    # reference-plane projection. Full-frame depth-colored reprojection caused
-    # jagged board/table edges and is intentionally not rendered.
+    # Outside the true binocular overlap, keep the smooth calibrated reference
+    # projection. Inside it, reconstruct RGB from aligned depth so objects at
+    # different ranges retain their physical width in the common rig frame.
     depth_aware_color: true
-    render_depth_reprojected_color: false
+    render_depth_reprojected_color: true
     depth_color_overlap_only: true
     # Keep the proven four-stream timestamp queue for stable camera pairing
     # even though the color renderer does not consume depth geometrically.
     use_rgbd_synchronization: true
-    # Avoid stale silhouettes around moving obstacles. CUDA z-buffering and a
-    # coherent vertical seam provide stability without temporal depth lag.
+    # The CUDA filters operate before 3D reprojection. Spatial filtering is
+    # edge-aware; temporal history is cleared on invalid depth and changes
+    # larger than 8 cm are accepted immediately, avoiding stale silhouettes.
+    cuda_depth_spatial_filter: true
+    cuda_depth_spatial_delta_m: 0.03
+    cuda_depth_spatial_delta_relative: 0.01
+    cuda_depth_temporal_filter: true
+    cuda_depth_temporal_alpha: 0.65
+    cuda_depth_temporal_reset_m: 0.08
+    # Do not copy a neighbouring projected RGB sample into a depth hole. Flat
+    # surfaces are already covered by the 1 px splat; depth edges use radius 0.
+    depth_splat_radius_px: 1
+    depth_edge_splat_radius_px: 0
+    projected_hole_radius_px: 0
+    allow_color_fallback: true
+    # Disable the older CPU median/EMA path.
     depth_temporal_stabilization: false
     depth_temporal_alpha: 0.35
     depth_temporal_reset_m: 0.05

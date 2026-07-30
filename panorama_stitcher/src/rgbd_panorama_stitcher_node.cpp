@@ -134,6 +134,18 @@ public:
       "depth_discontinuity_abs_m", 0.08);
     depth_discontinuity_relative_ = declare_parameter<double>(
       "depth_discontinuity_relative", 0.04);
+    cuda_depth_spatial_filter_ = declare_parameter<bool>(
+      "cuda_depth_spatial_filter", false);
+    cuda_depth_spatial_delta_m_ = declare_parameter<double>(
+      "cuda_depth_spatial_delta_m", 0.03);
+    cuda_depth_spatial_delta_relative_ = declare_parameter<double>(
+      "cuda_depth_spatial_delta_relative", 0.01);
+    cuda_depth_temporal_filter_ = declare_parameter<bool>(
+      "cuda_depth_temporal_filter", false);
+    cuda_depth_temporal_alpha_ = declare_parameter<double>(
+      "cuda_depth_temporal_alpha", 0.65);
+    cuda_depth_temporal_reset_m_ = declare_parameter<double>(
+      "cuda_depth_temporal_reset_m", 0.08);
     depth_splat_radius_px_ = declare_parameter<int>(
       "depth_splat_radius_px", 1);
     depth_edge_splat_radius_px_ = declare_parameter<int>(
@@ -442,6 +454,14 @@ private:
       depth_discontinuity_abs_m_, 0.0);
     depth_discontinuity_relative_ = std::max(
       depth_discontinuity_relative_, 0.0);
+    cuda_depth_spatial_delta_m_ = std::max(
+      cuda_depth_spatial_delta_m_, 0.0);
+    cuda_depth_spatial_delta_relative_ = std::max(
+      cuda_depth_spatial_delta_relative_, 0.0);
+    cuda_depth_temporal_alpha_ = std::clamp(
+      cuda_depth_temporal_alpha_, 0.01, 1.0);
+    cuda_depth_temporal_reset_m_ = std::max(
+      cuda_depth_temporal_reset_m_, 0.0);
     depth_splat_radius_px_ = std::clamp(depth_splat_radius_px_, 0, 3);
     depth_edge_splat_radius_px_ = std::clamp(
       depth_edge_splat_radius_px_, 0, depth_splat_radius_px_);
@@ -1240,6 +1260,16 @@ private:
       static_cast<float>(depth_discontinuity_abs_m_);
     config.depth_discontinuity_relative =
       static_cast<float>(depth_discontinuity_relative_);
+    config.depth_spatial_filter = cuda_depth_spatial_filter_;
+    config.depth_spatial_delta_m =
+      static_cast<float>(cuda_depth_spatial_delta_m_);
+    config.depth_spatial_delta_relative =
+      static_cast<float>(cuda_depth_spatial_delta_relative_);
+    config.depth_temporal_filter = cuda_depth_temporal_filter_;
+    config.depth_temporal_alpha =
+      static_cast<float>(cuda_depth_temporal_alpha_);
+    config.depth_temporal_reset_m =
+      static_cast<float>(cuda_depth_temporal_reset_m_);
     config.occlusion_switch_margin_m =
       static_cast<float>(occlusion_switch_margin_m_);
     config.depth_aware_color = depth_aware_color_;
@@ -1956,6 +1986,12 @@ private:
   bool full_depth_reprojection_{false};
   double depth_discontinuity_abs_m_{0.08};
   double depth_discontinuity_relative_{0.04};
+  bool cuda_depth_spatial_filter_{false};
+  double cuda_depth_spatial_delta_m_{0.03};
+  double cuda_depth_spatial_delta_relative_{0.01};
+  bool cuda_depth_temporal_filter_{false};
+  double cuda_depth_temporal_alpha_{0.65};
+  double cuda_depth_temporal_reset_m_{0.08};
   int depth_splat_radius_px_{1};
   int depth_edge_splat_radius_px_{0};
   int projected_hole_radius_px_{0};

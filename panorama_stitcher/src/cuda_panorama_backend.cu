@@ -17,6 +17,7 @@ namespace
 
 constexpr unsigned long long kInvalidProjectionKey =
   0xffffffffffffffffULL;
+constexpr unsigned int kInvalidProjectionRange = 0xffffffffU;
 
 std::string cuda_error_message(
   const char * operation, cudaError_t result)
@@ -96,8 +97,207 @@ __device__ __forceinline__ bool depth_discontinuity(
   return false;
 }
 
+__global__ void edge_aware_depth_filter_kernel(
+  const float * source_depth,
+  float * filtered_depth,
+  CudaPanoramaConfig config)
+{
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int pixel_count = config.source_width * config.source_height;
+  if (index >= pixel_count) {
+    return;
+  }
+
+  const float center = source_depth[index];
+  if (!valid_depth(center, config)) {
+    filtered_depth[index] = 0.0F;
+    return;
+  }
+
+  const int center_x = index % config.source_width;
+  const int center_y = index / config.source_width;
+  const float threshold = fmaxf(
+    config.depth_spatial_delta_m,
+    config.depth_spatial_delta_relative * center);
+  float sum = 0.0F;
+  int count = 0;
+  for (int offset_y = -1; offset_y <= 1; ++offset_y) {
+    const int y = center_y + offset_y;
+    if (y < 0 || y >= config.source_height) {
+      continue;
+    }
+    for (int offset_x = -1; offset_x <= 1; ++offset_x) {
+      const int x = center_x + offset_x;
+      if (x < 0 || x >= config.source_width) {
+        continue;
+      }
+      const float candidate =
+        source_depth[y * config.source_width + x];
+      if (
+        valid_depth(candidate, config) &&
+        fabsf(candidate - center) <= threshold)
+      {
+        sum += candidate;
+        ++count;
+      }
+    }
+  }
+  filtered_depth[index] =
+    count > 0 ? sum / static_cast<float>(count) : center;
+}
+
+__global__ void temporal_depth_filter_kernel(
+  const float * current_depth,
+  float * previous_depth,
+  float * filtered_depth,
+  CudaPanoramaConfig config)
+{
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  const int pixel_count = config.source_width * config.source_height;
+  if (index >= pixel_count) {
+    return;
+  }
+
+  const float current = current_depth[index];
+  if (!valid_depth(current, config)) {
+    // Do not persist old silhouettes into a newly invalid pixel.
+    previous_depth[index] = 0.0F;
+    filtered_depth[index] = 0.0F;
+    return;
+  }
+
+  const float previous = previous_depth[index];
+  float output = current;
+  if (
+    valid_depth(previous, config) &&
+    fabsf(current - previous) <= config.depth_temporal_reset_m)
+  {
+    output =
+      (1.0F - config.depth_temporal_alpha) * previous +
+      config.depth_temporal_alpha * current;
+  }
+  previous_depth[index] = output;
+  filtered_depth[index] = output;
+}
+
+__device__ __forceinline__ bool project_depth_pixel(
+  int u,
+  int v,
+  float depth,
+  const CudaCameraModel & camera,
+  const CudaPanoramaConfig & config,
+  float & output_x,
+  float & output_y,
+  float & horizontal_range)
+{
+  const float local_x =
+    (static_cast<float>(u) - camera.cx) / camera.fx * depth;
+  const float local_y =
+    (static_cast<float>(v) - camera.cy) / camera.fy * depth;
+  const float rig_x =
+    camera.rotation_camera_to_rig[0] * local_x +
+    camera.rotation_camera_to_rig[1] * local_y +
+    camera.rotation_camera_to_rig[2] * depth +
+    camera.translation_camera_in_rig[0];
+  const float rig_y =
+    camera.rotation_camera_to_rig[3] * local_x +
+    camera.rotation_camera_to_rig[4] * local_y +
+    camera.rotation_camera_to_rig[5] * depth +
+    camera.translation_camera_in_rig[1];
+  const float rig_z =
+    camera.rotation_camera_to_rig[6] * local_x +
+    camera.rotation_camera_to_rig[7] * local_y +
+    camera.rotation_camera_to_rig[8] * depth +
+    camera.translation_camera_in_rig[2];
+  if (rig_z <= 0.0F) {
+    return false;
+  }
+
+  horizontal_range = hypotf(rig_x, rig_z);
+  if (config.projection_model == 1) {
+    output_x =
+      config.virtual_fx_px * rig_x / rig_z +
+      config.virtual_cx_px;
+    output_y =
+      config.virtual_fy_px * rig_y / rig_z +
+      config.virtual_cy_px;
+  } else {
+    const float global_angle = atan2f(rig_x, rig_z);
+    output_x =
+      (global_angle - config.panorama_min_angle) *
+      config.panorama_focal_px;
+    output_y =
+      config.panorama_focal_px * rig_y / horizontal_range -
+      config.panorama_min_vertical;
+  }
+  return
+    output_x >= -static_cast<float>(config.depth_splat_radius_px) &&
+    output_x < static_cast<float>(
+      config.panorama_width + config.depth_splat_radius_px) &&
+    output_y >= -static_cast<float>(config.depth_splat_radius_px) &&
+    output_y < static_cast<float>(
+      config.panorama_height + config.depth_splat_radius_px);
+}
+
+__global__ void project_min_range_kernel(
+  const float * depth_m,
+  unsigned int * minimum_ranges,
+  CudaCameraModel camera,
+  CudaPanoramaConfig config)
+{
+  const int column_count =
+    camera.maximum_depth_column - camera.minimum_depth_column + 1;
+  const int work_items = column_count * config.source_height;
+  const int item = blockIdx.x * blockDim.x + threadIdx.x;
+  if (item >= work_items || column_count <= 0) {
+    return;
+  }
+
+  const int v = item / column_count;
+  const int u = camera.minimum_depth_column + item % column_count;
+  const int source_index = v * config.source_width + u;
+  const float depth = depth_m[source_index];
+  if (!valid_depth(depth, config)) {
+    return;
+  }
+
+  float projected_x;
+  float projected_y;
+  float horizontal_range;
+  if (!project_depth_pixel(
+      u, v, depth, camera, config,
+      projected_x, projected_y, horizontal_range))
+  {
+    return;
+  }
+
+  const int output_x = __float2int_rn(projected_x);
+  const int output_y = __float2int_rn(projected_y);
+  const bool on_depth_edge = depth_discontinuity(
+    depth_m, u, v, depth, config);
+  const int splat_radius = on_depth_edge ?
+    config.depth_edge_splat_radius_px :
+    config.depth_splat_radius_px;
+  for (int offset_y = -splat_radius; offset_y <= splat_radius; ++offset_y) {
+    const int target_y = output_y + offset_y;
+    if (target_y < 0 || target_y >= config.panorama_height) {
+      continue;
+    }
+    for (int offset_x = -splat_radius; offset_x <= splat_radius; ++offset_x) {
+      const int target_x = output_x + offset_x;
+      if (target_x < 0 || target_x >= config.panorama_width) {
+        continue;
+      }
+      atomicMin(
+        &minimum_ranges[target_y * config.panorama_width + target_x],
+        __float_as_uint(horizontal_range));
+    }
+  }
+}
+
 __global__ void project_depth_kernel(
   const float * depth_m,
+  const unsigned int * minimum_ranges,
   unsigned long long * projection_keys,
   unsigned int * accepted_points,
   CudaCameraModel camera,
@@ -119,64 +319,29 @@ __global__ void project_depth_kernel(
     return;
   }
 
-  const float local_x =
-    (static_cast<float>(u) - camera.cx) / camera.fx * depth;
-  const float local_y =
-    (static_cast<float>(v) - camera.cy) / camera.fy * depth;
-  const float rig_x =
-    camera.rotation_camera_to_rig[0] * local_x +
-    camera.rotation_camera_to_rig[1] * local_y +
-    camera.rotation_camera_to_rig[2] * depth +
-    camera.translation_camera_in_rig[0];
-  const float rig_y =
-    camera.rotation_camera_to_rig[3] * local_x +
-    camera.rotation_camera_to_rig[4] * local_y +
-    camera.rotation_camera_to_rig[5] * depth +
-    camera.translation_camera_in_rig[1];
-  const float rig_z =
-    camera.rotation_camera_to_rig[6] * local_x +
-    camera.rotation_camera_to_rig[7] * local_y +
-    camera.rotation_camera_to_rig[8] * depth +
-    camera.translation_camera_in_rig[2];
-  if (rig_z <= 0.0F) {
-    return;
-  }
-
-  const float horizontal_range = hypotf(rig_x, rig_z);
-  int output_x;
-  int output_y;
-  if (config.projection_model == 1) {
-    output_x = __float2int_rn(
-      config.virtual_fx_px * rig_x / rig_z +
-      config.virtual_cx_px);
-    output_y = __float2int_rn(
-      config.virtual_fy_px * rig_y / rig_z +
-      config.virtual_cy_px);
-  } else {
-    const float global_angle = atan2f(rig_x, rig_z);
-    output_x = __float2int_rn(
-      (global_angle - config.panorama_min_angle) *
-      config.panorama_focal_px);
-    output_y = __float2int_rn(
-      config.panorama_focal_px * rig_y / horizontal_range -
-      config.panorama_min_vertical);
-  }
-  if (
-    output_x < 0 || output_x >= config.panorama_width ||
-    output_y < 0 || output_y >= config.panorama_height)
+  float projected_x;
+  float projected_y;
+  float horizontal_range;
+  if (!project_depth_pixel(
+      u, v, depth, camera, config,
+      projected_x, projected_y, horizontal_range))
   {
     return;
   }
 
-  const unsigned int range_bits = __float_as_uint(horizontal_range);
-  const unsigned long long key =
-    (static_cast<unsigned long long>(range_bits) << 32) |
-    static_cast<unsigned int>(source_index);
+  const int output_x = __float2int_rn(projected_x);
+  const int output_y = __float2int_rn(projected_y);
   const bool on_depth_edge = depth_discontinuity(
     depth_m, u, v, depth, config);
   const int splat_radius = on_depth_edge ?
     config.depth_edge_splat_radius_px :
     config.depth_splat_radius_px;
+  const float same_surface_margin =
+    fmaxf(config.occlusion_switch_margin_m, 0.02F);
+  const unsigned int range_mm = min(
+    static_cast<unsigned int>(
+      __float2uint_rn(horizontal_range * 1000.0F)),
+    65534U);
   for (int offset_y = -splat_radius; offset_y <= splat_radius; ++offset_y) {
     const int target_y = output_y + offset_y;
     if (target_y < 0 || target_y >= config.panorama_height) {
@@ -187,9 +352,38 @@ __global__ void project_depth_kernel(
       if (target_x < 0 || target_x >= config.panorama_width) {
         continue;
       }
-      atomicMin(
-        &projection_keys[target_y * config.panorama_width + target_x],
-        key);
+      const int target_index =
+        target_y * config.panorama_width + target_x;
+      const unsigned int minimum_range_bits =
+        minimum_ranges[target_index];
+      if (minimum_range_bits == kInvalidProjectionRange) {
+        continue;
+      }
+      const float minimum_range =
+        __uint_as_float(minimum_range_bits);
+      if (horizontal_range > minimum_range + same_surface_margin) {
+        continue;
+      }
+
+      // Once z-buffering has rejected the hidden surface, select the sample
+      // whose projected center is closest to this output pixel. Ordering
+      // splats by raw depth here made millimetre depth noise repeatedly copy
+      // a neighbouring RGB pixel across otherwise flat surfaces.
+      const float delta_x =
+        static_cast<float>(target_x) - projected_x;
+      const float delta_y =
+        static_cast<float>(target_y) - projected_y;
+      const float distance_squared =
+        delta_x * delta_x + delta_y * delta_y;
+      const unsigned int distance_key = min(
+        static_cast<unsigned int>(
+          __float2uint_rn(distance_squared * 4096.0F)),
+        65534U);
+      const unsigned long long key =
+        (static_cast<unsigned long long>(distance_key) << 48) |
+        (static_cast<unsigned long long>(range_mm) << 32) |
+        static_cast<unsigned int>(source_index);
+      atomicMin(&projection_keys[target_index], key);
     }
   }
   atomicAdd(accepted_points, 1U);
@@ -317,7 +511,9 @@ __device__ __forceinline__ void source_color(
 __device__ __forceinline__ float projection_range(
   unsigned long long key)
 {
-  return __uint_as_float(static_cast<unsigned int>(key >> 32));
+  const unsigned int range_mm =
+    static_cast<unsigned int>((key >> 32) & 0xffffULL);
+  return static_cast<float>(range_mm) * 0.001F;
 }
 
 __device__ __forceinline__ float pixel_luma(
@@ -833,6 +1029,12 @@ struct CudaPanoramaBackend::Impl
   unsigned char * right_source{nullptr};
   float * left_depth{nullptr};
   float * right_depth{nullptr};
+  float * left_spatial_depth{nullptr};
+  float * right_spatial_depth{nullptr};
+  float * left_filtered_depth{nullptr};
+  float * right_filtered_depth{nullptr};
+  float * left_previous_depth{nullptr};
+  float * right_previous_depth{nullptr};
   unsigned char * left_base{nullptr};
   unsigned char * right_base{nullptr};
   unsigned char * left_base_mask{nullptr};
@@ -841,6 +1043,8 @@ struct CudaPanoramaBackend::Impl
   float * left_map_y{nullptr};
   float * right_map_x{nullptr};
   float * right_map_y{nullptr};
+  unsigned int * left_minimum_ranges{nullptr};
+  unsigned int * right_minimum_ranges{nullptr};
   unsigned long long * left_projection_keys{nullptr};
   unsigned long long * right_projection_keys{nullptr};
   unsigned int * left_accepted_points{nullptr};
@@ -860,6 +1064,12 @@ struct CudaPanoramaBackend::Impl
     cudaFree(right_source);
     cudaFree(left_depth);
     cudaFree(right_depth);
+    cudaFree(left_spatial_depth);
+    cudaFree(right_spatial_depth);
+    cudaFree(left_filtered_depth);
+    cudaFree(right_filtered_depth);
+    cudaFree(left_previous_depth);
+    cudaFree(right_previous_depth);
     cudaFree(left_base);
     cudaFree(right_base);
     cudaFree(left_base_mask);
@@ -868,6 +1078,8 @@ struct CudaPanoramaBackend::Impl
     cudaFree(left_map_y);
     cudaFree(right_map_x);
     cudaFree(right_map_y);
+    cudaFree(left_minimum_ranges);
+    cudaFree(right_minimum_ranges);
     cudaFree(left_projection_keys);
     cudaFree(right_projection_keys);
     cudaFree(left_accepted_points);
@@ -881,6 +1093,12 @@ struct CudaPanoramaBackend::Impl
     right_source = nullptr;
     left_depth = nullptr;
     right_depth = nullptr;
+    left_spatial_depth = nullptr;
+    right_spatial_depth = nullptr;
+    left_filtered_depth = nullptr;
+    right_filtered_depth = nullptr;
+    left_previous_depth = nullptr;
+    right_previous_depth = nullptr;
     left_base = nullptr;
     right_base = nullptr;
     left_base_mask = nullptr;
@@ -889,6 +1107,8 @@ struct CudaPanoramaBackend::Impl
     left_map_y = nullptr;
     right_map_x = nullptr;
     right_map_y = nullptr;
+    left_minimum_ranges = nullptr;
+    right_minimum_ranges = nullptr;
     left_projection_keys = nullptr;
     right_projection_keys = nullptr;
     left_accepted_points = nullptr;
@@ -983,6 +1203,8 @@ bool CudaPanoramaBackend::configure(
     panorama_pixels * sizeof(float);
   const std::size_t projection_key_bytes =
     panorama_pixels * sizeof(unsigned long long);
+  const std::size_t projection_range_bytes =
+    panorama_pixels * sizeof(unsigned int);
   const int seam_width = std::max(
     config.depth_color_max_x - config.depth_color_min_x + 1, 1);
   const std::size_t seam_cost_bytes =
@@ -1014,6 +1236,24 @@ bool CudaPanoramaBackend::configure(
       reinterpret_cast<void **>(&impl_->right_depth),
       source_depth_bytes, "cudaMalloc right depth") ||
     !allocate(
+      reinterpret_cast<void **>(&impl_->left_spatial_depth),
+      source_depth_bytes, "cudaMalloc left spatial depth") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_spatial_depth),
+      source_depth_bytes, "cudaMalloc right spatial depth") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_filtered_depth),
+      source_depth_bytes, "cudaMalloc left filtered depth") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_filtered_depth),
+      source_depth_bytes, "cudaMalloc right filtered depth") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_previous_depth),
+      source_depth_bytes, "cudaMalloc left previous depth") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_previous_depth),
+      source_depth_bytes, "cudaMalloc right previous depth") ||
+    !allocate(
       reinterpret_cast<void **>(&impl_->left_base),
       panorama_color_bytes, "cudaMalloc left base") ||
     !allocate(
@@ -1037,6 +1277,12 @@ bool CudaPanoramaBackend::configure(
     !allocate(
       reinterpret_cast<void **>(&impl_->right_map_y),
       panorama_map_bytes, "cudaMalloc right map y") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_minimum_ranges),
+      projection_range_bytes, "cudaMalloc left minimum ranges") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_minimum_ranges),
+      projection_range_bytes, "cudaMalloc right minimum ranges") ||
     !allocate(
       reinterpret_cast<void **>(&impl_->left_projection_keys),
       projection_key_bytes, "cudaMalloc left keys") ||
@@ -1064,6 +1310,19 @@ bool CudaPanoramaBackend::configure(
     !allocate(
       reinterpret_cast<void **>(&impl_->output_range_m),
       panorama_pixels * sizeof(float), "cudaMalloc output range"))
+  {
+    impl_->release();
+    return false;
+  }
+  if (
+    !check_cuda(
+      cudaMemset(
+        impl_->left_previous_depth, 0, source_depth_bytes),
+      "initialize left depth history", error) ||
+    !check_cuda(
+      cudaMemset(
+        impl_->right_previous_depth, 0, source_depth_bytes),
+      "initialize right depth history", error))
   {
     impl_->release();
     return false;
@@ -1192,6 +1451,8 @@ bool CudaPanoramaBackend::process(
     static_cast<std::size_t>(config.panorama_height);
   const std::size_t projection_key_bytes =
     panorama_pixels * sizeof(unsigned long long);
+  const std::size_t projection_range_bytes =
+    panorama_pixels * sizeof(unsigned int);
 
   cudaEventRecord(impl_->start_event, impl_->stream);
   auto copy_to_device = [
@@ -1255,6 +1516,16 @@ bool CudaPanoramaBackend::process(
       "clear right projection keys", error) ||
     !check_cuda(
       cudaMemsetAsync(
+        impl_->left_minimum_ranges, 0xff,
+        projection_range_bytes, impl_->stream),
+      "clear left minimum ranges", error) ||
+    !check_cuda(
+      cudaMemsetAsync(
+        impl_->right_minimum_ranges, 0xff,
+        projection_range_bytes, impl_->stream),
+      "clear right minimum ranges", error) ||
+    !check_cuda(
+      cudaMemsetAsync(
         impl_->left_accepted_points, 0,
         sizeof(unsigned int), impl_->stream),
       "clear left count", error) ||
@@ -1267,6 +1538,45 @@ bool CudaPanoramaBackend::process(
     return false;
   }
 
+  const float * left_projection_depth = impl_->left_depth;
+  const float * right_projection_depth = impl_->right_depth;
+  if (config.depth_aware_color && config.depth_spatial_filter) {
+    constexpr int filter_threads = 256;
+    const int source_pixel_count =
+      config.source_width * config.source_height;
+    const int filter_blocks =
+      (source_pixel_count + filter_threads - 1) / filter_threads;
+    edge_aware_depth_filter_kernel<<<
+      filter_blocks, filter_threads, 0, impl_->stream>>>(
+      impl_->left_depth, impl_->left_spatial_depth, config);
+    edge_aware_depth_filter_kernel<<<
+      filter_blocks, filter_threads, 0, impl_->stream>>>(
+      impl_->right_depth, impl_->right_spatial_depth, config);
+    left_projection_depth = impl_->left_spatial_depth;
+    right_projection_depth = impl_->right_spatial_depth;
+  }
+  if (config.depth_aware_color && config.depth_temporal_filter) {
+    constexpr int filter_threads = 256;
+    const int source_pixel_count =
+      config.source_width * config.source_height;
+    const int filter_blocks =
+      (source_pixel_count + filter_threads - 1) / filter_threads;
+    temporal_depth_filter_kernel<<<
+      filter_blocks, filter_threads, 0, impl_->stream>>>(
+      left_projection_depth,
+      impl_->left_previous_depth,
+      impl_->left_filtered_depth,
+      config);
+    temporal_depth_filter_kernel<<<
+      filter_blocks, filter_threads, 0, impl_->stream>>>(
+      right_projection_depth,
+      impl_->right_previous_depth,
+      impl_->right_filtered_depth,
+      config);
+    left_projection_depth = impl_->left_filtered_depth;
+    right_projection_depth = impl_->right_filtered_depth;
+  }
+
   if (config.depth_aware_color) {
     constexpr int projection_threads = 256;
     const int left_work_items =
@@ -1277,10 +1587,25 @@ bool CudaPanoramaBackend::process(
       (impl_->right_camera.maximum_depth_column -
       impl_->right_camera.minimum_depth_column + 1) *
       config.source_height;
+    project_min_range_kernel<<<
+      (left_work_items + projection_threads - 1) / projection_threads,
+      projection_threads, 0, impl_->stream>>>(
+      left_projection_depth,
+      impl_->left_minimum_ranges,
+      impl_->left_camera,
+      config);
+    project_min_range_kernel<<<
+      (right_work_items + projection_threads - 1) / projection_threads,
+      projection_threads, 0, impl_->stream>>>(
+      right_projection_depth,
+      impl_->right_minimum_ranges,
+      impl_->right_camera,
+      config);
     project_depth_kernel<<<
       (left_work_items + projection_threads - 1) / projection_threads,
       projection_threads, 0, impl_->stream>>>(
-      impl_->left_depth,
+      left_projection_depth,
+      impl_->left_minimum_ranges,
       impl_->left_projection_keys,
       impl_->left_accepted_points,
       impl_->left_camera,
@@ -1288,7 +1613,8 @@ bool CudaPanoramaBackend::process(
     project_depth_kernel<<<
       (right_work_items + projection_threads - 1) / projection_threads,
       projection_threads, 0, impl_->stream>>>(
-      impl_->right_depth,
+      right_projection_depth,
+      impl_->right_minimum_ranges,
       impl_->right_projection_keys,
       impl_->right_accepted_points,
       impl_->right_camera,

@@ -40,6 +40,12 @@ struct CudaPanoramaConfig
   float maximum_depth_m{0.0F};
   float depth_discontinuity_abs_m{0.08F};
   float depth_discontinuity_relative{0.04F};
+  bool depth_spatial_filter{false};
+  float depth_spatial_delta_m{0.03F};
+  float depth_spatial_delta_relative{0.01F};
+  bool depth_temporal_filter{false};
+  float depth_temporal_alpha{0.65F};
+  float depth_temporal_reset_m{0.08F};
   float occlusion_switch_margin_m{0.0F};
   bool depth_aware_color{true};
   bool render_depth_reprojected_color{true};
