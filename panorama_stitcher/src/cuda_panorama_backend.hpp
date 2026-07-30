@@ -46,6 +46,13 @@ struct CudaPanoramaConfig
   bool depth_color_overlap_only{false};
   bool allow_color_fallback{true};
   bool prefer_seam_camera_when_both_depth_valid{false};
+  bool content_aware_seam{false};
+  float seam_color_weight{1.0F};
+  float seam_depth_weight{2.0F};
+  float seam_foreground_weight{0.35F};
+  float seam_center_weight{0.03F};
+  float seam_temporal_weight{0.08F};
+  int seam_max_step_px{3};
   int depth_color_min_x{0};
   int depth_color_max_x{-1};
   int seam_x{0};
@@ -60,6 +67,10 @@ struct CudaPanoramaStats
   std::size_t left_depth_points{0};
   std::size_t right_depth_points{0};
   float gpu_time_ms{0.0F};
+  bool content_aware_seam_used{false};
+  int seam_min_x{0};
+  int seam_max_x{0};
+  float seam_mean_x{0.0F};
 };
 
 class CudaPanoramaBackend

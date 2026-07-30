@@ -1,10 +1,12 @@
 #include "cuda_panorama_backend.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 #include <cuda_runtime.h>
 
@@ -318,6 +320,142 @@ __device__ __forceinline__ float projection_range(
   return __uint_as_float(static_cast<unsigned int>(key >> 32));
 }
 
+__device__ __forceinline__ float pixel_luma(
+  unsigned char blue, unsigned char green, unsigned char red)
+{
+  return
+    0.114F * static_cast<float>(blue) +
+    0.587F * static_cast<float>(green) +
+    0.299F * static_cast<float>(red);
+}
+
+__global__ void seam_cost_kernel(
+  const unsigned char * left_source,
+  const unsigned char * right_source,
+  const unsigned char * left_base,
+  const unsigned char * right_base,
+  const unsigned char * left_base_mask,
+  const unsigned char * right_base_mask,
+  const unsigned long long * left_projection_keys,
+  const unsigned long long * right_projection_keys,
+  float * seam_cost,
+  float right_gain_b,
+  float right_gain_g,
+  float right_gain_r,
+  CudaPanoramaConfig config)
+{
+  const int overlap_width =
+    config.depth_color_max_x - config.depth_color_min_x + 1;
+  const int local_x = blockIdx.x * blockDim.x + threadIdx.x;
+  const int y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (local_x >= overlap_width || y >= config.panorama_height) {
+    return;
+  }
+
+  const int x = config.depth_color_min_x + local_x;
+  const int pixel_index = y * config.panorama_width + x;
+  const int color_index = pixel_index * 3;
+  const int cost_index = y * overlap_width + local_x;
+  const bool left_base_valid = left_base_mask[pixel_index] != 0U;
+  const bool right_base_valid = right_base_mask[pixel_index] != 0U;
+  if (!left_base_valid || !right_base_valid) {
+    seam_cost[cost_index] = 50.0F;
+    return;
+  }
+
+  const unsigned long long left_key = config.depth_aware_color ?
+    nearest_projection_key(
+    left_projection_keys, x, y, config) : kInvalidProjectionKey;
+  const unsigned long long right_key = config.depth_aware_color ?
+    nearest_projection_key(
+    right_projection_keys, x, y, config) : kInvalidProjectionKey;
+  const bool left_depth_valid = left_key != kInvalidProjectionKey;
+  const bool right_depth_valid = right_key != kInvalidProjectionKey;
+
+  unsigned char left_blue = left_base[color_index];
+  unsigned char left_green = left_base[color_index + 1];
+  unsigned char left_red = left_base[color_index + 2];
+  unsigned char right_blue = gained_channel(
+    right_base[color_index], right_gain_b);
+  unsigned char right_green = gained_channel(
+    right_base[color_index + 1], right_gain_g);
+  unsigned char right_red = gained_channel(
+    right_base[color_index + 2], right_gain_r);
+  if (left_depth_valid) {
+    source_color(
+      left_source, left_key, 1.0F, 1.0F, 1.0F,
+      left_blue, left_green, left_red);
+  }
+  if (right_depth_valid) {
+    source_color(
+      right_source, right_key,
+      right_gain_b, right_gain_g, right_gain_r,
+      right_blue, right_green, right_red);
+  }
+
+  const float color_difference =
+    (
+    fabsf(static_cast<float>(left_blue) - right_blue) +
+    fabsf(static_cast<float>(left_green) - right_green) +
+    fabsf(static_cast<float>(left_red) - right_red)) /
+    (3.0F * 255.0F);
+
+  float depth_mismatch = 0.0F;
+  float foreground_cost = 0.0F;
+  if (left_depth_valid && right_depth_valid) {
+    const float left_range = projection_range(left_key);
+    const float right_range = projection_range(right_key);
+    const float depth_scale = fmaxf(
+      config.occlusion_switch_margin_m, 0.05F);
+    depth_mismatch = fminf(
+      fabsf(left_range - right_range) / depth_scale, 4.0F);
+    foreground_cost =
+      1.0F / fmaxf(fminf(left_range, right_range), 0.35F);
+  } else if (left_depth_valid || right_depth_valid) {
+    depth_mismatch = 2.5F;
+    const float range = left_depth_valid ?
+      projection_range(left_key) : projection_range(right_key);
+    foreground_cost = 1.0F / fmaxf(range, 0.35F);
+  } else {
+    // A depth hole is allowed, but it is a less reliable place to cut than a
+    // background surface observed by both cameras.
+    depth_mismatch = 0.75F;
+  }
+
+  // A weak image-gradient penalty stops the path from running along a sharp
+  // silhouette when both projected colors happen to be locally similar.
+  float edge_cost = 0.0F;
+  if (local_x > 0 && local_x + 1 < overlap_width) {
+    const int left_color_index = color_index - 3;
+    const int right_color_index = color_index + 3;
+    const float left_luma_gradient = fabsf(
+      pixel_luma(
+        left_base[right_color_index],
+        left_base[right_color_index + 1],
+        left_base[right_color_index + 2]) -
+      pixel_luma(
+        left_base[left_color_index],
+        left_base[left_color_index + 1],
+        left_base[left_color_index + 2]));
+    const float right_luma_gradient = fabsf(
+      pixel_luma(
+        right_base[right_color_index],
+        right_base[right_color_index + 1],
+        right_base[right_color_index + 2]) -
+      pixel_luma(
+        right_base[left_color_index],
+        right_base[left_color_index + 1],
+        right_base[left_color_index + 2]));
+    edge_cost =
+      0.5F * (left_luma_gradient + right_luma_gradient) / 255.0F;
+  }
+
+  seam_cost[cost_index] =
+    config.seam_color_weight * (color_difference + 0.35F * edge_cost) +
+    config.seam_depth_weight * depth_mismatch +
+    config.seam_foreground_weight * foreground_cost;
+}
+
 __global__ void compose_panorama_kernel(
   const unsigned char * left_source,
   const unsigned char * right_source,
@@ -327,6 +465,7 @@ __global__ void compose_panorama_kernel(
   const unsigned char * right_base_mask,
   const unsigned long long * left_projection_keys,
   const unsigned long long * right_projection_keys,
+  const int * seam_by_row,
   unsigned char * output,
   unsigned char * validity,
   float * output_range_m,
@@ -343,7 +482,8 @@ __global__ void compose_panorama_kernel(
 
   const int pixel_index = y * config.panorama_width + x;
   const int color_index = pixel_index * 3;
-  const int seam_x = config.seam_x;
+  const int seam_x = config.content_aware_seam ?
+    seam_by_row[y] : config.seam_x;
   const bool left_base_valid = left_base_mask[pixel_index] != 0U;
   const bool right_base_valid = right_base_mask[pixel_index] != 0U;
   if (!left_base_valid && !right_base_valid) {
@@ -608,6 +748,75 @@ __global__ void compose_panorama_kernel(
     right_gain_r);
 }
 
+std::vector<int> find_content_aware_seam(
+  const std::vector<float> & cost,
+  int width,
+  int height,
+  int minimum_x,
+  const CudaPanoramaConfig & config,
+  const std::vector<int> & previous_seam)
+{
+  std::vector<int> seam(
+    static_cast<std::size_t>(height), config.seam_x);
+  if (
+    width <= 0 || height <= 0 ||
+    cost.size() != static_cast<std::size_t>(width * height))
+  {
+    return seam;
+  }
+
+  // A per-row seam can route around an object, but it creates the visible
+  // "wriggling" boundary that is unacceptable for detector input. Use one
+  // coherent vertical ownership boundary and move that boundary only when a
+  // different overlap column is consistently safer over the full frame.
+  const float half_width = std::max(0.5F * width, 1.0F);
+  int previous_x = config.seam_x;
+  if (previous_seam.size() == static_cast<std::size_t>(height)) {
+    long long previous_sum = 0;
+    for (const int value : previous_seam) {
+      previous_sum += value;
+    }
+    previous_x = static_cast<int>(
+      previous_sum / std::max(height, 1));
+  }
+
+  float best_cost = std::numeric_limits<float>::infinity();
+  int best_absolute_x = config.seam_x;
+  for (int x = 0; x < width; ++x) {
+    float accumulated = 0.0F;
+    for (int y = 0; y < height; ++y) {
+      const float measured =
+        cost[static_cast<std::size_t>(y * width + x)];
+      // Cap isolated depth outliers so one bad pixel cannot move the full
+      // height ownership boundary.
+      accumulated += std::min(
+        std::isfinite(measured) ? measured : 50.0F, 8.0F);
+    }
+    const int absolute_x = minimum_x + x;
+    accumulated /= static_cast<float>(height);
+    accumulated +=
+      config.seam_center_weight *
+      std::abs(static_cast<float>(absolute_x - config.seam_x)) /
+      half_width;
+    accumulated +=
+      config.seam_temporal_weight *
+      std::abs(static_cast<float>(absolute_x - previous_x)) /
+      half_width;
+    if (accumulated < best_cost) {
+      best_cost = accumulated;
+      best_absolute_x = absolute_x;
+    }
+  }
+
+  const int maximum_step = std::max(config.seam_max_step_px, 1);
+  const int selected_x = std::clamp(
+    best_absolute_x,
+    previous_x - maximum_step,
+    previous_x + maximum_step);
+  std::fill(seam.begin(), seam.end(), selected_x);
+  return seam;
+}
+
 }  // namespace
 
 struct CudaPanoramaBackend::Impl
@@ -636,9 +845,14 @@ struct CudaPanoramaBackend::Impl
   unsigned long long * right_projection_keys{nullptr};
   unsigned int * left_accepted_points{nullptr};
   unsigned int * right_accepted_points{nullptr};
+  float * seam_cost{nullptr};
+  int * seam_by_row{nullptr};
   unsigned char * output{nullptr};
   unsigned char * validity{nullptr};
   float * output_range_m{nullptr};
+  std::vector<float> seam_cost_host;
+  std::vector<int> seam_host;
+  std::vector<int> previous_seam_host;
 
   void release()
   {
@@ -658,6 +872,8 @@ struct CudaPanoramaBackend::Impl
     cudaFree(right_projection_keys);
     cudaFree(left_accepted_points);
     cudaFree(right_accepted_points);
+    cudaFree(seam_cost);
+    cudaFree(seam_by_row);
     cudaFree(output);
     cudaFree(validity);
     cudaFree(output_range_m);
@@ -677,9 +893,14 @@ struct CudaPanoramaBackend::Impl
     right_projection_keys = nullptr;
     left_accepted_points = nullptr;
     right_accepted_points = nullptr;
+    seam_cost = nullptr;
+    seam_by_row = nullptr;
     output = nullptr;
     validity = nullptr;
     output_range_m = nullptr;
+    seam_cost_host.clear();
+    seam_host.clear();
+    previous_seam_host.clear();
     configured = false;
   }
 };
@@ -762,6 +983,14 @@ bool CudaPanoramaBackend::configure(
     panorama_pixels * sizeof(float);
   const std::size_t projection_key_bytes =
     panorama_pixels * sizeof(unsigned long long);
+  const int seam_width = std::max(
+    config.depth_color_max_x - config.depth_color_min_x + 1, 1);
+  const std::size_t seam_cost_bytes =
+    static_cast<std::size_t>(seam_width) *
+    static_cast<std::size_t>(config.panorama_height) *
+    sizeof(float);
+  const std::size_t seam_row_bytes =
+    static_cast<std::size_t>(config.panorama_height) * sizeof(int);
 
   auto allocate = [&error](void ** pointer, std::size_t bytes, const char * name) {
       const cudaError_t result = cudaMalloc(pointer, bytes);
@@ -820,6 +1049,12 @@ bool CudaPanoramaBackend::configure(
     !allocate(
       reinterpret_cast<void **>(&impl_->right_accepted_points),
       sizeof(unsigned int), "cudaMalloc right count") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->seam_cost),
+      seam_cost_bytes, "cudaMalloc seam cost") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->seam_by_row),
+      seam_row_bytes, "cudaMalloc seam rows") ||
     !allocate(
       reinterpret_cast<void **>(&impl_->output),
       panorama_color_bytes, "cudaMalloc output") ||
@@ -882,6 +1117,24 @@ bool CudaPanoramaBackend::configure(
     !copy_map(impl_->left_map_y, left_map_y, "copy left map y") ||
     !copy_map(impl_->right_map_x, right_map_x, "copy right map x") ||
     !copy_map(impl_->right_map_y, right_map_y, "copy right map y"))
+  {
+    impl_->release();
+    return false;
+  }
+  impl_->seam_cost_host.assign(
+    static_cast<std::size_t>(seam_width * config.panorama_height),
+    0.0F);
+  impl_->seam_host.assign(
+    static_cast<std::size_t>(config.panorama_height), config.seam_x);
+  impl_->previous_seam_host = impl_->seam_host;
+  if (
+    !check_cuda(
+      cudaMemcpy(
+        impl_->seam_by_row,
+        impl_->seam_host.data(),
+        seam_row_bytes,
+        cudaMemcpyHostToDevice),
+      "initialize seam rows", error))
   {
     impl_->release();
     return false;
@@ -1064,6 +1317,77 @@ bool CudaPanoramaBackend::process(
     impl_->right_base_mask,
     impl_->right_base,
     config);
+
+  const int seam_width =
+    config.depth_color_max_x - config.depth_color_min_x + 1;
+  const bool use_content_aware_seam =
+    config.content_aware_seam &&
+    config.prefer_seam_camera_when_both_depth_valid &&
+    seam_width > 0;
+  if (use_content_aware_seam) {
+    const dim3 seam_blocks(
+      (seam_width + compose_threads.x - 1) / compose_threads.x,
+      (config.panorama_height + compose_threads.y - 1) /
+      compose_threads.y);
+    seam_cost_kernel<<<
+      seam_blocks, compose_threads, 0, impl_->stream>>>(
+      impl_->left_source,
+      impl_->right_source,
+      impl_->left_base,
+      impl_->right_base,
+      impl_->left_base_mask,
+      impl_->right_base_mask,
+      impl_->left_projection_keys,
+      impl_->right_projection_keys,
+      impl_->seam_cost,
+      static_cast<float>(right_gain_bgr[0]),
+      static_cast<float>(right_gain_bgr[1]),
+      static_cast<float>(right_gain_bgr[2]),
+      config);
+    if (
+      !check_cuda(
+        cudaGetLastError(), "launch content-aware seam cost", error) ||
+      !check_cuda(
+        cudaMemcpy2DAsync(
+          impl_->seam_cost_host.data(),
+          static_cast<std::size_t>(seam_width) * sizeof(float),
+          impl_->seam_cost,
+          static_cast<std::size_t>(seam_width) * sizeof(float),
+          static_cast<std::size_t>(seam_width) * sizeof(float),
+          config.panorama_height,
+          cudaMemcpyDeviceToHost,
+          impl_->stream),
+        "download seam cost", error) ||
+      !check_cuda(
+        cudaStreamSynchronize(impl_->stream),
+        "synchronize seam cost", error))
+    {
+      return false;
+    }
+    impl_->seam_host = find_content_aware_seam(
+      impl_->seam_cost_host,
+      seam_width,
+      config.panorama_height,
+      config.depth_color_min_x,
+      config,
+      impl_->previous_seam_host);
+    impl_->previous_seam_host = impl_->seam_host;
+    if (
+      !check_cuda(
+        cudaMemcpyAsync(
+          impl_->seam_by_row,
+          impl_->seam_host.data(),
+          static_cast<std::size_t>(config.panorama_height) * sizeof(int),
+          cudaMemcpyHostToDevice,
+          impl_->stream),
+        "upload content-aware seam", error))
+    {
+      return false;
+    }
+  } else {
+    std::fill(
+      impl_->seam_host.begin(), impl_->seam_host.end(), config.seam_x);
+  }
   compose_panorama_kernel<<<
     compose_blocks, compose_threads, 0, impl_->stream>>>(
     impl_->left_source,
@@ -1074,6 +1398,7 @@ bool CudaPanoramaBackend::process(
     impl_->right_base_mask,
     impl_->left_projection_keys,
     impl_->right_projection_keys,
+    impl_->seam_by_row,
     impl_->output,
     impl_->validity,
     impl_->output_range_m,
@@ -1155,6 +1480,19 @@ bool CudaPanoramaBackend::process(
   stats.left_depth_points = left_count;
   stats.right_depth_points = right_count;
   stats.gpu_time_ms = elapsed_ms;
+  stats.content_aware_seam_used = use_content_aware_seam;
+  const auto seam_bounds = std::minmax_element(
+    impl_->seam_host.begin(), impl_->seam_host.end());
+  stats.seam_min_x = *seam_bounds.first;
+  stats.seam_max_x = *seam_bounds.second;
+  long long seam_sum = 0;
+  for (const int seam_x : impl_->seam_host) {
+    seam_sum += seam_x;
+  }
+  stats.seam_mean_x = impl_->seam_host.empty() ?
+    static_cast<float>(config.seam_x) :
+    static_cast<float>(seam_sum) /
+    static_cast<float>(impl_->seam_host.size());
   return true;
 }
 

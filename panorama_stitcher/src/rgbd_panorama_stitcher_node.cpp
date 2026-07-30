@@ -166,6 +166,20 @@ public:
       "occlusion_switch_margin_m", 0.05);
     prefer_seam_camera_when_both_depth_valid_ = declare_parameter<bool>(
       "prefer_seam_camera_when_both_depth_valid", false);
+    content_aware_seam_ = declare_parameter<bool>(
+      "content_aware_seam", false);
+    seam_color_weight_ = declare_parameter<double>(
+      "seam_color_weight", 1.0);
+    seam_depth_weight_ = declare_parameter<double>(
+      "seam_depth_weight", 2.0);
+    seam_foreground_weight_ = declare_parameter<double>(
+      "seam_foreground_weight", 0.35);
+    seam_center_weight_ = declare_parameter<double>(
+      "seam_center_weight", 0.03);
+    seam_temporal_weight_ = declare_parameter<double>(
+      "seam_temporal_weight", 0.08);
+    seam_max_step_px_ = declare_parameter<int>(
+      "seam_max_step_px", 3);
     exposure_compensation_ = declare_parameter<bool>(
       "enable_exposure_compensation", true);
     exposure_smoothing_ = declare_parameter<double>(
@@ -445,6 +459,14 @@ private:
     depth_median_kernel_ = std::min(depth_median_kernel_, 5);
     occlusion_switch_margin_m_ = std::max(
       occlusion_switch_margin_m_, 0.0);
+    seam_color_weight_ = std::max(seam_color_weight_, 0.0);
+    seam_depth_weight_ = std::max(seam_depth_weight_, 0.0);
+    seam_foreground_weight_ = std::max(
+      seam_foreground_weight_, 0.0);
+    seam_center_weight_ = std::max(seam_center_weight_, 0.0);
+    seam_temporal_weight_ = std::max(
+      seam_temporal_weight_, 0.0);
+    seam_max_step_px_ = std::clamp(seam_max_step_px_, 1, 16);
     exposure_smoothing_ = std::clamp(exposure_smoothing_, 0.0, 1.0);
     min_exposure_gain_ = std::max(min_exposure_gain_, 0.01);
     max_exposure_gain_ = std::max(max_exposure_gain_, min_exposure_gain_);
@@ -1229,6 +1251,18 @@ private:
     config.allow_color_fallback = allow_color_fallback_;
     config.prefer_seam_camera_when_both_depth_valid =
       prefer_seam_camera_when_both_depth_valid_;
+    config.content_aware_seam = content_aware_seam_;
+    config.seam_color_weight =
+      static_cast<float>(seam_color_weight_);
+    config.seam_depth_weight =
+      static_cast<float>(seam_depth_weight_);
+    config.seam_foreground_weight =
+      static_cast<float>(seam_foreground_weight_);
+    config.seam_center_weight =
+      static_cast<float>(seam_center_weight_);
+    config.seam_temporal_weight =
+      static_cast<float>(seam_temporal_weight_);
+    config.seam_max_step_px = seam_max_step_px_;
     config.seam_x = seam_x_;
     config.seam_feather_px = seam_feather_px_;
     config.depth_splat_radius_px = depth_splat_radius_px_;
@@ -1306,6 +1340,11 @@ private:
         last_left_depth_points_ = stats.left_depth_points;
         last_right_depth_points_ = stats.right_depth_points;
         last_gpu_time_ms_ = stats.gpu_time_ms;
+        last_content_aware_seam_used_ =
+          stats.content_aware_seam_used;
+        last_seam_min_x_ = stats.seam_min_x;
+        last_seam_max_x_ = stats.seam_max_x;
+        last_seam_mean_x_ = stats.seam_mean_x;
         used_cuda_last_frame_ = true;
         return panorama;
       }
@@ -1861,7 +1900,7 @@ private:
       "input_hz(Lc/Ld/Rc/Rd)=%.1f/%.1f/%.1f/%.1f "
       "depth_age(L/R)=%.1f/%.1f ms "
       "sync_span(avg/max)=%.1f/%.1f ms depth_points(left/right)=%zu/%zu "
-      "validity=%.1f%% "
+      "validity=%.1f%% seam=%s:%d..%d(mean=%.1f) "
       "gain(BGR)=%.2f/%.2f/%.2f total=%zu",
       panorama_width_, panorama_height_, count / elapsed_sec,
       processing_time_sum_ms_ / count,
@@ -1872,6 +1911,8 @@ private:
       sync_span_sum_ms_ / count, sync_span_max_ms_,
       last_left_depth_points_, last_right_depth_points_,
       100.0 * last_validity_ratio_,
+      last_content_aware_seam_used_ ? "content" : "fixed",
+      last_seam_min_x_, last_seam_max_x_, last_seam_mean_x_,
       smoothed_gain_[0], smoothed_gain_[1], smoothed_gain_[2],
       frame_count_);
 
@@ -1932,6 +1973,13 @@ private:
   int depth_median_kernel_{3};
   double occlusion_switch_margin_m_{0.05};
   bool prefer_seam_camera_when_both_depth_valid_{false};
+  bool content_aware_seam_{false};
+  double seam_color_weight_{1.0};
+  double seam_depth_weight_{2.0};
+  double seam_foreground_weight_{0.35};
+  double seam_center_weight_{0.03};
+  double seam_temporal_weight_{0.08};
+  int seam_max_step_px_{3};
   bool exposure_compensation_{true};
   double exposure_smoothing_{0.15};
   double min_exposure_gain_{0.75};
@@ -1981,6 +2029,10 @@ private:
 #endif
   bool used_cuda_last_frame_{false};
   double last_gpu_time_ms_{0.0};
+  bool last_content_aware_seam_used_{false};
+  int last_seam_min_x_{0};
+  int last_seam_max_x_{0};
+  double last_seam_mean_x_{0.0};
 
   rclcpp::Subscription<Image>::SharedPtr left_color_rgbd_subscriber_;
   rclcpp::Subscription<Image>::SharedPtr left_depth_rgbd_subscriber_;

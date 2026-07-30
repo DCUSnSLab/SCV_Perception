@@ -1,6 +1,6 @@
 # SSC Real-time Panorama Stitcher
 
-`front`와 `camera` D435i 컬러 영상을 실시간 합성해
+`front`와 `camera` D435if 컬러 영상을 실시간 합성해
 `/panorama/image_raw`로 발행합니다.
 
 주행용 전방 RGB-D 융합은 `front_rgbd_fusion.launch.py`를 사용합니다.
@@ -28,10 +28,10 @@ ros2 launch panorama_stitcher front_rgbd_fusion.launch.py
 영상 인식용이고, 거리 기반 주행 판단에는 `/parking/front/points`를
 사용합니다.
 
-2026-07-29 다중 보드 metric bundle 결과는 왼쪽 yaw `-32.00°`,
-오른쪽 yaw `+33.34°`, 오른쪽 잔여 pitch `+0.26°`, 컬러 광학 중심
-간격 `0.12149 m`입니다. 자로 잰 약 `0.11 m`는 결과를 고정하지 않고
-검증에만 사용했습니다.
+카메라를 다시 고정한 뒤 수행한 2026-07-30 다중 보드 metric bundle
+결과는 왼쪽 yaw `-30.00°`, 오른쪽 yaw `+30.46956°`, 오른쪽 잔여
+pitch `+2.26372°`, 컬러 광학 중심 간격 `0.115858 m`입니다. 자로 잰
+약 `0.11 m`는 결과를 고정하지 않고 검증에만 사용했습니다.
 
 주행용 RGB-D 출력은 중앙 물체 정보를 압축하거나 깊이 재투영으로 컬러를
 덮어쓰지 않습니다. Board 5로 측정한 고정 배치 `x=1900 px`,
@@ -58,6 +58,33 @@ RTX 4060(`sm_89`)용 CUDA backend를 자동으로 함께 빌드합니다.
 없으면 노드는 경고를 남기고 기존 CPU 경로로 전환합니다. 실행 중
 진단 로그의 `backend=CUDA`, `gpu=... ms`로 실제 사용 여부를 확인할 수
 있습니다.
+
+## Current calibrated hybrid panorama
+
+카메라와 파노라마를 함께 실행합니다.
+
+```bash
+ros2 launch bring_up realsense_panorama.launch.py
+```
+
+발행 토픽:
+
+- `/panorama/image_raw`: 안정적인 기준 거리 원통 투영 RGB (`bgr8`)
+- `/panorama/range`: 양쪽 전체 깊이를 rig 중심으로 3D 재투영한 거리
+  (`32FC1`, m)
+- `/panorama/validity`: 거리 영상의 유효 픽셀 마스크 (`mono8`)
+
+RGB 전체를 깊이점으로 forward-warp하면 D435if 깊이 경계의 hole과
+시간 잡음이 보드·사람 윤곽을 자글거리게 만듭니다. 현재 기본 설정은 RGB를
+`2.635 m` 기준면 투영으로 매끄럽게 유지하고, 깊이는 겹침부의 카메라
+소유권 판단과 별도 거리 영상에 사용합니다. 두 영상 사이의 절단선은
+행마다 움직이지 않는 하나의 세로선이며, 컬러 차이·깊이 차이·근거리
+물체 비용을 이용해 실제 중첩 범위 안에서만 천천히 이동합니다.
+
+2026-07-30 RTX 4060 실시간 확인 결과는 `3138×962`, 약 `29–30 FPS`,
+GPU `14–15 ms`, 전체 처리 `31–33 ms`, 유효 깊이 약 `95%`였습니다.
+이 구성은 정적 장면에서 확인했으며, 빠른 동적 물체는 별도의 회귀 시험이
+필요합니다.
 
 ## Metric RGB-D wide view
 
@@ -139,10 +166,10 @@ ros2 launch panorama_stitcher rgbd_panorama.launch.py
 ros2 launch panorama_stitcher rectified_panorama.launch.py
 ```
 
-- `front`: panorama 중심 기준 yaw `-32.00°`
-- `camera`: panorama 중심 기준 yaw `+33.34°`, pitch `+0.26°`
-- relative rotation: `65.379°`
-- RGB optical-center baseline: `0.12149 m`
+- `front`: panorama 중심 기준 yaw `-30.00°`
+- `camera`: panorama 중심 기준 yaw `+30.46956°`, pitch `+2.26372°`
+- relative rotation: `60.526188°`
+- RGB optical-center baseline: `0.115858 m`
 - projection: cylindrical, default scale `1.0`
 - depth range: `0.20–15.0 m`
 

@@ -7,7 +7,11 @@ panorama_stitcher:
     right_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
     right_camera_info_topic: /camera/camera/color/camera_info
     output_topic: /panorama/image_raw
+    validity_topic: /panorama/validity
+    range_topic: /panorama/range
     output_frame_id: panorama_optical_frame
+    publish_auxiliary_outputs: true
+    publisher_best_effort: false
 
     # Calibrated virtual-color optical frames -> panorama_optical_frame.
     # The displayed RealSense images are already rotated 180 degrees, so these
@@ -77,6 +81,9 @@ panorama_stitcher:
     # 0.11520 m baseline. Five degrees retains its outer columns while keeping
     # depth reprojection limited to the central band.
     depth_overlap_margin_deg: 5.0
+    # The RGB renderer remains smooth, but metric range/validity are built by
+    # deprojecting the complete aligned-depth images into the rig frame.
+    full_depth_reprojection: true
     use_cuda: true
 
     # Always put the cut inside the actual calibrated overlap. Color is kept
@@ -87,19 +94,19 @@ panorama_stitcher:
     # This preserves close moving objects as two clean camera halves instead
     # of ghosting or smearing them inside the overlap.
     seam_feather_px: 0
-    # Keep the color panorama in one cylindrical projection. A partial
-    # depth-reprojected center band introduces two extra hidden cut boundaries
-    # and can split objects (the transparent-bottle regression test). Metric
-    # RGB-D fusion is produced as a separate, fully depth-consistent output.
-    depth_aware_color: false
+    # Depth remains active for the content-aware ownership boundary and for
+    # /panorama/range, but RGB itself stays in the stable calibrated
+    # reference-plane projection. Full-frame depth-colored reprojection caused
+    # jagged board/table edges and is intentionally not rendered.
+    depth_aware_color: true
+    render_depth_reprojected_color: false
+    depth_color_overlap_only: true
     # Keep the proven four-stream timestamp queue for stable camera pairing
     # even though the color renderer does not consume depth geometrically.
     use_rgbd_synchronization: true
-    # Suppress frame-to-frame depth jitter without freezing real obstacles.
-    # Changes above 5 cm are accepted immediately; smaller sensor noise uses
-    # an EMA. When both cameras measure the same surface within 5 cm, camera
-    # selection is deterministic instead of alternating on noisy z values.
-    depth_temporal_stabilization: true
+    # Avoid stale silhouettes around moving obstacles. CUDA z-buffering and a
+    # coherent vertical seam provide stability without temporal depth lag.
+    depth_temporal_stabilization: false
     depth_temporal_alpha: 0.35
     depth_temporal_reset_m: 0.05
     depth_median_kernel: 3
@@ -108,6 +115,17 @@ panorama_stitcher:
     # nearest depth independently for every pixel fragments people and other
     # close objects when the two depth maps disagree at their silhouettes.
     prefer_seam_camera_when_both_depth_valid: true
+    # Evaluate color/depth disagreement over the full image, then choose one
+    # vertical ownership boundary for the whole frame. This avoids the
+    # per-row "wriggling" seam while allowing the cut to drift away from a
+    # persistently occupied overlap column.
+    content_aware_seam: true
+    seam_color_weight: 1.0
+    seam_depth_weight: 2.0
+    seam_foreground_weight: 0.35
+    seam_center_weight: 0.10
+    seam_temporal_weight: 2.0
+    seam_max_step_px: 6
 
     enable_exposure_compensation: true
     exposure_smoothing: 0.15
