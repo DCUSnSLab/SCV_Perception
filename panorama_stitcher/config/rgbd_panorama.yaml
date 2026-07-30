@@ -115,11 +115,11 @@ panorama_stitcher:
     # nearest depth independently for every pixel fragments people and other
     # close objects when the two depth maps disagree at their silhouettes.
     prefer_seam_camera_when_both_depth_valid: true
-    # Evaluate color/depth disagreement over the full image, then choose one
-    # vertical ownership boundary for the whole frame. This avoids the
-    # per-row "wriggling" seam while allowing the cut to drift away from a
-    # persistently occupied overlap column.
-    content_aware_seam: true
+    # Keep one calibration-derived ownership boundary for every frame.
+    # A content-aware boundary was visually smoother than a per-row seam, but
+    # depth/color noise still made the whole boundary wander across a static
+    # object and change its apparent width. A fixed seam is deterministic.
+    content_aware_seam: false
     seam_color_weight: 1.0
     seam_depth_weight: 2.0
     seam_foreground_weight: 0.35
