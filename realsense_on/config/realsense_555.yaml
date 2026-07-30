@@ -1,0 +1,16 @@
+/**:
+  ros__parameters:
+    enable_color: true
+    enable_depth: true
+    enable_gyro: true
+    enable_accel: true
+    unite_imu_method: 2
+    enable_sync: true
+    align_depth.enable: true
+    pointcloud.enable: true
+    pointcloud.ordered_pc: true
+    depth_module.depth_profile: "640x480x30"
+    rgb_camera.color_profile: "640x480x30"
+    depth_module.global_time_enabled: false
+    rgb_camera.global_time_enabled: false
+    motion_module.global_time_enabled: false
