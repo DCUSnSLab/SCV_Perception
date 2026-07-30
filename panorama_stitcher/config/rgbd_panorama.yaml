@@ -100,6 +100,11 @@ panorama_stitcher:
     depth_aware_color: true
     render_depth_reprojected_color: true
     depth_color_overlap_only: true
+    # A hard switch between depth-reprojected RGB and the reference-plane RGB
+    # must not run through the forward obstacle-detection area. Extend the
+    # depth-color band eight degrees beyond the binocular overlap on both
+    # sides, while still leaving the peripheral view on the stable 2D warp.
+    depth_color_band_margin_deg: 8.0
     # Keep the proven four-stream timestamp queue for stable camera pairing
     # even though the color renderer does not consume depth geometrically.
     use_rgbd_synchronization: true

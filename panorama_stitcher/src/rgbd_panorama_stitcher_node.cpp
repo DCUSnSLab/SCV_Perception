@@ -164,6 +164,8 @@ public:
       "render_depth_reprojected_color", true);
     depth_color_overlap_only_ = declare_parameter<bool>(
       "depth_color_overlap_only", false);
+    depth_color_band_margin_deg_ = declare_parameter<double>(
+      "depth_color_band_margin_deg", 0.0);
     use_rgbd_synchronization_ = declare_parameter<bool>(
       "use_rgbd_synchronization", true);
     depth_temporal_stabilization_ = declare_parameter<bool>(
@@ -450,6 +452,8 @@ private:
     min_depth_m_ = std::max(min_depth_m_, 0.01);
     max_depth_m_ = std::max(max_depth_m_, min_depth_m_);
     depth_overlap_margin_deg_ = std::max(depth_overlap_margin_deg_, 0.0);
+    depth_color_band_margin_deg_ = std::max(
+      depth_color_band_margin_deg_, 0.0);
     depth_discontinuity_abs_m_ = std::max(
       depth_discontinuity_abs_m_, 0.0);
     depth_discontinuity_relative_ = std::max(
@@ -716,13 +720,17 @@ private:
           virtual_fx_px_ * std::tan(angle) + virtual_cx_px_ :
           (angle - panorama_min_angle_) * panorama_focal_px_;
       };
+    const double depth_color_margin =
+      depth_color_band_margin_deg_ * kPi / 180.0;
     depth_color_min_x_ = std::clamp(
       static_cast<int>(std::ceil(
-        panorama_x_for_angle(overlap_min_angle_))),
+        panorama_x_for_angle(
+          overlap_min_angle_ - depth_color_margin))),
       0, panorama_width_ - 1);
     depth_color_max_x_ = std::clamp(
       static_cast<int>(std::floor(
-        panorama_x_for_angle(overlap_max_angle_))),
+        panorama_x_for_angle(
+          overlap_max_angle_ + depth_color_margin))),
       0, panorama_width_ - 1);
 
     build_inverse_map(
@@ -2002,6 +2010,7 @@ private:
   bool depth_aware_color_{true};
   bool render_depth_reprojected_color_{true};
   bool depth_color_overlap_only_{false};
+  double depth_color_band_margin_deg_{0.0};
   bool use_rgbd_synchronization_{true};
   bool depth_temporal_stabilization_{true};
   double depth_temporal_alpha_{0.35};
