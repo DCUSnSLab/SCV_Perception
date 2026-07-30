@@ -1,41 +1,50 @@
 schema_version: 1
 accepted: true
-created_local_time: '2026-07-29T15:57:09.039807+09:00'
+created_local_time: '2026-07-30T12:58:15.096004+09:00'
 method: unconstrained_metric_multiboard_bundle_adjustment
 convention: X_right_virtual_optical = R_right_from_left * X_left_virtual_optical + t_right_from_left_m
 inputs:
-  capture_root: /home/ssc/lidar_cam_calib/captures_yaw30_recal_20260729_2
-  capture_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  capture_root: /home/ssc/lidar_cam_calib/captures_recal_20260730_01
+  capture_indices: [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29,
+    30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+    40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+    50, 51, 52, 53, 54, 55, 56, 57, 58, 59
+  ]
   boards: [2, 5]
   square_length_m: 0.073
   marker_length_m: 0.056
   baseline_hint_m: 0.11
   baseline_hint_use: initialization_only
 quality:
-  primary_reprojection_rms_px: 0.5601701299303962
-  primary_reprojection_p95_px: 1.038776386137947
-  validation_reprojection_rms_px: 1.956573867159464
-  validation_reprojection_p95_px: 3.0113325612003985
-  validation_rotation_delta_deg: 0.18160392823289373
-  validation_translation_delta_m: 0.006004407841681177
-  primary_even_odd_rotation_delta_deg: 0.04649422636374184
-  primary_even_odd_translation_delta_m: 0.004093575856438189
+  primary_reprojection_rms_px: 0.424432506075852
+  primary_reprojection_p95_px: 0.7643952769371405
+  validation_reprojection_rms_px: 1.8315421617562795
+  validation_reprojection_p95_px: 2.695931649071958
+  validation_rotation_delta_deg: 0.04045843179068461
+  validation_translation_delta_m: 0.0034726061956232668
+  primary_even_odd_rotation_delta_deg: 0.020418060029802478
+  primary_even_odd_translation_delta_m: 0.0013830568144726448
+  validation_even_odd_rotation_delta_deg: 0.006694924178344109
+  validation_even_odd_translation_delta_m: 0.00014847058410417173
 result:
   R_right_from_left:
-    - [0.49964945638620556, -0.012675149397975396, -0.8661349556049036]
-    - [0.04250752714427419, 0.999047083975797, -0.009901218891418945]
-    - [0.8651841022979145, -0.041764393772638464, 0.499712121669823]
-  t_right_from_left_m: [-0.11041506392908218, -0.0026947907093596043, -0.032753410831279965]
-  estimated_color_lens_baseline_m: 0.11520214477392841
-  relative_rotation_angle_deg: 60.052627089438936
+    - [0.4924107985607596, -0.012661318395165565, -0.8702708178936321]
+    - [0.04061064169486108, 0.9991393851368948, -0.008441851064758083]
+    - [0.8694149649286506, -0.039499114987100514, 0.4925012067734953]
+  t_right_from_left_m: [-0.11337761904991431, 0.0023911480592850583, -0.023726674487061436]
+  estimated_color_lens_baseline_m: 0.1158583496027968
+  relative_rotation_angle_deg: 60.52618817976781
   left_yaw_deg: -30.0
-  right_yaw_deg: 29.9901743224445
-  right_pitch_deg: 2.3936196923094024
+  right_yaw_deg: 30.469562595090114
+  right_pitch_deg: 2.26372147920683
   R_right_virtual_optical_to_panorama_optical:
-    - [0.8657766000199907, 0.03186198891328858, 0.49941535070551707]
-    - [-0.012675149397975396, 0.999047083975797, -0.041764393772638464]
-    - [-0.5002701464664507, 0.0298284706605363, 0.8653554430940442]
-  baseline_left_to_right_in_panorama_optical_m: [0.11203819618832149, -0.0000752309783319167, -0.026813636375550502]
-  left_lens_center_in_panorama_optical_m: [-0.056019098094160745, 0.00003761548916595835, 0.013406818187775251]
-  right_lens_center_in_panorama_optical_m: [0.056019098094160745, -0.00003761548916595835, -0.013406818187775251]
+    - [0.8615756695982157, 0.030948921839358188, 0.5066848426718206]
+    - [-0.012661318395165565, 0.9991393851368948, -0.039499114987100514]
+    - [-0.5074712371877668, 0.02761617832447575, 0.8612260389246649]
+  baseline_left_to_right_in_panorama_optical_m: [0.10963134092559042, -0.00476178297922805, -0.03716788509452194]
+  left_lens_center_in_panorama_optical_m: [-0.05481567046279521, 0.002380891489614025, 0.01858394254726097]
+  right_lens_center_in_panorama_optical_m: [0.05481567046279521, -0.002380891489614025, -0.01858394254726097]
 rejection_reasons: []

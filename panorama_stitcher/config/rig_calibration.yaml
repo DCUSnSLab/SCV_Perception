@@ -21,11 +21,11 @@ charuco_rig_calibrator:
     camera_roi_max_x: 0.18
     roi_scale: 3.0
 
-    # The image_raw streams are physically upside-down on this rig while
-    # CameraInfo remains native. Rotate color and aligned depth together before
-    # detection, then map detections back to native CameraInfo pixels.
+    # realsense_multi already publishes the physically upside-down cameras
+    # upright while CameraInfo remains native. The virtual optical convention
+    # is still rotated 180 degrees, but do not rotate live pixels a second time.
     input_images_rotated_180: true
-    rotate_live_streams_180: true
+    rotate_live_streams_180: false
     depth_scale_m: 0.001
     max_color_depth_delta_ms: 80.0
 

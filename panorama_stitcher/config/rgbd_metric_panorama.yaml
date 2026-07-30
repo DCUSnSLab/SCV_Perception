@@ -18,10 +18,10 @@ metric_panorama_stitcher:
     # Calibrated virtual-color optical frames -> panorama_optical_frame.
     # The displayed RealSense images are already rotated 180 degrees, so these
     # matrices intentionally describe those rotated optical frames.
-    # 2026-07-29 external recalibration after the final mechanical setting:
-    # optical-axis yaw is -30.00 deg (front/front) and +29.99 deg
-    # (camera/camera); right pitch is +2.39 deg. A metric Board 2 + Board 5
-    # bundle adjustment estimates the color-lens baseline as 0.11520 m; the
+    # 2026-07-30 external recalibration after the camera was moved:
+    # optical-axis yaw is -30.00 deg (front/front) and +30.47 deg
+    # (camera/camera); right pitch is +2.26 deg. A metric Board 2 + Board 5
+    # bundle adjustment estimates the color-lens baseline as 0.11586 m; the
     # approximately 11 cm ruler measurement is validation-only, not imposed.
     left_rotation_camera_to_rig: [
       0.8660254037844387, 0.0, -0.49999999999999994,
@@ -29,15 +29,15 @@ metric_panorama_stitcher:
       0.49999999999999994, 0.0, 0.8660254037844387
     ]
     left_translation_camera_in_rig_m: [
-      -0.056019098094160745, 0.00003761548916595835, 0.013406818187775251
+      -0.05481567046279521, 0.002380891489614025, 0.01858394254726097
     ]
     right_rotation_camera_to_rig: [
-      0.8657766000199907, 0.03186198891328858, 0.49941535070551707,
-      -0.012675149397975396, 0.999047083975797, -0.041764393772638464,
-      -0.5002701464664507, 0.0298284706605363, 0.8653554430940442
+      0.8615756695982157, 0.030948921839358188, 0.5066848426718206,
+      -0.012661318395165565, 0.9991393851368948, -0.039499114987100514,
+      -0.5074712371877668, 0.02761617832447575, 0.8612260389246649
     ]
     right_translation_camera_in_rig_m: [
-      0.056019098094160745, -0.00003761548916595835, -0.013406818187775251
+      0.05481567046279521, -0.002380891489614025, -0.01858394254726097
     ]
 
     # realsense_multi rotates the front color/depth streams by 180 degrees.
