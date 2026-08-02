@@ -370,6 +370,19 @@ class CurbDetectionNode(Node):
         self.declare_parameter('wall_intensity', 250.0)
         self.declare_parameter('merge_original', True)    # republish raw + curbs
 
+        # 연석 벽 기억 (odom 프레임 persistence).
+        # 라이다 최소거리(~0.5 m)와 차체 자체 가림 때문에 로봇 '바로 옆'의
+        # 연석은 현재 스캔에 안 잡힌다 — 접근하는 순간 벽이 사라져 costmap 이
+        # 비고, 근접 기동(K-turn 후진·급선회)이 연석 모서리를 밟는다(2026-08-02
+        # 챔버 D1 좌초 실측). 몇 초 전 그 자리에서 검출된 벽을 odom 기준으로
+        # 유지해 사각을 과거 관측으로 메운다. odom 을 쓰는 이유: map 은 앵커
+        # 스냅으로 점프하지만 odom 은 연속이라 수 초 스케일에서 강체다.
+        self.declare_parameter('curb_memory', True)
+        self.declare_parameter('curb_memory_ttl', 15.0)     # s, 이보다 오래되면 잊음
+        self.declare_parameter('curb_memory_radius', 8.0)   # m, 로봇에서 이보다 멀면 잊음
+        self.declare_parameter('curb_memory_cell', 0.15)    # m, 중복 제거 격자
+        self.declare_parameter('odom_frame', 'odom')
+
         gp = self.get_parameter
         self.method = str(gp('method').value)
         self.grid_cell = float(gp('grid_cell').value)
@@ -402,6 +415,19 @@ class CurbDetectionNode(Node):
         self.wall_intensity = float(gp('wall_intensity').value)
         self.merge_original = bool(gp('merge_original').value)
 
+        self.mem_enabled = bool(gp('curb_memory').value)
+        self.mem_ttl = float(gp('curb_memory_ttl').value)
+        self.mem_radius = float(gp('curb_memory_radius').value)
+        self.mem_cell = float(gp('curb_memory_cell').value)
+        self.odom_frame = str(gp('odom_frame').value)
+        # {(gx,gy): (x_o, y_o, z_o, stamp_s)} — 연석 벽 '밑점'을 odom 프레임으로
+        self.mem: dict = {}
+        self.tf_buffer = None
+        if self.mem_enabled:
+            import tf2_ros
+            self.tf_buffer = tf2_ros.Buffer()
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
         qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
                          history=HistoryPolicy.KEEP_LAST, depth=1)
         self.sub_ = self.create_subscription(PointCloud2, self.in_topic,
@@ -413,6 +439,61 @@ class CurbDetectionNode(Node):
         self.get_logger().info(
             f"Curb detection ready: {self.in_topic} -> {self.out_topic} "
             f"(curb {self.curb_min:.2f}-{self.curb_max:.2f} m, bins={self.num_bins})")
+
+    @staticmethod
+    def _quat_to_R(qx, qy, qz, qw):
+        return np.array([
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+        ], dtype=np.float64)
+
+    def _memory_bases(self, msg, ex, ey, eb):
+        """현재 검출 밑점을 odom 기억에 넣고, (기억 전체)를 센서 프레임
+        밑점으로 되돌려 준다. TF 실패 시 현재 검출만 반환한다(종전 동작)."""
+        import rclpy.time
+        try:
+            tr = self.tf_buffer.lookup_transform(
+                self.odom_frame, msg.header.frame_id, rclpy.time.Time())
+        except Exception:
+            self.get_logger().warn(
+                'curb memory: TF 미가용 — 현재 스캔만 사용',
+                throttle_duration_sec=5.0)
+            return ex, ey, eb
+        q = tr.transform.rotation
+        t = tr.transform.translation
+        R = self._quat_to_R(q.x, q.y, q.z, q.w)
+        tv = np.array([t.x, t.y, t.z], dtype=np.float64)
+        now_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+        # 1) 현재 검출 → odom, 격자 중복 제거하며 기억 (최신 관측이 이김)
+        if ex.shape[0]:
+            p = np.column_stack((ex, ey, eb)).astype(np.float64) @ R.T + tv
+            gx = np.floor(p[:, 0] / self.mem_cell).astype(np.int64)
+            gy = np.floor(p[:, 1] / self.mem_cell).astype(np.int64)
+            for i in range(p.shape[0]):
+                self.mem[(gx[i], gy[i])] = (p[i, 0], p[i, 1], p[i, 2], now_s)
+
+        # 2) 만료: 오래됐거나 로봇에서 먼 항목. 로봇 위치 ≈ 센서 원점 tv.
+        if self.mem:
+            drop = []
+            r2 = self.mem_radius * self.mem_radius
+            for k, (mx, my, _, ts) in self.mem.items():
+                if now_s - ts > self.mem_ttl or \
+                        (mx - tv[0]) ** 2 + (my - tv[1]) ** 2 > r2:
+                    drop.append(k)
+            for k in drop:
+                del self.mem[k]
+
+        if not self.mem:
+            return ex, ey, eb
+
+        # 3) 기억 전체 → 센서 프레임 (현재 검출은 1에서 이미 포함됨)
+        arr = np.array([(v[0], v[1], v[2]) for v in self.mem.values()],
+                       dtype=np.float64)
+        s = (arr - tv) @ R
+        return (s[:, 0].astype(np.float32), s[:, 1].astype(np.float32),
+                s[:, 2].astype(np.float32))
 
     def _publish_passthrough(self, xyz, msg):
         """Fail-safe: forward the original cloud unmodified so positive
@@ -484,7 +565,13 @@ class CurbDetectionNode(Node):
                 self.curb_min, self.curb_max,
                 self.max_step_dr, self.min_dr, self.max_gap)
 
-        walls = build_curb_walls(ex, ey, eb, self.wall_offsets, self.wall_intensity)
+        # 연석 벽 기억: 현재 검출을 odom 기억에 합치고, 기억 전체(현재+과거)로
+        # 벽을 세운다. 근접 사각에서 현재 스캔이 비어도 과거 관측이 벽을 유지.
+        if self.mem_enabled and self.tf_buffer is not None:
+            wx, wy, wb = self._memory_bases(msg, ex, ey, eb)
+        else:
+            wx, wy, wb = ex, ey, eb
+        walls = build_curb_walls(wx, wy, wb, self.wall_offsets, self.wall_intensity)
 
         # debug cloud: curb walls only
         self.curb_pub_.publish(
@@ -505,7 +592,7 @@ class CurbDetectionNode(Node):
         if self._logged <= 3 or self._logged % 50 == 0:
             dt = (time.perf_counter() - t0) * 1000.0
             self.get_logger().info(
-                f"curb edges={ex.shape[0]} wall_pts={walls.shape[0]} "
+                f"curb edges={ex.shape[0]} mem={len(self.mem)} wall_pts={walls.shape[0]} "
                 f"in={xyz.shape[0]} took={dt:.1f}ms")
 
 
