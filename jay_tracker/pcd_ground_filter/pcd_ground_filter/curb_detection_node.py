@@ -252,6 +252,50 @@ def below_grade_detect(x, y, z, half_size, cell,
     return ex[:k], ey[:k]
 
 
+def shadow_edge_cells(x, y, z, plane_a, plane_c, z_band, drop_min,
+                      max_mark_range, num_bins=720, min_gap=0.45, max_gap_w=2.5):
+    """연석 '그늘' 경계 마킹 — 낙차 직전 마지막 보도 반환점에 벽을 세운다.
+
+    below_grade 는 도로가 **보이는** 곳만 마킹한다. 그런데 연석면이 낮은
+    빔을 가려 도로의 첫 ~1.3 m 는 무데이터 그늘이고, 물리 연석선은 그
+    그늘의 '이쪽' 끝에 있다 — 즉 마킹된 도로 경계는 물리 낙차보다 1 m 이상
+    바깥이다(2026-08-02 챔버 실측: 연석 0.75 m 옆에서 costmap 벽은 2.1 m).
+    그 사이 띠를 모두가 자유공간으로 취급해 근접 기동이 모서리를 밟았다.
+
+    방식: 방위각 빈마다 반환을 거리순으로 훑어, [보도면 높이] → (min_gap
+    이상의 간격) → [도로 높이] 전이가 확인되면 간격 **직전의 보도 반환점**을
+    마킹한다. 레이 단위 논리라 격자 연결성 기반 팽창처럼 데이터 구멍으로
+    새지 않는다(격자판은 보도 위 유령 벽을 만들었다 — 단위검증 실측).
+    보행자·기둥 가림은 지면이 같은 높이로 이어지므로 전이가 성립하지 않고,
+    도로 확인 없는 간격(순수 무데이터)은 마킹하지 않는다."""
+    zrel = z - (plane_a * x + plane_c)
+    r = np.sqrt(x * x + y * y)
+    keep = r <= max_mark_range
+    is_plane = keep & (np.abs(zrel) <= drop_min)
+    is_road = keep & (zrel <= -drop_min) & (zrel >= -z_band)
+    sel = is_plane | is_road
+    if not sel.any():
+        return (np.empty(0, np.float32), np.empty(0, np.float32))
+    xs, ys, rs = x[sel], y[sel], r[sel]
+    road_f = is_road[sel]
+    theta = np.arctan2(ys, xs)
+    b = np.clip(((theta + math.pi) / (2.0 * math.pi) * num_bins).astype(np.int64),
+                0, num_bins - 1)
+    order = np.lexsort((rs, b))
+    bs, rss = b[order], rs[order]
+    rf = road_f[order]
+    same = bs[1:] == bs[:-1]
+    dgap = rss[1:] - rss[:-1]
+    # 간격 상한: 진짜 연석 그늘은 연석 높이×기하로 폭이 유한하다(~1.3 m).
+    # 상한 없이 두면 희소 샘플 구간의 과대 간격이 보도 안쪽에 유령 마크를
+    # 남긴다(단위검증 실측: 경계에서 0.6 m 안쪽까지). 상한을 넘는 간격은
+    # '관측 공백'이지 낙차 증거가 아니다.
+    gap = (dgap >= min_gap) & (dgap <= max_gap_w)
+    hit = same & gap & (~rf[:-1]) & rf[1:]     # 보도 → (간격) → 도로
+    src = order[:-1][hit]
+    return xs[src].astype(np.float32), ys[src].astype(np.float32)
+
+
 def fit_ahead_plane(x, y, z, c_min=-2.0, c_max=-0.3):
     """Fit z = a*x + c on the narrow strip the robot is driving on.
 
@@ -378,6 +422,7 @@ class CurbDetectionNode(Node):
         # 유지해 사각을 과거 관측으로 메운다. odom 을 쓰는 이유: map 은 앵커
         # 스냅으로 점프하지만 odom 은 연속이라 수 초 스케일에서 강체다.
         self.declare_parameter('curb_memory', True)
+        self.declare_parameter('shadow_edge', True)   # 그늘 경계(물리 연석선) 벽
         self.declare_parameter('curb_memory_ttl', 15.0)     # s, 이보다 오래되면 잊음
         self.declare_parameter('curb_memory_radius', 8.0)   # m, 로봇에서 이보다 멀면 잊음
         self.declare_parameter('curb_memory_cell', 0.15)    # m, 중복 제거 격자
@@ -416,6 +461,7 @@ class CurbDetectionNode(Node):
         self.merge_original = bool(gp('merge_original').value)
 
         self.mem_enabled = bool(gp('curb_memory').value)
+        self.shadow_edge = bool(gp('shadow_edge').value)
         self.mem_ttl = float(gp('curb_memory_ttl').value)
         self.mem_radius = float(gp('curb_memory_radius').value)
         self.mem_cell = float(gp('curb_memory_cell').value)
@@ -546,6 +592,17 @@ class CurbDetectionNode(Node):
                 np.float32(self.drop_min),
                 np.float32(self.raise_min), np.float32(self.raise_max),
                 self.grid_min_pts, np.float32(self.max_mark_range))
+            # 그늘 경계 벽: 물리 연석선(마지막 관측 보도 셀)에도 벽을 세운다.
+            # below_grade 의 도로 경계는 연석면 가림 때문에 물리 낙차보다
+            # ~1 m 바깥이라, 이게 없으면 근접 기동이 모서리를 밟는다.
+            if self.shadow_edge:
+                sx, sy = shadow_edge_cells(
+                    xf, yf, zf,
+                    self.plane_a, self.plane_c, self.plane_z_band,
+                    self.drop_min, self.max_mark_range)
+                if sx.shape[0]:
+                    ex = np.concatenate((ex, sx))
+                    ey = np.concatenate((ey, sy))
             # anchor walls on the SIDEWALK plane (not the lower road ground)
             # so they stay inside the costmap's odom-frame [0.15, 2.0] band
             eb = self.plane_a * ex + self.plane_c
