@@ -21,6 +21,7 @@ lethal obstacle -- no C++ change required.
 Only geometry is used, so it works at night (unlike the camera).
 """
 
+import array
 import math
 import time
 
@@ -348,7 +349,17 @@ def xyzi_to_pointcloud2(pts, frame_id, stamp):
     m.point_step = 16
     m.row_step = m.point_step * m.width
     m.is_dense = True
-    m.data = pts.tobytes()
+    # 주의 1: `m.data = bytes` 는 rclpy 생성 setter 의 __debug__ 검증 루프가
+    # 350만 원소를 파이썬으로 훑어 56k 점 기준 72 ms 를 먹는다(실측 — 노드
+    # 92 ms 의 대부분). 주의 2: numpy uint8 뷰를 _data 에 직접 넣는 우회는
+    # serialize_message(파이썬 경로)는 통과하지만 **실제 발행의 rmw C 변환이
+    # 시퀀스 헤더를 잘못 써서 구독측 역직렬화가 "sequence size exceeds
+    # buffer" 로 죽는다**(실측). 그래서 setter 가 만들었을 것과 동일한
+    # 타입(array.array('B'))을 memcpy 로 직접 만든다 — 검증 루프만 생략,
+    # 와이어 포맷 완전 동일.
+    buf = array.array('B')
+    buf.frombytes(pts.tobytes())
+    m._data = buf
     return m
 
 
