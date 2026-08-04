@@ -20,12 +20,12 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'image_topic',
-            default_value='/camera/camera/color/image_raw',
+            default_value='/front_right/front_right/color/image_raw',
             description='컬러 이미지 토픽'
         ),
         DeclareLaunchArgument(
             'depth_topic',
-            default_value='/camera/camera/aligned_depth_to_color/image_raw',
+            default_value='/front_right/front_right/aligned_depth_to_color/image_raw',
             description='뎁스 이미지 토픽'
         ),
         DeclareLaunchArgument(

@@ -1,11 +1,11 @@
 metric_panorama_stitcher:
   ros__parameters:
-    left_color_topic: /front/front/color/image_raw
-    left_depth_topic: /front/front/aligned_depth_to_color/image_raw
-    left_camera_info_topic: /front/front/color/camera_info
-    right_color_topic: /camera/camera/color/image_raw
-    right_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
-    right_camera_info_topic: /camera/camera/color/camera_info
+    left_color_topic: /front_left/front_left/color/image_raw
+    left_depth_topic: /front_left/front_left/aligned_depth_to_color/image_raw
+    left_camera_info_topic: /front_left/front_left/color/camera_info
+    right_color_topic: /front_right/front_right/color/image_raw
+    right_depth_topic: /front_right/front_right/aligned_depth_to_color/image_raw
+    right_camera_info_topic: /front_right/front_right/color/camera_info
     output_topic: /panorama/metric/image_raw
     validity_topic: /panorama/metric/validity
     range_topic: /panorama/metric/range

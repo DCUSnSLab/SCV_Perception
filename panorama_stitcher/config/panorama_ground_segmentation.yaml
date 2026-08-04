@@ -1,0 +1,35 @@
+panorama_ground_segmentation:
+  ros__parameters:
+    input_topic: /panorama/points
+    obstacle_topic: /panorama/obstacle_points
+    ground_topic: /panorama/ground_points
+    publish_ground_cloud: true
+
+    # panorama_optical_frame follows the optical convention:
+    # +X right, +Y down, +Z forward. Therefore physical up is -Y.
+    expected_up_vector: [0.0, -1.0, 0.0]
+    max_ground_tilt_deg: 25.0
+
+    # Fit only plausible road points and reject vertical walls by normal.
+    ransac_iterations: 160
+    max_ransac_points: 30000
+    ransac_distance_threshold_m: 0.05
+    min_ground_inliers: 300
+    min_ground_inlier_ratio: 0.03
+    ground_candidate_min_range_m: 0.4
+    ground_candidate_max_range_m: 8.0
+    ground_candidate_min_down_m: 0.15
+    ground_candidate_max_down_m: 2.5
+    min_plane_distance_from_origin_m: 0.15
+    max_plane_distance_from_origin_m: 2.5
+
+    # Only points clearly above the fitted ground enter the costmap.
+    obstacle_min_height_m: 0.10
+    obstacle_max_height_m: 2.0
+    obstacle_min_range_m: 0.25
+    obstacle_max_range_m: 8.0
+    # The costmap resolution is 5 cm; one point per 5 cm 3D voxel preserves
+    # usable geometry without publishing redundant depth pixels.
+    obstacle_voxel_size_m: 0.05
+    diagnostics_period_sec: 2.0
+    random_seed: 42

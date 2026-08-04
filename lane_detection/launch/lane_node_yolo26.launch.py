@@ -10,9 +10,15 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('model_path', default_value=default_model_path),
-        DeclareLaunchArgument('image_topic', default_value='/camera/camera/color/image_raw'),
-        DeclareLaunchArgument('depth_topic', default_value='/camera/camera/aligned_depth_to_color/image_raw'),
-        DeclareLaunchArgument('camera_info_topic', default_value='/camera/camera/color/camera_info'),
+        DeclareLaunchArgument(
+            'image_topic',
+            default_value='/front_right/front_right/color/image_raw'),
+        DeclareLaunchArgument(
+            'depth_topic',
+            default_value='/front_right/front_right/aligned_depth_to_color/image_raw'),
+        DeclareLaunchArgument(
+            'camera_info_topic',
+            default_value='/front_right/front_right/color/camera_info'),
         DeclareLaunchArgument('conf', default_value='0.0007'),
         DeclareLaunchArgument('imgsz', default_value='640'),
         DeclareLaunchArgument('max_det', default_value='64'),
@@ -21,7 +27,7 @@ def generate_launch_description():
         DeclareLaunchArgument('min_height_ratio', default_value='0.08'),
         DeclareLaunchArgument('max_lane_instances', default_value='8'),
         DeclareLaunchArgument('bottom_region_ratio', default_value='0.2'),
-        DeclareLaunchArgument('lane_outward_offset', default_value='0.2'),
+        DeclareLaunchArgument('lane_outward_offset', default_value='0.5'),
         DeclareLaunchArgument('depth_scale', default_value='0.001'),
         DeclareLaunchArgument('manual_roll_deg', default_value='0.2'),
         DeclareLaunchArgument('manual_pitch_deg', default_value='0.0'),

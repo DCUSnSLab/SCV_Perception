@@ -21,7 +21,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'topic',
-            default_value='/camera/camera/color/image_raw',
+            default_value='/front_right/front_right/color/image_raw',
             description='카메라 토픽 이름'
         ),
         DeclareLaunchArgument(

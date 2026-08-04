@@ -1,11 +1,11 @@
 charuco_rig_calibrator:
   ros__parameters:
-    front_color_topic: /front/front/color/image_raw
-    front_depth_topic: /front/front/aligned_depth_to_color/image_raw
-    front_camera_info_topic: /front/front/color/camera_info
-    camera_color_topic: /camera/camera/color/image_raw
-    camera_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
-    camera_camera_info_topic: /camera/camera/color/camera_info
+    front_color_topic: /front_left/front_left/color/image_raw
+    front_depth_topic: /front_left/front_left/aligned_depth_to_color/image_raw
+    front_camera_info_topic: /front_left/front_left/color/camera_info
+    camera_color_topic: /front_right/front_right/color/image_raw
+    camera_depth_topic: /front_right/front_right/aligned_depth_to_color/image_raw
+    camera_camera_info_topic: /front_right/front_right/color/camera_info
 
     # The central 7x5 ChArUco board is board 5 (IDs 500-516). Each outward-
     # looking camera may see a different half. The marker IDs do not have to

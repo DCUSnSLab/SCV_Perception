@@ -10,9 +10,15 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument('weights_path', default_value=default_weights),
-        DeclareLaunchArgument('image_topic', default_value='/camera/camera/color/image_raw'),
-        DeclareLaunchArgument('depth_topic', default_value='/camera/camera/aligned_depth_to_color/image_raw'),
-        DeclareLaunchArgument('camera_info_topic', default_value='/camera/camera/color/camera_info'),
+        DeclareLaunchArgument(
+            'image_topic',
+            default_value='/front_right/front_right/color/image_raw'),
+        DeclareLaunchArgument(
+            'depth_topic',
+            default_value='/front_right/front_right/aligned_depth_to_color/image_raw'),
+        DeclareLaunchArgument(
+            'camera_info_topic',
+            default_value='/front_right/front_right/color/camera_info'),
         DeclareLaunchArgument('img_size', default_value='640'),
         DeclareLaunchArgument('device', default_value='cuda:0'),
         DeclareLaunchArgument('depth_scale', default_value='0.001'),

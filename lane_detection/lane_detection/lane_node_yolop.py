@@ -25,9 +25,14 @@ class YoloPLaneDetectionNode(Node):
 
         default_weights = os.path.expanduser('~/epoch-155_old.pth')
         self.declare_parameter('weights_path', default_weights)
-        self.declare_parameter('image_topic', '/camera/camera/color/image_raw')
-        self.declare_parameter('depth_topic', '/camera/camera/aligned_depth_to_color/image_raw')
-        self.declare_parameter('camera_info_topic', '/camera/camera/color/camera_info')
+        self.declare_parameter(
+            'image_topic', '/front_right/front_right/color/image_raw')
+        self.declare_parameter(
+            'depth_topic',
+            '/front_right/front_right/aligned_depth_to_color/image_raw')
+        self.declare_parameter(
+            'camera_info_topic',
+            '/front_right/front_right/color/camera_info')
         self.declare_parameter('img_size', 640)
         self.declare_parameter('device', 'cuda:0')
         self.declare_parameter('depth_min', 0.1)

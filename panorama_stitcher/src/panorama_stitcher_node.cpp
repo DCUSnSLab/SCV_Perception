@@ -31,9 +31,9 @@ public:
     last_diagnostics_time_(std::chrono::steady_clock::now())
   {
     left_topic_ = declare_parameter<std::string>(
-      "left_topic", "/front/front/color/image_raw");
+      "left_topic", "/front_left/front_left/color/image_raw");
     right_topic_ = declare_parameter<std::string>(
-      "right_topic", "/camera/camera/color/image_raw");
+      "right_topic", "/front_right/front_right/color/image_raw");
     output_topic_ = declare_parameter<std::string>(
       "output_topic", "/panorama/image_raw");
     output_frame_id_ = declare_parameter<std::string>(

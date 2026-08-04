@@ -1,14 +1,14 @@
 # SSC Real-time Panorama Stitcher
 
-`front`와 `camera` D435if 컬러 영상을 실시간 합성해
+`front_left`와 `front_right` D435if 컬러 영상을 실시간 합성해
 `/panorama/image_raw`로 발행합니다.
 
 주행용 전방 RGB-D 융합은 `front_rgbd_fusion.launch.py`를 사용합니다.
 확정된 카메라 역할은 다음과 같습니다.
 
-- 전방 왼쪽: `/front/front` (serial `239122073045`)
-- 전방 오른쪽: `/camera/camera` (serial `239122071306`)
-- 후방 단일: `/cam3/cam3` (serial `239722073611`, 이 패키지 입력 아님)
+- 전방 왼쪽: `/front_left/front_left` (serial `239122073045`)
+- 전방 오른쪽: `/front_right/front_right` (serial `239122071306`)
+- 후방 단일: `/rear/rear` (serial `239722073611`, 독립 RANSAC 입력)
 
 ```bash
 ros2 launch panorama_stitcher front_rgbd_fusion.launch.py
@@ -67,12 +67,59 @@ RTX 4060(`sm_89`)용 CUDA backend를 자동으로 함께 빌드합니다.
 ros2 launch bring_up realsense_panorama.launch.py
 ```
 
+안정성 기본 프로필은 파노라마를 최대 20 Hz로 처리하고, 주행에 사용하지
+않는 대용량 `/panorama/range`·`/panorama/validity` 발행을 끄며,
+`/panorama/points`는 6픽셀 간격으로 생성합니다. 필요할 때만 다음처럼
+진단 출력을 켭니다.
+
+```bash
+ros2 launch bring_up realsense_panorama.launch.py \
+  publish_auxiliary_outputs:=true
+```
+
+GPU/드라이버 문제를 분리하는 시험에서는 동일한 캘리브레이션을 유지한 채
+CUDA만 끌 수 있습니다.
+
+```bash
+ros2 launch bring_up realsense_panorama.launch.py use_cuda:=false
+```
+
 발행 토픽:
 
 - `/panorama/image_raw`: 중첩 구간 RGB-D 3D 재투영 원통 파노라마 (`bgr8`)
 - `/panorama/range`: 양쪽 전체 깊이를 rig 중심으로 3D 재투영한 거리
   (`32FC1`, m)
 - `/panorama/validity`: 거리 영상의 유효 픽셀 마스크 (`mono8`)
+- `/panorama/points`: 같은 프레임의 컬러·거리로 복원한
+  `PointCloud2` (`x`, `y`, `z`, `rgb`)
+- `/panorama/ground_points`: RANSAC 지면 평면 inlier 확인용 점군
+- `/panorama/obstacle_points`: 추정 지면보다 높은 코스트맵 입력 점군
+- `/rear/ground_points`: 후방 단일 카메라 RANSAC 지면 확인용 점군
+- `/rear/obstacle_points`: 후방 추정 지면보다 높은 코스트맵 입력 점군
+
+`realsense_panorama.launch.py`는 파노라마 노드와 함께
+전방·후방 `panorama_ground_segmentation_node` 인스턴스 및
+`velodyne -> front_camera_rig -> panorama_optical_frame` 정적 TF를
+실행합니다. 후방은 RealSense의 `/rear/rear/depth/color/points`를
+직접 처리하므로 전방 파노라마 합성과 독립적으로 30 Hz 입력을 받습니다.
+파노라마 점군은 range 영상을 다시 동기화하지 않고
+파노라마 노드 내부의 동일한 투영 파라미터와 타임스탬프로 생성합니다.
+
+지면 분리 기본값은 광학 좌표계의 위쪽 `-Y`, 최대 지면 경사 `25°`,
+RANSAC 거리 문턱 `5 cm`입니다. 평면보다 `10 cm` 이상, `2.0 m` 이하
+높은 점만 `/panorama/obstacle_points`에 남깁니다. 현장 조정값은
+`config/panorama_ground_segmentation.yaml`과
+`config/rear_ground_segmentation.yaml`에 있습니다.
+후방 장애물은 코스트맵 해상도와 같은 `5 cm` voxel마다 한 점만 발행해
+전송 지연을 줄이며, 지면 확인용 점군은 RViz 구독자가 있을 때만 만듭니다.
+
+로컬 코스트맵은 기존 `/velodyne_points`를 계속 사용하면서
+`/panorama/obstacle_points`와 `/rear/obstacle_points`를 추가 장애물
+입력으로 합칩니다.
+
+```bash
+ros2 launch bring_up costmap_localization.launch.py
+```
 
 실제 양안 중첩 구간(`x=1463..1649`)의 RGB는 aligned depth를 3D로
 역투영한 뒤 rig 중심 원통면에 다시 투영합니다. 그 밖의 영역은
@@ -148,8 +195,8 @@ ros2 run image_view image_view \
 ```bash
 ros2 bag play /home/ssc/20260728/sensor_20260728_180417 \
   --remap \
-  /front/front/color/image_raw:=/bag/front/color/image_raw \
-  /camera/camera/color/image_raw:=/bag/camera/color/image_raw
+  /front_left/front_left/color/image_raw:=/bag/front_left/color/image_raw \
+  /front_right/front_right/color/image_raw:=/bag/front_right/color/image_raw
 ```
 
 ```bash

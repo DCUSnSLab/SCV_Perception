@@ -1,7 +1,7 @@
 panorama_stitcher:
   ros__parameters:
-    left_topic: /front/front/color/image_raw
-    right_topic: /camera/camera/color/image_raw
+    left_topic: /front_left/front_left/color/image_raw
+    right_topic: /front_right/front_right/color/image_raw
     output_topic: /panorama/image_raw
     output_frame_id: panorama_optical_frame
 

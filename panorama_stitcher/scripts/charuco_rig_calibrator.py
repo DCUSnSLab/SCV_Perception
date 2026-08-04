@@ -277,16 +277,16 @@ class CharucoRigCalibrator(Node):
 
     def _declare_parameters(self) -> None:
         defaults = {
-            "front_color_topic": "/front/front/color/image_raw",
+            "front_color_topic": "/front_left/front_left/color/image_raw",
             "front_depth_topic": (
-                "/front/front/aligned_depth_to_color/image_raw"
+                "/front_left/front_left/aligned_depth_to_color/image_raw"
             ),
-            "front_camera_info_topic": "/front/front/color/camera_info",
-            "camera_color_topic": "/camera/camera/color/image_raw",
+            "front_camera_info_topic": "/front_left/front_left/color/camera_info",
+            "camera_color_topic": "/front_right/front_right/color/image_raw",
             "camera_depth_topic": (
-                "/camera/camera/aligned_depth_to_color/image_raw"
+                "/front_right/front_right/aligned_depth_to_color/image_raw"
             ),
-            "camera_camera_info_topic": "/camera/camera/color/camera_info",
+            "camera_camera_info_topic": "/front_right/front_right/color/camera_info",
             "board_params_file": "/home/ssc/lidar_cam_calib/board_params.yaml",
             "board_index": 0,
             "capture_duration_sec": 20.0,

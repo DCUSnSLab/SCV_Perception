@@ -1,0 +1,30 @@
+lane_bev_cloud_node:
+  ros__parameters:
+
+    # 토픽
+    mask_topic:        /lane_detection/lane_mask
+    camera_info_topic: /ardu_cam_link/camera_info
+    cloud_topic:       /lane_detection/bev_cloud
+    bev_image_topic:   /lane_detection/bev_image   # 디버그용 BEV 이미지
+
+    # 카메라 외부 파라미터 (extrinsics)
+    # pitch_deg: 양수 = 아래를 향함
+    camera_height_m:    0.9
+    pitch_deg:          20.0
+    roll_deg:           0.0
+    yaw_deg:            0.0
+    camera_x_offset_m:  0.0   # base_link 기준 전방 오프셋 [m]
+    camera_y_offset_m:  0.0   # base_link 기준 횡방향 오프셋 [m]
+
+    # BEV 커버 범위
+    forward_m:          15.0
+    backward_m:          2.0
+    left_m:              4.0
+    right_m:             4.0
+    meters_per_pixel:    0.03  # 3cm/pixel → PointCloud 샘플링 간격
+
+    # 횡방향 스케일 (1.0 = 원본, >1.0 = 바깥쪽으로 확장)
+    lateral_scale: 1.4
+
+    # 출력 프레임
+    output_frame: base_link

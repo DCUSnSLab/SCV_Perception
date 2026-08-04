@@ -72,17 +72,17 @@ public:
     last_diagnostics_time_(std::chrono::steady_clock::now())
   {
     left_color_topic_ = declare_parameter<std::string>(
-      "left_color_topic", "/front/front/color/image_raw");
+      "left_color_topic", "/front_left/front_left/color/image_raw");
     left_depth_topic_ = declare_parameter<std::string>(
-      "left_depth_topic", "/front/front/aligned_depth_to_color/image_raw");
+      "left_depth_topic", "/front_left/front_left/aligned_depth_to_color/image_raw");
     left_info_topic_ = declare_parameter<std::string>(
-      "left_camera_info_topic", "/front/front/color/camera_info");
+      "left_camera_info_topic", "/front_left/front_left/color/camera_info");
     right_color_topic_ = declare_parameter<std::string>(
-      "right_color_topic", "/camera/camera/color/image_raw");
+      "right_color_topic", "/front_right/front_right/color/image_raw");
     right_depth_topic_ = declare_parameter<std::string>(
-      "right_depth_topic", "/camera/camera/aligned_depth_to_color/image_raw");
+      "right_depth_topic", "/front_right/front_right/aligned_depth_to_color/image_raw");
     right_info_topic_ = declare_parameter<std::string>(
-      "right_camera_info_topic", "/camera/camera/color/camera_info");
+      "right_camera_info_topic", "/front_right/front_right/color/camera_info");
 
     color_output_topic_ = declare_parameter<std::string>(
       "color_output_topic", "/parking/front/color_mosaic");

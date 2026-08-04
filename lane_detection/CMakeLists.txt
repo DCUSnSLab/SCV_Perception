@@ -35,6 +35,18 @@ install(PROGRAMS
 )
 
 install(PROGRAMS
+  lane_detection/lane_node_yolo26_overlay.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME lane_node_yolo26_overlay
+)
+
+install(PROGRAMS
+  lane_detection/lane_bev_cloud_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME lane_bev_cloud_node
+)
+
+install(PROGRAMS
   lane_detection/bag_to_images.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME bag_to_images
@@ -43,6 +55,12 @@ install(PROGRAMS
 # Install launch files
 install(DIRECTORY
   launch
+  DESTINATION share/${PROJECT_NAME}/
+)
+
+# Install config files
+install(DIRECTORY
+  config
   DESTINATION share/${PROJECT_NAME}/
 )
 

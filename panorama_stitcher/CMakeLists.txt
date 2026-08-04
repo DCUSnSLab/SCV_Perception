@@ -42,6 +42,14 @@ add_executable(rgbd_panorama_stitcher_node
   src/rgbd_panorama_stitcher_node.cpp
 )
 
+add_executable(far_hybrid_panorama_stitcher_node
+  src/far_hybrid_panorama_stitcher_node.cpp
+)
+
+add_executable(panorama_ground_segmentation_node
+  src/panorama_ground_segmentation_node.cpp
+)
+
 if(CMAKE_CUDA_COMPILER)
   target_sources(rgbd_panorama_stitcher_node PRIVATE
     src/cuda_panorama_backend.cu
@@ -57,6 +65,21 @@ if(CMAKE_CUDA_COMPILER)
   target_link_libraries(rgbd_panorama_stitcher_node
     CUDA::cudart
   )
+
+  target_sources(far_hybrid_panorama_stitcher_node PRIVATE
+    src/cuda_panorama_backend.cu
+  )
+  target_compile_definitions(far_hybrid_panorama_stitcher_node PRIVATE
+    PANORAMA_WITH_CUDA=1
+  )
+  set_target_properties(far_hybrid_panorama_stitcher_node PROPERTIES
+    CUDA_ARCHITECTURES 89
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+  )
+  target_link_libraries(far_hybrid_panorama_stitcher_node
+    CUDA::cudart
+  )
 endif()
 
 add_executable(front_rgbd_fusion_node
@@ -65,6 +88,8 @@ add_executable(front_rgbd_fusion_node
 
 target_compile_features(panorama_stitcher_node PUBLIC cxx_std_17)
 target_compile_features(rgbd_panorama_stitcher_node PUBLIC cxx_std_17)
+target_compile_features(far_hybrid_panorama_stitcher_node PUBLIC cxx_std_17)
+target_compile_features(panorama_ground_segmentation_node PUBLIC cxx_std_17)
 target_compile_features(front_rgbd_fusion_node PUBLIC cxx_std_17)
 
 ament_target_dependencies(panorama_stitcher_node
@@ -77,6 +102,18 @@ ament_target_dependencies(panorama_stitcher_node
 ament_target_dependencies(rgbd_panorama_stitcher_node
   cv_bridge
   message_filters
+  rclcpp
+  sensor_msgs
+)
+
+ament_target_dependencies(far_hybrid_panorama_stitcher_node
+  cv_bridge
+  message_filters
+  rclcpp
+  sensor_msgs
+)
+
+ament_target_dependencies(panorama_ground_segmentation_node
   rclcpp
   sensor_msgs
 )
@@ -96,6 +133,14 @@ target_link_libraries(rgbd_panorama_stitcher_node
   ${OpenCV_LIBS}
 )
 
+target_link_libraries(far_hybrid_panorama_stitcher_node
+  ${OpenCV_LIBS}
+)
+
+target_link_libraries(panorama_ground_segmentation_node
+  ${OpenCV_LIBS}
+)
+
 target_link_libraries(front_rgbd_fusion_node
   ${OpenCV_LIBS}
 )
@@ -103,6 +148,8 @@ target_link_libraries(front_rgbd_fusion_node
 install(TARGETS
   panorama_stitcher_node
   rgbd_panorama_stitcher_node
+  far_hybrid_panorama_stitcher_node
+  panorama_ground_segmentation_node
   front_rgbd_fusion_node
   DESTINATION lib/${PROJECT_NAME}
 )

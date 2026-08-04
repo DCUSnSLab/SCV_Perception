@@ -1,0 +1,75 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Global Options1
+        - /Panorama Color1
+        - /Panorama Range1
+      Splitter Ratio: 0.5
+    Tree Height: 400
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Enabled: true
+      Name: Grid
+      Cell Size: 1
+      Plane: XY
+      Plane Cell Count: 10
+      Alpha: 0.5
+      Color: 160; 160; 164
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Panorama Color
+      Normalize Range: true
+      Min Value: 0
+      Max Value: 1
+      Median window: 5
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /panorama/image_raw
+      Value: true
+    - Class: rviz_default_plugins/Image
+      Enabled: true
+      Name: Panorama Range
+      Normalize Range: true
+      Min Value: 0.3
+      Max Value: 8.4
+      Median window: 5
+      Topic:
+        Depth: 1
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /panorama/range
+      Value: true
+  Enabled: true
+  Global Options:
+    Background Color: 0; 0; 0
+    Fixed Frame: panorama_optical_frame
+    Frame Rate: 20
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 10
+      Focal Point:
+        X: 0
+        Y: 0
+        Z: 0
+      Name: Current View
+Window Geometry:
+  Height: 900
+  Width: 1500
+  X: 80
+  Y: 80

@@ -1024,6 +1024,7 @@ struct CudaPanoramaBackend::Impl
   cudaStream_t stream{nullptr};
   cudaEvent_t start_event{nullptr};
   cudaEvent_t stop_event{nullptr};
+  std::string initialization_error;
 
   unsigned char * left_source{nullptr};
   unsigned char * right_source{nullptr};
@@ -1128,9 +1129,24 @@ struct CudaPanoramaBackend::Impl
 CudaPanoramaBackend::CudaPanoramaBackend()
 : impl_(std::make_unique<Impl>())
 {
-  cudaStreamCreateWithFlags(&impl_->stream, cudaStreamNonBlocking);
-  cudaEventCreate(&impl_->start_event);
-  cudaEventCreate(&impl_->stop_event);
+  cudaError_t result = cudaStreamCreateWithFlags(
+    &impl_->stream, cudaStreamNonBlocking);
+  if (result != cudaSuccess) {
+    impl_->initialization_error = cuda_error_message(
+      "cudaStreamCreateWithFlags", result);
+    return;
+  }
+  result = cudaEventCreate(&impl_->start_event);
+  if (result != cudaSuccess) {
+    impl_->initialization_error = cuda_error_message(
+      "cudaEventCreate start", result);
+    return;
+  }
+  result = cudaEventCreate(&impl_->stop_event);
+  if (result != cudaSuccess) {
+    impl_->initialization_error = cuda_error_message(
+      "cudaEventCreate stop", result);
+  }
 }
 
 CudaPanoramaBackend::~CudaPanoramaBackend()
@@ -1185,6 +1201,10 @@ bool CudaPanoramaBackend::configure(
   std::string & error)
 {
   impl_->release();
+  if (!impl_->initialization_error.empty()) {
+    error = impl_->initialization_error;
+    return false;
+  }
   impl_->config = config;
   impl_->left_camera = left_camera;
   impl_->right_camera = right_camera;
@@ -1454,7 +1474,12 @@ bool CudaPanoramaBackend::process(
   const std::size_t projection_range_bytes =
     panorama_pixels * sizeof(unsigned int);
 
-  cudaEventRecord(impl_->start_event, impl_->stream);
+  if (!check_cuda(
+      cudaEventRecord(impl_->start_event, impl_->stream),
+      "record CUDA panorama start", error))
+  {
+    return false;
+  }
   auto copy_to_device = [
     this, &error](
     void * destination,
@@ -1576,6 +1601,11 @@ bool CudaPanoramaBackend::process(
     left_projection_depth = impl_->left_filtered_depth;
     right_projection_depth = impl_->right_filtered_depth;
   }
+  if (!check_cuda(
+      cudaPeekAtLastError(), "launch CUDA depth filters", error))
+  {
+    return false;
+  }
 
   if (config.depth_aware_color) {
     constexpr int projection_threads = 256;
@@ -1620,6 +1650,11 @@ bool CudaPanoramaBackend::process(
       impl_->right_camera,
       config);
   }
+  if (!check_cuda(
+      cudaPeekAtLastError(), "launch CUDA depth projection", error))
+  {
+    return false;
+  }
 
   const dim3 compose_threads(16, 16);
   const dim3 compose_blocks(
@@ -1643,6 +1678,11 @@ bool CudaPanoramaBackend::process(
     impl_->right_base_mask,
     impl_->right_base,
     config);
+  if (!check_cuda(
+      cudaPeekAtLastError(), "launch CUDA color remap", error))
+  {
+    return false;
+  }
 
   const int seam_width =
     config.depth_color_max_x - config.depth_color_min_x + 1;
@@ -1793,16 +1833,24 @@ bool CudaPanoramaBackend::process(
   {
     return false;
   }
-  cudaEventRecord(impl_->stop_event, impl_->stream);
-  if (!check_cuda(
+  if (
+    !check_cuda(
+      cudaEventRecord(impl_->stop_event, impl_->stream),
+      "record CUDA panorama stop", error) ||
+    !check_cuda(
       cudaEventSynchronize(impl_->stop_event),
       "synchronize CUDA panorama", error))
   {
     return false;
   }
   float elapsed_ms = 0.0F;
-  cudaEventElapsedTime(
-    &elapsed_ms, impl_->start_event, impl_->stop_event);
+  if (!check_cuda(
+      cudaEventElapsedTime(
+        &elapsed_ms, impl_->start_event, impl_->stop_event),
+      "measure CUDA panorama time", error))
+  {
+    return false;
+  }
   stats.left_depth_points = left_count;
   stats.right_depth_points = right_count;
   stats.gpu_time_ms = elapsed_ms;

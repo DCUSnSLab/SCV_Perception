@@ -20,8 +20,11 @@ class LaneDetectionNode(Node):
         # ── 파라미터 ──────────────────────────────────────────────────────────
         default_model_path = os.path.expanduser('~/yolo26m_seg_best.pt')
         self.declare_parameter('model_path',   default_model_path)
-        self.declare_parameter('image_topic',  '/camera/camera/color/image_raw')
-        self.declare_parameter('depth_topic',  '/camera/camera/aligned_depth_to_color/image_raw')
+        self.declare_parameter(
+            'image_topic', '/front_right/front_right/color/image_raw')
+        self.declare_parameter(
+            'depth_topic',
+            '/front_right/front_right/aligned_depth_to_color/image_raw')
         self.declare_parameter('conf',         0.00065)  # YOLO-seg confidence threshold
         self.declare_parameter('depth_min',    0.1)   # m
         self.declare_parameter('depth_max',    10.0)  # m
@@ -67,7 +70,7 @@ class LaneDetectionNode(Node):
 
         # ── 구독 ──────────────────────────────────────────────────────────────
         self.create_subscription(
-            CameraInfo, '/camera/camera/color/camera_info',
+            CameraInfo, '/front_right/front_right/color/camera_info',
             self._camera_info_cb, 1)
 
         sub_color = Subscriber(self, Image, image_topic)

@@ -1,4 +1,4 @@
-panorama_stitcher:
+panorama_far_hybrid_stitcher:
   ros__parameters:
     left_color_topic: /front_left/front_left/color/image_raw
     left_depth_topic: /front_left/front_left/aligned_depth_to_color/image_raw
@@ -6,60 +6,45 @@ panorama_stitcher:
     right_color_topic: /front_right/front_right/color/image_raw
     right_depth_topic: /front_right/front_right/aligned_depth_to_color/image_raw
     right_camera_info_topic: /front_right/front_right/color/camera_info
-    output_topic: /panorama/image_raw
-    validity_topic: /panorama/validity
-    range_topic: /panorama/range
-    pointcloud_topic: /panorama/points
+    output_topic: /panorama_far_hybrid/image_raw
+    validity_topic: /panorama_far_hybrid/validity
+    range_topic: /panorama_far_hybrid/range
+    pointcloud_topic: /panorama_far_hybrid/points
     output_frame_id: panorama_optical_frame
-    # Range/validity are large debug images (about 15 MB per frame together).
-    # Restore the requested depth panorama at a bounded visualization rate,
-    # while leaving the redundant validity image disabled. The driving path
-    # continues to consume the full-rate /panorama/points cloud.
-    publish_auxiliary_outputs: false
-    publish_range_output: true
-    publish_validity_output: false
-    # RViz Image requests RELIABLE by default. Keep this large 32FC1 debug
-    # image at 2 Hz so a reliable publisher remains useful without flooding
-    # DDS/RViz with roughly 12 MB per frame.
-    auxiliary_output_rate_hz: 2.0
+    publish_auxiliary_outputs: true
     publish_pointcloud: true
-    # Six pixels are still denser than the 5 cm local-costmap cells throughout
-    # the useful D435 depth range, while cutting cloud traffic by about 55%.
-    pointcloud_stride: 6
+    pointcloud_stride: 4
     publisher_best_effort: false
-    auxiliary_publisher_best_effort: false
-    pointcloud_publisher_best_effort: true
-    # The original cameras are 30 Hz, but 20 Hz is sufficient for this driving
-    # pipeline and prevents idle systems from pushing every large frame through
-    # CUDA, DDS and RViz simultaneously.
-    max_output_rate_hz: 20.0
 
-    # 2026-08-04 new-mount calibration. The left topic is wrapper-rotated by
-    # 180 degrees and the right topic is native/upright. These transforms map
-    # those two topic optical conventions into the bisecting panorama frame.
+    # Calibrated virtual-color optical frames -> panorama_optical_frame.
+    # The displayed RealSense images are already rotated 180 degrees, so these
+    # matrices intentionally describe those rotated optical frames.
+    # 2026-07-30 22:31 external recalibration after final hand alignment:
+    # optical-axis yaw is -30.00 deg (front_left) and +29.02 deg
+    # (front_right); right pitch is +0.69 deg. A metric Board 2 + Board 5
+    # bundle adjustment estimates the color-lens baseline as 0.11942 m; the
+    # approximately 11 cm ruler measurement is validation-only, not imposed.
     left_rotation_camera_to_rig: [
-      0.8466358450597187, 0.0, -0.5321726654573833,
+      0.8660254037844387, 0.0, -0.49999999999999994,
       0.0, 1.0, 0.0,
-      0.5321726654573833, 0.0, 0.8466358450597187
+      0.49999999999999994, 0.0, 0.8660254037844387
     ]
     left_translation_camera_in_rig_m: [
-      -0.03523273886910431, -0.02201658980930871, -0.005307845560422412
+      -0.05756401257455473, 0.0020147697986997917, 0.01573918593812528
     ]
     right_rotation_camera_to_rig: [
-      0.8467006436555875, 0.0017900416286067292, 0.532066552025385,
-      0.00726299754380777, 0.9998622851978125, -0.014921779575067401,
-      -0.5320199891920344, 0.016498678431199006, 0.8465710393759824
+      0.8733047561579894, 0.0447965811344322, 0.485110368050922,
+      -0.044572148340580695, 0.9989340333846635, -0.012005021372459743,
+      -0.48513104050775824, -0.01113836902397199, 0.8743705223023852
     ]
     right_translation_camera_in_rig_m: [
-      0.03523273886910431, 0.02201658980930871, 0.005307845560422412
+      0.05756401257455473, -0.0020147697986997917, -0.01573918593812528
     ]
 
-    # The new 2026-08-04 mount has asymmetric physical camera orientation.
-    # front_left is rotated by the wrapper; front_right is physically upright.
-    # CameraInfo stays native, so principal-point adjustment is per camera.
+    # realsense_multi rotates the front color/depth streams by 180 degrees.
+    # CameraInfo keeps the native principal point, so adjust the intrinsics but
+    # do not rotate the already-upright image data a second time.
     input_images_rotated_180: true
-    left_input_image_rotated_180: true
-    right_input_image_rotated_180: false
     rotate_color_180: false
     rotate_aligned_depth_180: false
 
@@ -76,9 +61,7 @@ panorama_stitcher:
     right_width: 1920
     right_height: 1080
 
-    # Keep only a bounded recent history of four 1080p RGB-D streams. Processing
-    # always takes the newest synchronized set instead of accumulating latency.
-    sync_queue_size: 4
+    sync_queue_size: 50
     # Reject the worst ~39-40 ms pairs that visibly duplicate moving objects,
     # while retaining the occasional ~33.4 ms depth frame needed to stay
     # above 20 FPS without hardware synchronization.
@@ -87,9 +70,13 @@ panorama_stitcher:
     # Keep roughly the native angular sampling for downstream perception.
     projection_scale: 1.0
     projection_model: cylindrical
-    # Board 5 center in the new rig is 3.293 m forward. Depth-aware color is
-    # still used in the overlap; this plane is the stable fallback projection.
-    color_reference_plane_z_m: 3.2934136853115334
+    # Experimental far-scene fallback: zero disables the fixed 2.635 m
+    # reference plane and uses rotation-only cylindrical projection whenever
+    # aligned depth is unavailable. Valid depth still drives metric 3D color
+    # reprojection in the overlap. This prevents the approximately 62 px
+    # near-plane disparity correction from being imposed on distant scenery.
+    # The C++ node enforces zero even if a positive value is supplied.
+    color_reference_plane_z_m: 0.0
     depth_scale_m: 0.001
     min_depth_m: 0.20
     max_depth_m: 15.0

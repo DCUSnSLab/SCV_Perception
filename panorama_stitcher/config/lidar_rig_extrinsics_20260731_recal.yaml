@@ -1,0 +1,97 @@
+schema_version: 1
+accepted: true
+created_local_time: '2026-07-31T16:52:31+09:00'
+method: multiboard_floor_solution_with_holdout_vertical_and_projective_icp_refinement
+convention: X_velodyne = R_rig_to_lidar * X_front_camera_rig + t_rig_in_lidar
+inputs:
+  capture_root: /home/ssc/lidar_cam_calib/captures_recal_20260731_full_zTq6Qx
+  camera_rig_calibration: rig_extrinsics.yaml
+  sampled_frames: [0, 5, 10, 15, 20, 25]
+  boards: [2, 3, 4, 5]
+  floor_observations: 12
+  board_observations:
+    board2: 12
+    board3: 6
+    board4: 6
+    board5: 6
+quality:
+  plane_solution:
+    normal_condition_ratio: 0.505
+    source_balanced_normal_error_deg: 2.89
+    source_balanced_plane_error_mm: 23.3
+  initial_selected_solution:
+    selected_fraction_toward_rgbd_solution: 0.7
+    source_balanced_normal_error_deg: 2.51
+    source_balanced_plane_error_mm: 25.44
+    all_frame_projective_sample_count: 287760
+    all_frame_projective_median_absolute_error_mm: 55.20280604004802
+    all_frame_projective_mean_absolute_error_mm: 91.06465992749605
+    all_frame_projective_p90_absolute_error_mm: 229.94273883527265
+    front_left_projective_median_absolute_error_mm: 45.13149392535332
+    front_right_projective_median_absolute_error_mm: 68.89895285131287
+  distance_dependent_vertical_check:
+    fit_frames: [0, 5, 10, 15, 20, 25]
+    holdout_frames: [3, 8, 13, 18, 23, 28]
+    evaluated_forward_distances_m: [1, 2, 3, 4, 5, 6]
+    initial_holdout_intercept_mm: -9.76
+    initial_holdout_slope_mm_per_m: -10.86
+    initial_holdout_equivalent_pitch_deg: -0.622
+    final_holdout_intercept_mm: -2.36
+    final_holdout_slope_mm_per_m: 0.77
+    final_holdout_equivalent_pitch_deg: 0.044
+    final_holdout_vertical_mae_mm: 24.68
+  final_selected_solution:
+    interpolation_fraction_from_vertical_solution_to_projective_icp: 0.5
+    holdout_board_source_balanced_normal_error_deg: 3.046
+    holdout_board_source_balanced_plane_error_mm: 28.86
+    all_frame_projective_sample_count: 292459
+    all_frame_projective_median_absolute_error_mm: 46.760755172144066
+    all_frame_projective_mean_absolute_error_mm: 76.89671079151306
+    all_frame_projective_p90_absolute_error_mm: 182.87341597852966
+    holdout_projective_sample_count: 58433
+    holdout_projective_median_absolute_error_mm: 46.82690552843604
+    holdout_projective_mean_absolute_error_mm: 76.98935937507738
+    holdout_projective_p90_absolute_error_mm: 184.16317910594563
+  rollback_operational_solution:
+    source_balanced_normal_error_deg: 2.62
+    source_balanced_plane_error_mm: 26.73
+    all_frame_projective_median_absolute_error_mm: 60.23016653752289
+    all_frame_projective_mean_absolute_error_mm: 104.49169155540557
+    all_frame_projective_p90_absolute_error_mm: 281.00652038255225
+  acceptance_notes:
+  - A direct screen-space Z nudge was rejected. The initial residual contained
+    both a constant term and a distance-dependent pitch term.
+  - Pitch and Z were fitted only on fit_frames and verified on six disjoint
+    holdout frames.
+  - The final 0.5 projective-ICP fraction improved holdout reprojection while
+    retaining near-zero distance-dependent vertical slope.
+  - The rear camera transform was not changed because the rear capture contained
+    no calibration target and the natural-scene candidate failed plane validation.
+rig_to_velodyne:
+  rotation_matrix:
+  - [0.9964554068529489, 0.038005148699076355, 0.07504819002404663]
+  - [-0.0372627497668898, 0.9992419683017159, -0.011268374519994321]
+  - [-0.07541955736633878, 0.0084319307915683, 0.9971162384144547]
+  translation_m:
+  - -0.03073900883234519
+  - -0.015596375681134691
+  - 0.15745241542599403
+  quaternion_xyzw:
+  - 0.004929506485902044
+  - 0.037650773678346676
+  - -0.018833900683276585
+  - 0.9991012978633748
+  rpy_deg:
+  - 0.48449971394584307
+  - 4.325329449057479
+  - -2.141595011940909
+rollback_previous_operational_rig_to_velodyne:
+  translation_m:
+  - -0.02352283779095989
+  - -0.025650814484482
+  - 0.14210465437187972
+  quaternion_xyzw:
+  - 0.004327429317425783
+  - 0.036567819285850095
+  - -0.010753509312261277
+  - 0.9992639441036844

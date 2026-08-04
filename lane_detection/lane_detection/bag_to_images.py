@@ -7,12 +7,12 @@ ROS2 bag → 이미지 추출 도구
 
 예시:
   python3 bag_to_images.py ~/rosbag2_2024_01_01/ -i 1.0 -o ~/dataset/images
-  python3 bag_to_images.py ~/rosbag2_2024_01_01/ -i 0.5 -t /camera/camera/color/image_raw
+  python3 bag_to_images.py ~/rosbag2_2024_01_01/ -i 0.5 -t /front_right/front_right/color/image_raw
 
 옵션:
   -i, --interval   이미지 추출 간격 (초, 기본값: 1.0)
   -o, --output     저장 디렉토리 (기본값: ./extracted_images)
-  -t, --topic      카메라 토픽 (기본값: /camera/camera/color/image_raw)
+  -t, --topic      카메라 토픽 (기본값: /front_right/front_right/color/image_raw)
   -q, --quality    JPEG 품질 0~100 (기본값: 95)
 """
 
@@ -129,7 +129,7 @@ def main():
     parser.add_argument('-o', '--output', default='/home/ssc/extracted_images',
                         help='저장 디렉토리 (기본값: /home/ssc/extracted_images)')
     parser.add_argument('-t', '--topic',
-                        default='/camera/camera/color/image_raw',
+                        default='/front_right/front_right/color/image_raw',
                         help='카메라 토픽 이름')
     parser.add_argument('-q', '--quality', type=int, default=95,
                         help='JPEG 품질 0~100 (기본값: 95)')

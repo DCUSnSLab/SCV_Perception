@@ -10,26 +10,18 @@ def generate_launch_description():
     default_config = PathJoinSubstitution([
         FindPackageShare('panorama_stitcher'),
         'config',
-        'panorama.yaml',
+        'far_hybrid_panorama.yaml',
     ])
 
     return LaunchDescription([
         DeclareLaunchArgument(
             'config_file',
             default_value=default_config,
-            description='Panorama stitcher parameter file',
-        ),
-        DeclareLaunchArgument(
-            'left_topic',
-            default_value='/front_left/front_left/color/image_raw',
-        ),
-        DeclareLaunchArgument(
-            'right_topic',
-            default_value='/front_right/front_right/color/image_raw',
+            description='Far-hybrid panorama parameter file',
         ),
         DeclareLaunchArgument(
             'output_topic',
-            default_value='/panorama/image_raw',
+            default_value='/panorama_far_hybrid/image_raw',
         ),
         DeclareLaunchArgument(
             'use_sim_time',
@@ -37,14 +29,12 @@ def generate_launch_description():
         ),
         Node(
             package='panorama_stitcher',
-            executable='panorama_stitcher_node',
-            name='panorama_stitcher',
+            executable='far_hybrid_panorama_stitcher_node',
+            name='panorama_far_hybrid_stitcher',
             output='screen',
             parameters=[
                 LaunchConfiguration('config_file'),
                 {
-                    'left_topic': LaunchConfiguration('left_topic'),
-                    'right_topic': LaunchConfiguration('right_topic'),
                     'output_topic': LaunchConfiguration('output_topic'),
                     'use_sim_time': ParameterValue(
                         LaunchConfiguration('use_sim_time'),

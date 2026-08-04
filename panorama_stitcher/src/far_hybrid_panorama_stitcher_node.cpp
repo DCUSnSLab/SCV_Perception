@@ -64,11 +64,11 @@ struct ProjectedDepth
   size_t accepted_points{0};
 };
 
-class RgbdPanoramaStitcherNode : public rclcpp::Node
+class FarHybridPanoramaStitcherNode : public rclcpp::Node
 {
 public:
-  RgbdPanoramaStitcherNode()
-  : Node("panorama_stitcher"),
+  FarHybridPanoramaStitcherNode()
+  : Node("panorama_far_hybrid_stitcher"),
     last_diagnostics_time_(std::chrono::steady_clock::now())
   {
     left_color_topic_ = declare_parameter<std::string>(
@@ -84,44 +84,28 @@ public:
     right_camera_info_topic_ = declare_parameter<std::string>(
       "right_camera_info_topic", "/front_right/front_right/color/camera_info");
     output_topic_ = declare_parameter<std::string>(
-      "output_topic", "/panorama/image_raw");
+      "output_topic", "/panorama_far_hybrid/image_raw");
     validity_topic_ = declare_parameter<std::string>(
-      "validity_topic", "/panorama/validity");
+      "validity_topic", "/panorama_far_hybrid/validity");
     range_topic_ = declare_parameter<std::string>(
-      "range_topic", "/panorama/range");
+      "range_topic", "/panorama_far_hybrid/range");
     pointcloud_topic_ = declare_parameter<std::string>(
-      "pointcloud_topic", "/panorama/points");
+      "pointcloud_topic", "/panorama_far_hybrid/points");
     output_frame_id_ = declare_parameter<std::string>(
       "output_frame_id", "panorama_optical_frame");
     publish_auxiliary_outputs_ = declare_parameter<bool>(
       "publish_auxiliary_outputs", false);
-    publish_validity_output_ = declare_parameter<bool>(
-      "publish_validity_output", publish_auxiliary_outputs_);
-    publish_range_output_ = declare_parameter<bool>(
-      "publish_range_output", publish_auxiliary_outputs_);
-    auxiliary_output_rate_hz_ = declare_parameter<double>(
-      "auxiliary_output_rate_hz", 0.0);
     publish_pointcloud_ = declare_parameter<bool>(
       "publish_pointcloud", false);
     pointcloud_stride_ = declare_parameter<int>(
       "pointcloud_stride", 4);
     publisher_best_effort_ = declare_parameter<bool>(
       "publisher_best_effort", false);
-    auxiliary_publisher_best_effort_ = declare_parameter<bool>(
-      "auxiliary_publisher_best_effort", true);
-    pointcloud_publisher_best_effort_ = declare_parameter<bool>(
-      "pointcloud_publisher_best_effort", true);
-    max_output_rate_hz_ = declare_parameter<double>(
-      "max_output_rate_hz", 0.0);
 
     sync_queue_size_ = declare_parameter<int>("sync_queue_size", 50);
     sync_slop_ms_ = declare_parameter<double>("sync_slop_ms", 45.0);
     input_images_rotated_180_ = declare_parameter<bool>(
       "input_images_rotated_180", true);
-    left_input_image_rotated_180_ = declare_parameter<bool>(
-      "left_input_image_rotated_180", input_images_rotated_180_);
-    right_input_image_rotated_180_ = declare_parameter<bool>(
-      "right_input_image_rotated_180", input_images_rotated_180_);
     rotate_color_180_ = declare_parameter<bool>(
       "rotate_color_180", false);
     rotate_aligned_depth_180_ = declare_parameter<bool>(
@@ -140,8 +124,16 @@ public:
     projection_scale_ = declare_parameter<double>("projection_scale", 0.5);
     projection_model_ = declare_parameter<std::string>(
       "projection_model", "cylindrical");
-    color_reference_plane_z_m_ = declare_parameter<double>(
+    const double requested_reference_plane_z_m = declare_parameter<double>(
       "color_reference_plane_z_m", 0.0);
+    color_reference_plane_z_m_ = 0.0;
+    if (requested_reference_plane_z_m > 0.0) {
+      RCLCPP_WARN(
+        get_logger(),
+        "Ignoring color_reference_plane_z_m=%.3f m: the far-hybrid node "
+        "always uses rotation-only color fallback for invalid depth",
+        requested_reference_plane_z_m);
+    }
     rectilinear_width_ = declare_parameter<int>(
       "rectilinear_width", 3754);
     rectilinear_height_ = declare_parameter<int>(
@@ -265,25 +257,22 @@ public:
     }
 #endif
 
-    const auto output_qos = make_output_qos(publisher_best_effort_);
+    auto output_qos = rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile();
+    if (publisher_best_effort_) {
+      output_qos.best_effort();
+    } else {
+      output_qos.reliable();
+    }
     output_publisher_ = create_publisher<Image>(output_topic_, output_qos);
-    if (publish_validity_output_ || publish_range_output_) {
-      const auto auxiliary_qos = make_output_qos(
-        auxiliary_publisher_best_effort_);
-      if (publish_validity_output_) {
-        validity_publisher_ = create_publisher<Image>(
-          validity_topic_, auxiliary_qos);
-      }
-      if (publish_range_output_) {
-        range_publisher_ = create_publisher<Image>(
-          range_topic_, auxiliary_qos);
-      }
+    if (publish_auxiliary_outputs_) {
+      validity_publisher_ = create_publisher<Image>(
+        validity_topic_, output_qos);
+      range_publisher_ = create_publisher<Image>(
+        range_topic_, output_qos);
     }
     if (publish_pointcloud_) {
-      const auto pointcloud_qos = make_output_qos(
-        pointcloud_publisher_best_effort_);
       pointcloud_publisher_ = create_publisher<PointCloud2>(
-        pointcloud_topic_, pointcloud_qos);
+        pointcloud_topic_, output_qos);
     }
 
     const auto camera_info_qos =
@@ -292,15 +281,13 @@ public:
       left_camera_info_topic_, camera_info_qos,
       [this](const CameraInfo::ConstSharedPtr message) {
         const std::lock_guard<std::mutex> lock(projection_mutex_);
-        update_camera_model(
-          left_model_, *message, "left", left_input_image_rotated_180_);
+        update_camera_model(left_model_, *message, "left");
       });
     right_camera_info_subscriber_ = create_subscription<CameraInfo>(
       right_camera_info_topic_, camera_info_qos,
       [this](const CameraInfo::ConstSharedPtr message) {
         const std::lock_guard<std::mutex> lock(projection_mutex_);
-        update_camera_model(
-          right_model_, *message, "right", right_input_image_rotated_180_);
+        update_camera_model(right_model_, *message, "right");
       });
 
     if (depth_aware_color_ || use_rgbd_synchronization_) {
@@ -309,7 +296,7 @@ public:
       rclcpp::SubscriptionOptions image_subscription_options;
       image_subscription_options.callback_group = image_callback_group_;
       const auto color_qos =
-        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
+        rclcpp::QoS(rclcpp::KeepLast(2)).reliable().durability_volatile();
       const auto depth_qos =
         rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
       left_color_rgbd_subscriber_ = create_subscription<Image>(
@@ -337,7 +324,7 @@ public:
         },
         image_subscription_options);
       processing_thread_ = std::thread(
-        &RgbdPanoramaStitcherNode::processing_loop, this);
+        &FarHybridPanoramaStitcherNode::processing_loop, this);
     } else {
       const auto image_qos = rclcpp::SensorDataQoS().keep_last(1);
       left_color_direct_subscriber_ = create_subscription<Image>(
@@ -368,7 +355,7 @@ public:
       projection_scale_, sync_slop_ms_);
   }
 
-  ~RgbdPanoramaStitcherNode() override
+  ~FarHybridPanoramaStitcherNode() override
   {
     {
       const std::lock_guard<std::mutex> lock(processing_mutex_);
@@ -381,17 +368,6 @@ public:
   }
 
 private:
-  static rclcpp::QoS make_output_qos(bool best_effort)
-  {
-    auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile();
-    if (best_effort) {
-      qos.best_effort();
-    } else {
-      qos.reliable();
-    }
-    return qos;
-  }
-
   static cv::Matx33d yaw_rotation(double yaw_rad)
   {
     const double cosine = std::cos(yaw_rad);
@@ -472,17 +448,12 @@ private:
     model.cy = declare_parameter<double>(prefix + "_cy", default_cy);
     model.width = declare_parameter<int>(prefix + "_width", 1920);
     model.height = declare_parameter<int>(prefix + "_height", 1080);
-    const bool image_rotated_180 =
-      prefix == "left" ? left_input_image_rotated_180_ :
-      right_input_image_rotated_180_;
-    adjust_intrinsics_for_input_rotation(model, image_rotated_180);
+    adjust_intrinsics_for_input_rotation(model);
   }
 
   void validate_parameters()
   {
-    // Four synchronized 1080p streams are large. Bound the history even when
-    // a stale configuration requests an excessive queue.
-    sync_queue_size_ = std::clamp(sync_queue_size_, 4, 16);
+    sync_queue_size_ = std::max(sync_queue_size_, 4);
     sync_slop_ms_ = std::max(sync_slop_ms_, 1.0);
     baseline_m_ = std::max(baseline_m_, 0.0);
     projection_scale_ = std::clamp(projection_scale_, 0.1, 1.0);
@@ -548,13 +519,11 @@ private:
     max_exposure_gain_ = std::max(max_exposure_gain_, min_exposure_gain_);
     diagnostics_period_sec_ = std::max(diagnostics_period_sec_, 0.2);
     pointcloud_stride_ = std::clamp(pointcloud_stride_, 1, 16);
-    max_output_rate_hz_ = std::max(max_output_rate_hz_, 0.0);
   }
 
-  static void adjust_intrinsics_for_input_rotation(
-    CameraModel & model, bool image_rotated_180)
+  void adjust_intrinsics_for_input_rotation(CameraModel & model) const
   {
-    if (!image_rotated_180) {
+    if (!input_images_rotated_180_) {
       return;
     }
     model.cx = static_cast<double>(model.width - 1) - model.cx;
@@ -563,7 +532,7 @@ private:
 
   void update_camera_model(
     CameraModel & model, const CameraInfo & message,
-    const char * camera_name, bool image_rotated_180)
+    const char * camera_name)
   {
     CameraModel updated = model;
     updated.fx = message.k[0];
@@ -572,7 +541,7 @@ private:
     updated.cy = message.k[5];
     updated.width = static_cast<int>(message.width);
     updated.height = static_cast<int>(message.height);
-    adjust_intrinsics_for_input_rotation(updated, image_rotated_180);
+    adjust_intrinsics_for_input_rotation(updated);
 
     const bool changed =
       !model.valid() ||
@@ -593,7 +562,7 @@ private:
       "%s CameraInfo: %dx%d fx/fy=%.3f/%.3f cx/cy=%.3f/%.3f%s",
       camera_name, model.width, model.height,
       model.fx, model.fy, model.cx, model.cy,
-      image_rotated_180 ? " (adjusted for 180 deg image rotation)" : "");
+      input_images_rotated_180_ ? " (adjusted for 180 deg image rotation)" : "");
   }
 
   static int64_t stamp_nanoseconds(const builtin_interfaces::msg::Time & stamp)
@@ -1702,7 +1671,7 @@ private:
         (is_color ? left_color_queue_ : left_depth_queue_) :
         (is_color ? right_color_queue_ : right_depth_queue_);
       queue.push_back(message);
-      while (queue.size() > static_cast<std::size_t>(sync_queue_size_)) {
+      while (queue.size() > 4) {
         queue.pop_front();
       }
       synchronized_set_ready =
@@ -1830,31 +1799,11 @@ private:
         if (stop_processing_) {
           return;
         }
-
-        // Wait for the next output slot while callbacks keep replacing the
-        // pending set. At the deadline we process the newest synchronized
-        // frames, avoiding a backlog and preserving low latency.
-        if (
-          max_output_rate_hz_ > 0.0 &&
-          last_processing_start_.time_since_epoch().count() != 0)
-        {
-          const auto minimum_period =
-            std::chrono::duration<double>(1.0 / max_output_rate_hz_);
-          const auto next_start = last_processing_start_ +
-            std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-            minimum_period);
-          processing_condition_.wait_until(
-            lock, next_start, [this]() {return stop_processing_;});
-          if (stop_processing_) {
-            return;
-          }
-        }
         left_color = pending_left_color_;
         right_color = pending_right_color_;
         left_depth = pending_left_depth_;
         right_depth = pending_right_depth_;
         processed_sequence = pending_sequence_;
-        last_processing_start_ = std::chrono::steady_clock::now();
       }
       process_messages(
         left_color, right_color, left_depth, right_depth,
@@ -1941,33 +1890,19 @@ private:
         *cv_bridge::CvImage(
           output_header, sensor_msgs::image_encodings::BGR8,
           panorama).toImageMsg());
-      const auto auxiliary_now = std::chrono::steady_clock::now();
-      bool auxiliary_due = publish_validity_output_ || publish_range_output_;
-      if (auxiliary_due && auxiliary_output_rate_hz_ > 0.0 &&
-        last_auxiliary_publish_time_.time_since_epoch().count() != 0)
-      {
-        const double elapsed_seconds =
-          std::chrono::duration<double>(
-          auxiliary_now - last_auxiliary_publish_time_).count();
-        auxiliary_due = elapsed_seconds >= 1.0 / auxiliary_output_rate_hz_;
-      }
       if (
-        auxiliary_due && !last_validity_mask_.empty() &&
+        publish_auxiliary_outputs_ &&
+        !last_validity_mask_.empty() &&
         !last_range_m_.empty())
       {
-        if (publish_validity_output_) {
-          validity_publisher_->publish(
-            *cv_bridge::CvImage(
-              output_header, sensor_msgs::image_encodings::MONO8,
-              last_validity_mask_).toImageMsg());
-        }
-        if (publish_range_output_) {
-          range_publisher_->publish(
-            *cv_bridge::CvImage(
-              output_header, sensor_msgs::image_encodings::TYPE_32FC1,
-              last_range_m_).toImageMsg());
-        }
-        last_auxiliary_publish_time_ = auxiliary_now;
+        validity_publisher_->publish(
+          *cv_bridge::CvImage(
+            output_header, sensor_msgs::image_encodings::MONO8,
+            last_validity_mask_).toImageMsg());
+        range_publisher_->publish(
+          *cv_bridge::CvImage(
+            output_header, sensor_msgs::image_encodings::TYPE_32FC1,
+            last_range_m_).toImageMsg());
         last_validity_ratio_ =
           static_cast<double>(cv::countNonZero(last_validity_mask_)) /
           static_cast<double>(last_validity_mask_.total());
@@ -2011,6 +1946,15 @@ private:
       return;
     }
 
+    struct ColoredPoint
+    {
+      float x;
+      float y;
+      float z;
+      std::uint32_t rgb;
+    };
+
+    std::vector<ColoredPoint> points;
     const std::lock_guard<std::mutex> lock(projection_mutex_);
     if (
       panorama.empty() || last_range_m_.empty() ||
@@ -2028,45 +1972,13 @@ private:
       return;
     }
 
-    std::size_t point_count = 0;
-    for (int row = 0; row < panorama.rows; row += pointcloud_stride_) {
-      const auto * range_row = last_range_m_.ptr<float>(row);
-      const auto * validity_row = last_validity_mask_.ptr<std::uint8_t>(row);
-      for (int column = 0; column < panorama.cols;
-        column += pointcloud_stride_)
-      {
-        const float horizontal_range = range_row[column];
-        if (!(
-          validity_row[column] == 0 ||
-          !std::isfinite(horizontal_range) || horizontal_range <= 0.0F)
-        ) {
-          ++point_count;
-        }
-      }
-    }
-    if (!(publish_validity_output_ || publish_range_output_)) {
-      const std::size_t sampled_pixels =
-        static_cast<std::size_t>(
-        (panorama.rows + pointcloud_stride_ - 1) / pointcloud_stride_) *
-        static_cast<std::size_t>(
-        (panorama.cols + pointcloud_stride_ - 1) / pointcloud_stride_);
-      last_validity_ratio_ = sampled_pixels == 0 ? 0.0 :
-        static_cast<double>(point_count) /
-        static_cast<double>(sampled_pixels);
-    }
+    const std::size_t estimated_points =
+      static_cast<std::size_t>(
+      (panorama.rows + pointcloud_stride_ - 1) / pointcloud_stride_) *
+      static_cast<std::size_t>(
+      (panorama.cols + pointcloud_stride_ - 1) / pointcloud_stride_);
+    points.reserve(estimated_points);
 
-    PointCloud2 cloud;
-    cloud.header = header;
-    cloud.height = 1;
-    cloud.is_dense = true;
-    sensor_msgs::PointCloud2Modifier modifier(cloud);
-    modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
-    modifier.resize(point_count);
-
-    sensor_msgs::PointCloud2Iterator<float> output_x(cloud, "x");
-    sensor_msgs::PointCloud2Iterator<float> output_y(cloud, "y");
-    sensor_msgs::PointCloud2Iterator<float> output_z(cloud, "z");
-    sensor_msgs::PointCloud2Iterator<float> output_rgb(cloud, "rgb");
     for (int row = 0; row < panorama.rows; row += pointcloud_stride_) {
       const auto * color_row = panorama.ptr<cv::Vec3b>(row);
       const auto * range_row = last_range_m_.ptr<float>(row);
@@ -2111,20 +2023,41 @@ private:
           (static_cast<std::uint32_t>(bgr[2]) << 16U) |
           (static_cast<std::uint32_t>(bgr[1]) << 8U) |
           static_cast<std::uint32_t>(bgr[0]);
-        *output_x = static_cast<float>(x);
-        *output_y = static_cast<float>(y);
-        *output_z = static_cast<float>(z);
-        float packed_rgb;
-        std::memcpy(&packed_rgb, &rgb, sizeof(packed_rgb));
-        *output_rgb = packed_rgb;
-        ++output_x;
-        ++output_y;
-        ++output_z;
-        ++output_rgb;
+        points.push_back(
+          ColoredPoint{
+            static_cast<float>(x),
+            static_cast<float>(y),
+            static_cast<float>(z),
+            rgb});
       }
     }
 
-    last_pointcloud_points_ = point_count;
+    PointCloud2 cloud;
+    cloud.header = header;
+    cloud.height = 1;
+    cloud.is_dense = true;
+    sensor_msgs::PointCloud2Modifier modifier(cloud);
+    modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
+    modifier.resize(points.size());
+
+    sensor_msgs::PointCloud2Iterator<float> output_x(cloud, "x");
+    sensor_msgs::PointCloud2Iterator<float> output_y(cloud, "y");
+    sensor_msgs::PointCloud2Iterator<float> output_z(cloud, "z");
+    sensor_msgs::PointCloud2Iterator<float> output_rgb(cloud, "rgb");
+    for (const auto & point : points) {
+      *output_x = point.x;
+      *output_y = point.y;
+      *output_z = point.z;
+      float packed_rgb;
+      std::memcpy(&packed_rgb, &point.rgb, sizeof(packed_rgb));
+      *output_rgb = packed_rgb;
+      ++output_x;
+      ++output_y;
+      ++output_z;
+      ++output_rgb;
+    }
+
+    last_pointcloud_points_ = points.size();
     pointcloud_publisher_->publish(cloud);
   }
 
@@ -2192,21 +2125,13 @@ private:
   std::string pointcloud_topic_;
   std::string output_frame_id_;
   bool publish_auxiliary_outputs_{false};
-  bool publish_validity_output_{false};
-  bool publish_range_output_{false};
   bool publish_pointcloud_{false};
   int pointcloud_stride_{4};
   bool publisher_best_effort_{false};
-  bool auxiliary_publisher_best_effort_{true};
-  bool pointcloud_publisher_best_effort_{true};
-  double max_output_rate_hz_{0.0};
-  double auxiliary_output_rate_hz_{0.0};
 
   int sync_queue_size_{50};
   double sync_slop_ms_{45.0};
   bool input_images_rotated_180_{true};
-  bool left_input_image_rotated_180_{true};
-  bool right_input_image_rotated_180_{true};
   bool rotate_color_180_{false};
   bool rotate_aligned_depth_180_{false};
   double baseline_m_{0.10};
@@ -2334,8 +2259,6 @@ private:
   std::condition_variable processing_condition_;
   std::thread processing_thread_;
   bool stop_processing_{false};
-  std::chrono::steady_clock::time_point last_processing_start_{};
-  std::chrono::steady_clock::time_point last_auxiliary_publish_time_{};
   std::size_t pending_sequence_{0};
   Image::ConstSharedPtr pending_left_color_;
   Image::ConstSharedPtr pending_right_color_;
@@ -2370,7 +2293,7 @@ int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
   const auto node =
-    std::make_shared<panorama_stitcher::RgbdPanoramaStitcherNode>();
+    std::make_shared<panorama_stitcher::FarHybridPanoramaStitcherNode>();
   rclcpp::executors::MultiThreadedExecutor executor(
     rclcpp::ExecutorOptions(), 4);
   executor.add_node(node);

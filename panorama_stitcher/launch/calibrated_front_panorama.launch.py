@@ -36,33 +36,37 @@ def generate_launch_description():
     # External calibration convention:
     #   p_velodyne = R * p_front_camera_rig + t
     # front_camera_rig: x forward, y left, z up; origin at the midpoint of
-    # the two RGB lens centers.
+    # the two RGB lens centers. 2026-08-04 new-mount recalibration; see
+    # lidar_rig_extrinsics_20260804.yaml and rig_extrinsics.yaml.
     rig_in_velodyne = static_tf(
         'velodyne_to_front_camera_rig',
         'velodyne',
         'front_camera_rig',
-        (-0.075936702386557, 0.005907846329035, -0.051649662111118),
-        (0.011788154607001, 0.030677511911544,
-         -0.029048897759901, 0.999037582482668),
+        (-0.00448541435124259, 0.02500756951604277,
+         0.21625076381657354),
+        (0.010795577032945527, 0.03790650713358004,
+         -0.04021168161650252, 0.9984135280008133),
     )
 
-    # These attach the existing RealSense driver trees at their camera_link
-    # roots. The driver retains its per-device factory RGB/depth extrinsics.
+    # These attach the RealSense trees at their role-specific root frames.
+    # The driver retains its per-device factory RGB/depth extrinsics.
     left_link_in_rig = static_tf(
-        'front_camera_rig_to_front_link',
+        'front_camera_rig_to_front_left_link',
         'front_camera_rig',
-        'front_link',
-        (0.007812144921651, 0.071382099650485, 0.001682236771369),
-        (0.961186571253649, 0.275863070335251,
-         0.000568893289566, 0.004429224230944),
+        'front_left_link',
+        (0.0027668551625554174, 0.022891964978233523,
+         0.022070886433021613),
+        (-0.004055179658881763, -0.0018700761474020188,
+         0.27668413709010087, 0.9609505432725678),
     )
     right_link_in_rig = static_tf(
-        'front_camera_rig_to_camera_link',
+        'front_camera_rig_to_front_right_link',
         'front_camera_rig',
-        'camera_link',
-        (-0.006982041272288, -0.046847119018253, -0.002483045576121),
-        (0.958223094280192, -0.284887283435533,
-         -0.004655850233539, 0.025021198680711),
+        'front_right_link',
+        (-0.0020299669272732714, -0.047836572251912846,
+         -0.02196040437160633),
+        (-0.003141950239487204, -0.00632642612279132,
+         -0.2787819097627938, 0.9603284600959273),
     )
 
     panorama_optical_in_rig = static_tf(
