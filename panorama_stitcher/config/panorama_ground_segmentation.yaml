@@ -31,5 +31,8 @@ panorama_ground_segmentation:
     # The costmap resolution is 5 cm; one point per 5 cm 3D voxel preserves
     # usable geometry without publishing redundant depth pixels.
     obstacle_voxel_size_m: 0.05
+    # RANSAC over tens of thousands of points is the bulk of this node's cost.
+    # Skip it while neither output cloud has a subscriber.
+    skip_when_unsubscribed: true
     diagnostics_period_sec: 2.0
     random_seed: 42

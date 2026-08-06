@@ -129,6 +129,8 @@ public:
       "obstacle_max_range_m", 8.0);
     obstacle_voxel_size_m_ = declare_parameter<double>(
       "obstacle_voxel_size_m", 0.0);
+    skip_when_unsubscribed_ = declare_parameter<bool>(
+      "skip_when_unsubscribed", true);
     diagnostics_period_sec_ = declare_parameter<double>(
       "diagnostics_period_sec", 2.0);
     validate_parameters();
@@ -193,30 +195,102 @@ private:
     minimum_up_alignment_ = std::cos(max_ground_tilt_deg_ * kPi / 180.0);
   }
 
+  // Byte offsets of the xyz+rgb fields, or nullopt when the layout is not the
+  // dense float layout this node can walk with plain pointer arithmetic.
+  struct CloudLayout
+  {
+    std::size_t x{0};
+    std::size_t y{4};
+    std::size_t z{8};
+    std::size_t rgb{12};
+    bool packed{false};
+  };
+
+  static CloudLayout inspect_layout(const PointCloud2 & message)
+  {
+    CloudLayout layout;
+    int found = 0;
+    for (const auto & field : message.fields) {
+      if (field.datatype != sensor_msgs::msg::PointField::FLOAT32 ||
+        field.count != 1)
+      {
+        continue;
+      }
+      if (field.name == "x") {
+        layout.x = field.offset;
+        ++found;
+      } else if (field.name == "y") {
+        layout.y = field.offset;
+        ++found;
+      } else if (field.name == "z") {
+        layout.z = field.offset;
+        ++found;
+      } else if (field.name == "rgb") {
+        layout.rgb = field.offset;
+        ++found;
+      }
+    }
+    layout.packed = found == 4 && message.point_step >= 16 &&
+      message.data.size() >=
+      static_cast<std::size_t>(message.point_step) *
+      static_cast<std::size_t>(message.width) *
+      static_cast<std::size_t>(message.height);
+    return layout;
+  }
+
+  // PointCloud2ConstIterator recomputes a field offset on every dereference.
+  // Walking the buffer directly is several times faster for the ~75k points
+  // the panorama publishes at 20 Hz.
   std::vector<ColoredPoint> parse_cloud(const PointCloud2 & message) const
   {
     std::vector<ColoredPoint> points;
-    points.reserve(
+    const std::size_t point_total =
       static_cast<std::size_t>(message.width) *
-      static_cast<std::size_t>(message.height));
+      static_cast<std::size_t>(message.height);
+    points.reserve(point_total);
 
-    sensor_msgs::PointCloud2ConstIterator<float> input_x(message, "x");
-    sensor_msgs::PointCloud2ConstIterator<float> input_y(message, "y");
-    sensor_msgs::PointCloud2ConstIterator<float> input_z(message, "z");
-    sensor_msgs::PointCloud2ConstIterator<float> input_rgb(message, "rgb");
-    for (; input_x != input_x.end();
-      ++input_x, ++input_y, ++input_z, ++input_rgb)
-    {
-      const double x = static_cast<double>(*input_x);
-      const double y = static_cast<double>(*input_y);
-      const double z = static_cast<double>(*input_z);
+    const CloudLayout layout = inspect_layout(message);
+    if (!layout.packed) {
+      sensor_msgs::PointCloud2ConstIterator<float> input_x(message, "x");
+      sensor_msgs::PointCloud2ConstIterator<float> input_y(message, "y");
+      sensor_msgs::PointCloud2ConstIterator<float> input_z(message, "z");
+      sensor_msgs::PointCloud2ConstIterator<float> input_rgb(message, "rgb");
+      for (; input_x != input_x.end();
+        ++input_x, ++input_y, ++input_z, ++input_rgb)
+      {
+        const double x = static_cast<double>(*input_x);
+        const double y = static_cast<double>(*input_y);
+        const double z = static_cast<double>(*input_z);
+        if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+          continue;
+        }
+        const float packed_rgb = *input_rgb;
+        std::uint32_t rgb;
+        std::memcpy(&rgb, &packed_rgb, sizeof(rgb));
+        points.push_back(ColoredPoint{cv::Vec3d(x, y, z), rgb});
+      }
+      return points;
+    }
+
+    const std::uint8_t * cursor = message.data.data();
+    const std::size_t step = message.point_step;
+    for (std::size_t index = 0; index < point_total; ++index, cursor += step) {
+      float x;
+      float y;
+      float z;
+      std::uint32_t rgb;
+      std::memcpy(&x, cursor + layout.x, sizeof(x));
+      std::memcpy(&y, cursor + layout.y, sizeof(y));
+      std::memcpy(&z, cursor + layout.z, sizeof(z));
       if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
         continue;
       }
-      float packed_rgb = *input_rgb;
-      std::uint32_t rgb;
-      std::memcpy(&rgb, &packed_rgb, sizeof(rgb));
-      points.push_back(ColoredPoint{cv::Vec3d(x, y, z), rgb});
+      std::memcpy(&rgb, cursor + layout.rgb, sizeof(rgb));
+      points.push_back(
+        ColoredPoint{
+          cv::Vec3d(
+            static_cast<double>(x), static_cast<double>(y),
+            static_cast<double>(z)), rgb});
     }
     return points;
   }
@@ -226,13 +300,20 @@ private:
   {
     std::vector<std::size_t> indices;
     indices.reserve(points.size());
+    // Compare squared ranges: std::hypot is several times slower than a
+    // multiply-add and its overflow guarantees are irrelevant at these scales.
+    const double minimum_squared_range =
+      ground_candidate_min_range_m_ * ground_candidate_min_range_m_;
+    const double maximum_squared_range =
+      ground_candidate_max_range_m_ * ground_candidate_max_range_m_;
     for (std::size_t index = 0; index < points.size(); ++index) {
       const cv::Vec3d & point = points[index].position;
-      const double horizontal_range = std::hypot(point[0], point[2]);
+      const double squared_range =
+        point[0] * point[0] + point[2] * point[2];
       const double down = -expected_up_.dot(point);
       if (
-        horizontal_range >= ground_candidate_min_range_m_ &&
-        horizontal_range <= ground_candidate_max_range_m_ &&
+        squared_range >= minimum_squared_range &&
+        squared_range <= maximum_squared_range &&
         down >= ground_candidate_min_down_m_ &&
         down <= ground_candidate_max_down_m_)
       {
@@ -433,21 +514,43 @@ private:
     modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
     modifier.resize(points.size());
 
-    sensor_msgs::PointCloud2Iterator<float> output_x(cloud, "x");
-    sensor_msgs::PointCloud2Iterator<float> output_y(cloud, "y");
-    sensor_msgs::PointCloud2Iterator<float> output_z(cloud, "z");
-    sensor_msgs::PointCloud2Iterator<float> output_rgb(cloud, "rgb");
+    // Write through the field offsets rather than assuming four packed floats:
+    // setPointCloud2FieldsByString(2, "xyz", "rgb") pads the point to 32 bytes
+    // and places rgb at offset 16.
+    const CloudLayout layout = inspect_layout(cloud);
+    if (!layout.packed) {
+      sensor_msgs::PointCloud2Iterator<float> output_x(cloud, "x");
+      sensor_msgs::PointCloud2Iterator<float> output_y(cloud, "y");
+      sensor_msgs::PointCloud2Iterator<float> output_z(cloud, "z");
+      sensor_msgs::PointCloud2Iterator<float> output_rgb(cloud, "rgb");
+      for (const auto & point : points) {
+        *output_x = static_cast<float>(point.position[0]);
+        *output_y = static_cast<float>(point.position[1]);
+        *output_z = static_cast<float>(point.position[2]);
+        float packed_rgb;
+        std::memcpy(&packed_rgb, &point.rgb, sizeof(packed_rgb));
+        *output_rgb = packed_rgb;
+        ++output_x;
+        ++output_y;
+        ++output_z;
+        ++output_rgb;
+      }
+      return cloud;
+    }
+
+    std::uint8_t * cursor = cloud.data.data();
+    const std::size_t step = cloud.point_step;
     for (const auto & point : points) {
-      *output_x = static_cast<float>(point.position[0]);
-      *output_y = static_cast<float>(point.position[1]);
-      *output_z = static_cast<float>(point.position[2]);
-      float packed_rgb;
-      std::memcpy(&packed_rgb, &point.rgb, sizeof(packed_rgb));
-      *output_rgb = packed_rgb;
-      ++output_x;
-      ++output_y;
-      ++output_z;
-      ++output_rgb;
+      const float values[3] = {
+        static_cast<float>(point.position[0]),
+        static_cast<float>(point.position[1]),
+        static_cast<float>(point.position[2])
+      };
+      std::memcpy(cursor + layout.x, &values[0], sizeof(float));
+      std::memcpy(cursor + layout.y, &values[1], sizeof(float));
+      std::memcpy(cursor + layout.z, &values[2], sizeof(float));
+      std::memcpy(cursor + layout.rgb, &point.rgb, sizeof(point.rgb));
+      cursor += step;
     }
     return cloud;
   }
@@ -489,6 +592,23 @@ private:
   void pointcloud_callback(const PointCloud2::ConstSharedPtr message)
   {
     const auto start = std::chrono::steady_clock::now();
+    // RANSAC over tens of thousands of points is the most expensive thing this
+    // node does. Skip it entirely while nothing consumes the result.
+    if (
+      skip_when_unsubscribed_ &&
+      obstacle_publisher_->get_subscription_count() == 0 &&
+      obstacle_publisher_->get_intra_process_subscription_count() == 0 &&
+      (!ground_publisher_ ||
+      ground_publisher_->get_subscription_count() == 0))
+    {
+      ++idle_frame_count_;
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(),
+        static_cast<std::uint64_t>(diagnostics_period_sec_ * 1000.0),
+        "idle: no subscriber on %s, %zu clouds skipped",
+        obstacle_topic_.c_str(), idle_frame_count_);
+      return;
+    }
     try {
       const auto points = parse_cloud(*message);
       const auto candidate_indices = select_ground_candidates(points);
@@ -512,14 +632,19 @@ private:
       if (publish_ground) {
         ground.reserve(plane.inliers);
       }
+      const double minimum_squared_range =
+        obstacle_min_range_m_ * obstacle_min_range_m_;
+      const double maximum_squared_range =
+        obstacle_max_range_m_ * obstacle_max_range_m_;
       for (const auto & point : points) {
-        const double horizontal_range = std::hypot(
-          point.position[0], point.position[2]);
+        const double squared_range =
+          point.position[0] * point.position[0] +
+          point.position[2] * point.position[2];
         const double signed_height =
           plane.normal.dot(point.position) + plane.offset;
         if (
-          horizontal_range >= obstacle_min_range_m_ &&
-          horizontal_range <= obstacle_max_range_m_ &&
+          squared_range >= minimum_squared_range &&
+          squared_range <= maximum_squared_range &&
           signed_height >= obstacle_min_height_m_ &&
           signed_height <= obstacle_max_height_m_)
         {
@@ -585,8 +710,10 @@ private:
   double obstacle_min_range_m_{0.25};
   double obstacle_max_range_m_{8.0};
   double obstacle_voxel_size_m_{0.0};
+  bool skip_when_unsubscribed_{true};
   double diagnostics_period_sec_{2.0};
   double minimum_up_alignment_{0.0};
+  std::size_t idle_frame_count_{0};
   std::mt19937 random_engine_;
 
   rclcpp::Subscription<PointCloud2>::SharedPtr pointcloud_subscriber_;

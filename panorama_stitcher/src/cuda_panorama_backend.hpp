@@ -66,6 +66,44 @@ struct CudaPanoramaConfig
   int depth_splat_radius_px{1};
   int depth_edge_splat_radius_px{0};
   int projected_hole_radius{0};
+  // Scale applied when depth arrives as raw 16UC1 device millimetres. Keeping
+  // the conversion on the GPU halves the PCIe upload and removes a full-frame
+  // CPU convertTo from every callback.
+  float depth_scale_m{0.001F};
+  // Source rows are RGB (the RealSense wrapper publishes rgb8). Swapping in
+  // the kernels avoids a host-side colour conversion of every input frame
+  // while the panorama output stays BGR8.
+  bool source_channel_swap{false};
+  // Sampling stride of the GPU point-cloud builder. 0 disables it.
+  int pointcloud_stride{0};
+};
+
+// Per-frame selection of the outputs that are actually needed. Downloading the
+// large range/validity images costs about 15 MB per frame, so a frame that only
+// feeds the point cloud must not pay for them.
+struct CudaProcessOptions
+{
+  bool download_panorama{true};
+  bool download_validity{true};
+  bool download_range{true};
+  bool build_pointcloud{false};
+};
+
+// Destination for the compacted GPU point cloud. The caller passes the exact
+// PointCloud2 layout because it is not simply four packed floats:
+// setPointCloud2FieldsByString(2, "xyz", "rgb") yields point_step 32 with rgb
+// at offset 16, and writing a 16-byte stride there silently produces half the
+// points with colours read out of the neighbouring coordinates.
+struct CudaPointCloudRequest
+{
+  unsigned char * destination{nullptr};
+  int capacity_points{0};
+  int point_step_bytes{0};
+  int x_offset_bytes{0};
+  int y_offset_bytes{4};
+  int z_offset_bytes{8};
+  int rgb_offset_bytes{12};
+  std::size_t point_count{0};
 };
 
 struct CudaPanoramaStats
@@ -102,17 +140,21 @@ public:
     const cv::Mat & right_map_y,
     std::string & error);
 
+  // left_depth / right_depth accept CV_16UC1 raw depth (scaled on the GPU by
+  // config.depth_scale_m) or CV_32FC1 metres.
   bool process(
     const cv::Mat & left_source_color,
-    const cv::Mat & left_depth_m,
+    const cv::Mat & left_depth,
     const cv::Mat & right_source_color,
-    const cv::Mat & right_depth_m,
+    const cv::Mat & right_depth,
     const cv::Vec3d & right_gain_bgr,
     cv::Mat & panorama,
     cv::Mat & validity,
     cv::Mat & range_m,
     CudaPanoramaStats & stats,
-    std::string & error);
+    std::string & error,
+    const CudaProcessOptions & options = CudaProcessOptions(),
+    CudaPointCloudRequest * pointcloud = nullptr);
 
 private:
   struct Impl;

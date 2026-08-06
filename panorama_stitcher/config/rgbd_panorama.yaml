@@ -34,27 +34,47 @@ panorama_stitcher:
     # CUDA, DDS and RViz simultaneously.
     max_output_rate_hz: 20.0
 
-    # 2026-08-04 new-mount calibration. The left topic is wrapper-rotated by
-    # 180 degrees and the right topic is native/upright. These transforms map
-    # those two topic optical conventions into the bisecting panorama frame.
+    # Produce each output only while something subscribes to it. The panorama is
+    # about 9 MB per frame and the range image about 12 MB, so an unobserved
+    # output would otherwise cost GPU time, PCIe bandwidth and DDS traffic for
+    # nobody. This also makes publish_range_output above free when RViz is not
+    # showing it. Set false to restore unconditional publishing.
+    publish_only_when_subscribed: true
+    # Exposure gain is a slowly varying mean ratio, so it is measured on every
+    # 4th pixel of the 1080p sources instead of on full-resolution masks.
+    exposure_sample_stride: 4
+    # Reliable input readers. A best-effort reader was measured to be much
+    # worse here: the middleware discarded most 6 MB colour samples before the
+    # callback ran (colour input fell to 1-7 Hz while depth stayed near 30 Hz),
+    # so the four-stream timestamp match almost never succeeded and the output
+    # collapsed to about 1 FPS. Do not set this true without re-measuring
+    # input_hz in the node diagnostics.
+    input_best_effort: false
+
+    # 2026-08-06 remounted-rig calibration. The left topic is wrapper-rotated
+    # by 180 degrees and the right topic is native/upright. Both rotation and
+    # translation below come from the remounted rig's joint ChArUco stereo
+    # solution (42 common board views, 0.435 px full reprojection RMS), followed
+    # by a symmetric live refinement of 0.299 deg pitch and 0.120 deg yaw across
+    # the pair. Do not reuse the previous mount's 0.11 m horizontal baseline.
     left_rotation_camera_to_rig: [
-      0.8466358450597187, 0.0, -0.5321726654573833,
-      0.0, 1.0, 0.0,
-      0.5321726654573833, 0.0, 0.8466358450597187
+      0.862515680992685, 0.010597361647451654, -0.5059193571784321,
+      -0.00459863862956593, 0.9999035545049233, 0.013104740026983044,
+      0.5060094392049219, -0.00897650346923948, 0.8624812286774637
     ]
     left_translation_camera_in_rig_m: [
-      -0.03523273886910431, -0.02201658980930871, -0.005307845560422412
+      -0.028850978075097664, -0.013110557241724618, -0.0007366347234041282
     ]
     right_rotation_camera_to_rig: [
-      0.8467006436555875, 0.0017900416286067292, 0.532066552025385,
-      0.00726299754380777, 0.9998622851978125, -0.014921779575067401,
-      -0.5320199891920344, 0.016498678431199006, 0.8465710393759824
+      0.8625156013310111, -0.005928047395682471, 0.5059957467357596,
+      0.011921834474450834, 0.99989188450164, -0.008607506637976166,
+      -0.5058900150461246, 0.01345650630117455, 0.862493023226738
     ]
     right_translation_camera_in_rig_m: [
-      0.03523273886910431, 0.02201658980930871, 0.005307845560422412
+      0.028850978075097664, 0.013110557241724618, 0.0007366347234041282
     ]
 
-    # The new 2026-08-04 mount has asymmetric physical camera orientation.
+    # The 2026-08-06 mount has asymmetric physical camera orientation.
     # front_left is rotated by the wrapper; front_right is physically upright.
     # CameraInfo stays native, so principal-point adjustment is per camera.
     input_images_rotated_180: true
@@ -63,16 +83,16 @@ panorama_stitcher:
     rotate_color_180: false
     rotate_aligned_depth_180: false
 
-    left_fx: 1369.7860107421875
-    left_fy: 1369.6165771484375
-    left_cx: 967.3739013671875
-    left_cy: 566.1657104492188
+    left_fx: 1375.93896484375
+    left_fy: 1376.0078125
+    left_cx: 956.0244140625
+    left_cy: 539.0271606445312
     left_width: 1920
     left_height: 1080
-    right_fx: 1375.93896484375
-    right_fy: 1376.0078125
-    right_cx: 962.9755859375
-    right_cy: 539.9728393554688
+    right_fx: 1369.7860107421875
+    right_fy: 1369.6165771484375
+    right_cx: 967.3739013671875
+    right_cy: 566.1657104492188
     right_width: 1920
     right_height: 1080
 
@@ -87,9 +107,9 @@ panorama_stitcher:
     # Keep roughly the native angular sampling for downstream perception.
     projection_scale: 1.0
     projection_model: cylindrical
-    # Board 5 center in the new rig is 3.293 m forward. Depth-aware color is
+    # Board 5 center in the remounted rig is 2.974 m forward. Depth-aware color is
     # still used in the overlap; this plane is the stable fallback projection.
-    color_reference_plane_z_m: 3.2934136853115334
+    color_reference_plane_z_m: 2.97374063
     depth_scale_m: 0.001
     min_depth_m: 0.20
     max_depth_m: 15.0

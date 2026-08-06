@@ -18,6 +18,9 @@ namespace
 constexpr unsigned long long kInvalidProjectionKey =
   0xffffffffffffffffULL;
 constexpr unsigned int kInvalidProjectionRange = 0xffffffffU;
+// PointCloud2 stride the device cloud buffer is sized for. An xyz+rgb cloud
+// built by PointCloud2Modifier uses 32 bytes per point.
+constexpr int kMaxPointCloudStride = 32;
 
 std::string cuda_error_message(
   const char * operation, cudaError_t result)
@@ -178,6 +181,19 @@ __global__ void temporal_depth_filter_kernel(
   }
   previous_depth[index] = output;
   filtered_depth[index] = output;
+}
+
+__global__ void convert_depth_kernel(
+  const unsigned short * source,
+  float * destination,
+  float scale,
+  int pixel_count)
+{
+  const int index = blockIdx.x * blockDim.x + threadIdx.x;
+  if (index >= pixel_count) {
+    return;
+  }
+  destination[index] = static_cast<float>(source[index]) * scale;
 }
 
 __device__ __forceinline__ bool project_depth_pixel(
@@ -429,7 +445,11 @@ __global__ void remap_color_kernel(
   const int index_01 = (y1 * config.source_width + x0) * 3;
   const int index_11 = (y1 * config.source_width + x1) * 3;
   for (int channel = 0; channel < 3; ++channel) {
-    remapped[output_color_index + channel] = float_channel(
+    // The remapped base image is always BGR. When the publisher sends rgb8 the
+    // channel order is reversed here instead of on the CPU.
+    const int destination_channel =
+      config.source_channel_swap ? 2 - channel : channel;
+    remapped[output_color_index + destination_channel] = float_channel(
       weight_00 * static_cast<float>(source[index_00 + channel]) +
       weight_10 * static_cast<float>(source[index_10 + channel]) +
       weight_01 * static_cast<float>(source[index_01 + channel]) +
@@ -496,6 +516,7 @@ __device__ __forceinline__ void source_color(
   float gain_b,
   float gain_g,
   float gain_r,
+  bool swap_channels,
   unsigned char & blue,
   unsigned char & green,
   unsigned char & red)
@@ -503,9 +524,11 @@ __device__ __forceinline__ void source_color(
   const unsigned int source_index =
     static_cast<unsigned int>(key & 0xffffffffULL);
   const unsigned int color_index = source_index * 3U;
-  blue = gained_channel(source[color_index], gain_b);
+  const unsigned int blue_offset = swap_channels ? 2U : 0U;
+  const unsigned int red_offset = swap_channels ? 0U : 2U;
+  blue = gained_channel(source[color_index + blue_offset], gain_b);
   green = gained_channel(source[color_index + 1U], gain_g);
-  red = gained_channel(source[color_index + 2U], gain_r);
+  red = gained_channel(source[color_index + red_offset], gain_r);
 }
 
 __device__ __forceinline__ float projection_range(
@@ -580,12 +603,14 @@ __global__ void seam_cost_kernel(
   if (left_depth_valid) {
     source_color(
       left_source, left_key, 1.0F, 1.0F, 1.0F,
+      config.source_channel_swap,
       left_blue, left_green, left_red);
   }
   if (right_depth_valid) {
     source_color(
       right_source, right_key,
       right_gain_b, right_gain_g, right_gain_r,
+      config.source_channel_swap,
       right_blue, right_green, right_red);
   }
 
@@ -788,10 +813,12 @@ __global__ void compose_panorama_kernel(
           unsigned char right_red;
           source_color(
             left_source, left_key, 1.0F, 1.0F, 1.0F,
+            config.source_channel_swap,
             left_blue, left_green, left_red);
           source_color(
             right_source, right_key,
             right_gain_b, right_gain_g, right_gain_r,
+            config.source_channel_swap,
             right_blue, right_green, right_red);
           const float right_weight = static_cast<float>(
             x - blend_left) /
@@ -818,6 +845,7 @@ __global__ void compose_panorama_kernel(
         if (left_depth_valid) {
           source_color(
             left_source, left_key, 1.0F, 1.0F, 1.0F,
+            config.source_channel_swap,
             output[color_index], output[color_index + 1],
             output[color_index + 2]);
           validity[pixel_index] = 255U;
@@ -839,6 +867,7 @@ __global__ void compose_panorama_kernel(
           source_color(
             right_source, right_key,
             right_gain_b, right_gain_g, right_gain_r,
+            config.source_channel_swap,
             output[color_index], output[color_index + 1],
             output[color_index + 2]);
           validity[pixel_index] = 255U;
@@ -877,11 +906,13 @@ __global__ void compose_panorama_kernel(
     if (use_left) {
       source_color(
         left_source, left_key, 1.0F, 1.0F, 1.0F,
+        config.source_channel_swap,
         blue, green, red);
     } else {
       source_color(
         right_source, right_key,
         right_gain_b, right_gain_g, right_gain_r,
+        config.source_channel_swap,
         blue, green, red);
     }
     output[color_index] = blue;
@@ -942,6 +973,94 @@ __global__ void compose_panorama_kernel(
     left_weight * static_cast<float>(left_base[color_index + 2]) +
     right_weight * static_cast<float>(right_base[color_index + 2]) *
     right_gain_r);
+}
+
+// Building the cloud on the GPU keeps the 12 MB range image and the 3 MB
+// validity mask on the device. Only the compacted points cross PCIe, and the
+// per-pixel trigonometry no longer runs on the CPU.
+struct CudaPointCloudLayout
+{
+  int point_step;
+  int x_offset;
+  int y_offset;
+  int z_offset;
+  int rgb_offset;
+};
+
+__global__ void build_pointcloud_kernel(
+  const unsigned char * panorama,
+  const unsigned char * validity,
+  const float * range_m,
+  unsigned char * points,
+  unsigned int * point_count,
+  int capacity_points,
+  CudaPointCloudLayout layout,
+  CudaPanoramaConfig config)
+{
+  const int stride = config.pointcloud_stride;
+  if (stride <= 0) {
+    return;
+  }
+  const int sampled_columns =
+    (config.panorama_width + stride - 1) / stride;
+  const int sampled_rows =
+    (config.panorama_height + stride - 1) / stride;
+  const int sample_x = blockIdx.x * blockDim.x + threadIdx.x;
+  const int sample_y = blockIdx.y * blockDim.y + threadIdx.y;
+  if (sample_x >= sampled_columns || sample_y >= sampled_rows) {
+    return;
+  }
+
+  const int x = sample_x * stride;
+  const int y = sample_y * stride;
+  const int pixel_index = y * config.panorama_width + x;
+  const float horizontal_range = range_m[pixel_index];
+  if (
+    validity[pixel_index] == 0U ||
+    !isfinite(horizontal_range) || horizontal_range <= 0.0F)
+  {
+    return;
+  }
+
+  float point_x;
+  float point_y;
+  float point_z;
+  if (config.projection_model == 1) {
+    const float ray_x =
+      (static_cast<float>(x) - config.virtual_cx_px) / config.virtual_fx_px;
+    const float ray_y =
+      (static_cast<float>(y) - config.virtual_cy_px) / config.virtual_fy_px;
+    point_z = horizontal_range / hypotf(ray_x, 1.0F);
+    point_x = ray_x * point_z;
+    point_y = ray_y * point_z;
+  } else {
+    const float angle =
+      config.panorama_min_angle +
+      static_cast<float>(x) / config.panorama_focal_px;
+    const float vertical_ratio =
+      (config.panorama_min_vertical + static_cast<float>(y)) /
+      config.panorama_focal_px;
+    point_x = horizontal_range * sinf(angle);
+    point_y = horizontal_range * vertical_ratio;
+    point_z = horizontal_range * cosf(angle);
+  }
+
+  const unsigned int slot = atomicAdd(point_count, 1U);
+  if (static_cast<int>(slot) >= capacity_points) {
+    return;
+  }
+  const int color_index = pixel_index * 3;
+  const unsigned int rgb =
+    (static_cast<unsigned int>(panorama[color_index + 2]) << 16U) |
+    (static_cast<unsigned int>(panorama[color_index + 1]) << 8U) |
+    static_cast<unsigned int>(panorama[color_index]);
+  unsigned char * destination =
+    points + static_cast<std::size_t>(slot) *
+    static_cast<std::size_t>(layout.point_step);
+  *reinterpret_cast<float *>(destination + layout.x_offset) = point_x;
+  *reinterpret_cast<float *>(destination + layout.y_offset) = point_y;
+  *reinterpret_cast<float *>(destination + layout.z_offset) = point_z;
+  *reinterpret_cast<unsigned int *>(destination + layout.rgb_offset) = rgb;
 }
 
 std::vector<int> find_content_aware_seam(
@@ -1028,6 +1147,8 @@ struct CudaPanoramaBackend::Impl
 
   unsigned char * left_source{nullptr};
   unsigned char * right_source{nullptr};
+  unsigned short * left_raw_depth{nullptr};
+  unsigned short * right_raw_depth{nullptr};
   float * left_depth{nullptr};
   float * right_depth{nullptr};
   float * left_spatial_depth{nullptr};
@@ -1055,6 +1176,9 @@ struct CudaPanoramaBackend::Impl
   unsigned char * output{nullptr};
   unsigned char * validity{nullptr};
   float * output_range_m{nullptr};
+  unsigned char * pointcloud{nullptr};
+  unsigned int * pointcloud_count{nullptr};
+  int pointcloud_capacity{0};
   std::vector<float> seam_cost_host;
   std::vector<int> seam_host;
   std::vector<int> previous_seam_host;
@@ -1063,6 +1187,8 @@ struct CudaPanoramaBackend::Impl
   {
     cudaFree(left_source);
     cudaFree(right_source);
+    cudaFree(left_raw_depth);
+    cudaFree(right_raw_depth);
     cudaFree(left_depth);
     cudaFree(right_depth);
     cudaFree(left_spatial_depth);
@@ -1090,8 +1216,12 @@ struct CudaPanoramaBackend::Impl
     cudaFree(output);
     cudaFree(validity);
     cudaFree(output_range_m);
+    cudaFree(pointcloud);
+    cudaFree(pointcloud_count);
     left_source = nullptr;
     right_source = nullptr;
+    left_raw_depth = nullptr;
+    right_raw_depth = nullptr;
     left_depth = nullptr;
     right_depth = nullptr;
     left_spatial_depth = nullptr;
@@ -1119,6 +1249,9 @@ struct CudaPanoramaBackend::Impl
     output = nullptr;
     validity = nullptr;
     output_range_m = nullptr;
+    pointcloud = nullptr;
+    pointcloud_count = nullptr;
+    pointcloud_capacity = 0;
     seam_cost_host.clear();
     seam_host.clear();
     previous_seam_host.clear();
@@ -1233,6 +1366,16 @@ bool CudaPanoramaBackend::configure(
     sizeof(float);
   const std::size_t seam_row_bytes =
     static_cast<std::size_t>(config.panorama_height) * sizeof(int);
+  const std::size_t source_raw_depth_bytes =
+    source_pixels * sizeof(unsigned short);
+  const int pointcloud_stride = std::max(config.pointcloud_stride, 0);
+  impl_->pointcloud_capacity = pointcloud_stride > 0 ?
+    ((config.panorama_width + pointcloud_stride - 1) / pointcloud_stride) *
+    ((config.panorama_height + pointcloud_stride - 1) / pointcloud_stride) :
+    0;
+  const std::size_t pointcloud_bytes =
+    static_cast<std::size_t>(std::max(impl_->pointcloud_capacity, 1)) *
+    static_cast<std::size_t>(kMaxPointCloudStride);
 
   auto allocate = [&error](void ** pointer, std::size_t bytes, const char * name) {
       const cudaError_t result = cudaMalloc(pointer, bytes);
@@ -1249,6 +1392,12 @@ bool CudaPanoramaBackend::configure(
     !allocate(
       reinterpret_cast<void **>(&impl_->right_source),
       source_color_bytes, "cudaMalloc right source") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->left_raw_depth),
+      source_raw_depth_bytes, "cudaMalloc left raw depth") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->right_raw_depth),
+      source_raw_depth_bytes, "cudaMalloc right raw depth") ||
     !allocate(
       reinterpret_cast<void **>(&impl_->left_depth),
       source_depth_bytes, "cudaMalloc left depth") ||
@@ -1329,7 +1478,13 @@ bool CudaPanoramaBackend::configure(
       panorama_mask_bytes, "cudaMalloc validity") ||
     !allocate(
       reinterpret_cast<void **>(&impl_->output_range_m),
-      panorama_pixels * sizeof(float), "cudaMalloc output range"))
+      panorama_pixels * sizeof(float), "cudaMalloc output range") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->pointcloud),
+      pointcloud_bytes, "cudaMalloc point cloud") ||
+    !allocate(
+      reinterpret_cast<void **>(&impl_->pointcloud_count),
+      sizeof(unsigned int), "cudaMalloc point cloud count"))
   {
     impl_->release();
     return false;
@@ -1424,15 +1579,17 @@ bool CudaPanoramaBackend::configure(
 
 bool CudaPanoramaBackend::process(
   const cv::Mat & left_source_color,
-  const cv::Mat & left_depth_m,
+  const cv::Mat & left_depth,
   const cv::Mat & right_source_color,
-  const cv::Mat & right_depth_m,
+  const cv::Mat & right_depth,
   const cv::Vec3d & right_gain_bgr,
   cv::Mat & panorama,
   cv::Mat & validity,
   cv::Mat & range_m,
   CudaPanoramaStats & stats,
-  std::string & error)
+  std::string & error,
+  const CudaProcessOptions & options,
+  CudaPointCloudRequest * pointcloud)
 {
   if (!impl_->configured) {
     error = "CUDA backend is not configured";
@@ -1446,24 +1603,52 @@ bool CudaPanoramaBackend::process(
     error = "CUDA backend received an unsupported color cv::Mat type";
     return false;
   }
-  if (
-    config.depth_aware_color &&
-    (left_depth_m.type() != CV_32FC1 ||
-    right_depth_m.type() != CV_32FC1))
-  {
+  const bool depth_is_raw_uint16 =
+    left_depth.type() == CV_16UC1 && right_depth.type() == CV_16UC1;
+  const bool depth_is_metres =
+    left_depth.type() == CV_32FC1 && right_depth.type() == CV_32FC1;
+  if (config.depth_aware_color && !depth_is_raw_uint16 && !depth_is_metres) {
     error = "CUDA backend received an unsupported depth cv::Mat type";
     return false;
   }
-  panorama.create(
-    config.panorama_height, config.panorama_width, CV_8UC3);
-  validity.create(
-    config.panorama_height, config.panorama_width, CV_8UC1);
-  range_m.create(
-    config.panorama_height, config.panorama_width, CV_32FC1);
+  const bool build_pointcloud =
+    options.build_pointcloud && pointcloud != nullptr &&
+    pointcloud->destination != nullptr &&
+    config.pointcloud_stride > 0 &&
+    impl_->pointcloud_capacity > 0;
+  if (build_pointcloud) {
+    if (pointcloud->capacity_points < impl_->pointcloud_capacity) {
+      error = "point cloud destination is smaller than the sampled grid";
+      return false;
+    }
+    if (
+      pointcloud->point_step_bytes <= 0 ||
+      pointcloud->point_step_bytes > kMaxPointCloudStride)
+    {
+      error = "unsupported point cloud point_step";
+      return false;
+    }
+  }
+  if (pointcloud != nullptr) {
+    pointcloud->point_count = 0;
+  }
+  if (options.download_panorama) {
+    panorama.create(
+      config.panorama_height, config.panorama_width, CV_8UC3);
+  }
+  if (options.download_validity) {
+    validity.create(
+      config.panorama_height, config.panorama_width, CV_8UC1);
+  }
+  if (options.download_range) {
+    range_m.create(
+      config.panorama_height, config.panorama_width, CV_32FC1);
+  }
   const std::size_t source_color_row_bytes =
     static_cast<std::size_t>(config.source_width) * 3U;
   const std::size_t source_depth_row_bytes =
-    static_cast<std::size_t>(config.source_width) * sizeof(float);
+    static_cast<std::size_t>(config.source_width) *
+    (depth_is_raw_uint16 ? sizeof(unsigned short) : sizeof(float));
   const std::size_t panorama_color_row_bytes =
     static_cast<std::size_t>(config.panorama_width) * 3U;
   const std::size_t panorama_pixels =
@@ -1514,18 +1699,47 @@ bool CudaPanoramaBackend::process(
   {
     return false;
   }
-  if (
-    config.depth_aware_color &&
-    (!copy_to_device(
-      impl_->left_depth, source_depth_row_bytes,
-      left_depth_m, source_depth_row_bytes,
-      config.source_height, "upload left depth") ||
-    !copy_to_device(
-      impl_->right_depth, source_depth_row_bytes,
-      right_depth_m, source_depth_row_bytes,
-      config.source_height, "upload right depth")))
-  {
-    return false;
+  if (config.depth_aware_color) {
+    // Raw 16UC1 depth is uploaded as-is and scaled by a trivial kernel: half
+    // the PCIe traffic of float metres and no CPU conversion at all.
+    void * const left_destination = depth_is_raw_uint16 ?
+      static_cast<void *>(impl_->left_raw_depth) :
+      static_cast<void *>(impl_->left_depth);
+    void * const right_destination = depth_is_raw_uint16 ?
+      static_cast<void *>(impl_->right_raw_depth) :
+      static_cast<void *>(impl_->right_depth);
+    if (
+      !copy_to_device(
+        left_destination, source_depth_row_bytes,
+        left_depth, source_depth_row_bytes,
+        config.source_height, "upload left depth") ||
+      !copy_to_device(
+        right_destination, source_depth_row_bytes,
+        right_depth, source_depth_row_bytes,
+        config.source_height, "upload right depth"))
+    {
+      return false;
+    }
+    if (depth_is_raw_uint16) {
+      constexpr int convert_threads = 256;
+      const int source_pixel_count =
+        config.source_width * config.source_height;
+      const int convert_blocks =
+        (source_pixel_count + convert_threads - 1) / convert_threads;
+      convert_depth_kernel<<<
+        convert_blocks, convert_threads, 0, impl_->stream>>>(
+        impl_->left_raw_depth, impl_->left_depth,
+        config.depth_scale_m, source_pixel_count);
+      convert_depth_kernel<<<
+        convert_blocks, convert_threads, 0, impl_->stream>>>(
+        impl_->right_raw_depth, impl_->right_depth,
+        config.depth_scale_m, source_pixel_count);
+      if (!check_cuda(
+          cudaPeekAtLastError(), "launch CUDA depth conversion", error))
+      {
+        return false;
+      }
+    }
   }
 
   if (
@@ -1778,9 +1992,60 @@ bool CudaPanoramaBackend::process(
     return false;
   }
 
+  unsigned int cloud_count = 0;
+  if (build_pointcloud) {
+    const int stride = config.pointcloud_stride;
+    const int sampled_columns =
+      (config.panorama_width + stride - 1) / stride;
+    const int sampled_rows =
+      (config.panorama_height + stride - 1) / stride;
+    const dim3 cloud_blocks(
+      (sampled_columns + compose_threads.x - 1) / compose_threads.x,
+      (sampled_rows + compose_threads.y - 1) / compose_threads.y);
+    CudaPointCloudLayout layout;
+    layout.point_step = pointcloud->point_step_bytes;
+    layout.x_offset = pointcloud->x_offset_bytes;
+    layout.y_offset = pointcloud->y_offset_bytes;
+    layout.z_offset = pointcloud->z_offset_bytes;
+    layout.rgb_offset = pointcloud->rgb_offset_bytes;
+    // Zero the whole buffer so the padding bytes between fields, and the tail
+    // slots past point_count, never carry the previous frame's contents.
+    if (
+      !check_cuda(
+        cudaMemsetAsync(
+          impl_->pointcloud_count, 0, sizeof(unsigned int), impl_->stream),
+        "clear point cloud count", error) ||
+      !check_cuda(
+        cudaMemsetAsync(
+          impl_->pointcloud, 0,
+          static_cast<std::size_t>(impl_->pointcloud_capacity) *
+          static_cast<std::size_t>(layout.point_step),
+          impl_->stream),
+        "clear point cloud buffer", error))
+    {
+      return false;
+    }
+    build_pointcloud_kernel<<<
+      cloud_blocks, compose_threads, 0, impl_->stream>>>(
+      impl_->output,
+      impl_->validity,
+      impl_->output_range_m,
+      impl_->pointcloud,
+      impl_->pointcloud_count,
+      impl_->pointcloud_capacity,
+      layout,
+      config);
+    if (!check_cuda(
+        cudaGetLastError(), "launch CUDA point cloud builder", error))
+    {
+      return false;
+    }
+  }
+
   unsigned int left_count = 0;
   unsigned int right_count = 0;
   if (
+    options.download_panorama &&
     !check_cuda(
       cudaMemcpy2DAsync(
         panorama.data,
@@ -1791,7 +2056,12 @@ bool CudaPanoramaBackend::process(
         config.panorama_height,
         cudaMemcpyDeviceToHost,
         impl_->stream),
-      "download panorama", error) ||
+      "download panorama", error))
+  {
+    return false;
+  }
+  if (
+    options.download_validity &&
     !check_cuda(
       cudaMemcpy2DAsync(
         validity.data,
@@ -1802,7 +2072,12 @@ bool CudaPanoramaBackend::process(
         config.panorama_height,
         cudaMemcpyDeviceToHost,
         impl_->stream),
-      "download validity", error) ||
+      "download validity", error))
+  {
+    return false;
+  }
+  if (
+    options.download_range &&
     !check_cuda(
       cudaMemcpy2DAsync(
         range_m.data,
@@ -1813,7 +2088,37 @@ bool CudaPanoramaBackend::process(
         config.panorama_height,
         cudaMemcpyDeviceToHost,
         impl_->stream),
-      "download range", error) ||
+      "download range", error))
+  {
+    return false;
+  }
+  if (build_pointcloud) {
+    // The compacted points sit at the front of the buffer, so downloading the
+    // whole sampled grid once avoids a second synchronization just to learn
+    // the exact count.
+    if (
+      !check_cuda(
+        cudaMemcpyAsync(
+          pointcloud->destination,
+          impl_->pointcloud,
+          static_cast<std::size_t>(impl_->pointcloud_capacity) *
+          static_cast<std::size_t>(pointcloud->point_step_bytes),
+          cudaMemcpyDeviceToHost,
+          impl_->stream),
+        "download point cloud", error) ||
+      !check_cuda(
+        cudaMemcpyAsync(
+          &cloud_count,
+          impl_->pointcloud_count,
+          sizeof(unsigned int),
+          cudaMemcpyDeviceToHost,
+          impl_->stream),
+        "download point cloud count", error))
+    {
+      return false;
+    }
+  }
+  if (
     !check_cuda(
       cudaMemcpyAsync(
         &left_count,
@@ -1854,6 +2159,11 @@ bool CudaPanoramaBackend::process(
   stats.left_depth_points = left_count;
   stats.right_depth_points = right_count;
   stats.gpu_time_ms = elapsed_ms;
+  if (build_pointcloud) {
+    pointcloud->point_count = std::min(
+      static_cast<std::size_t>(cloud_count),
+      static_cast<std::size_t>(impl_->pointcloud_capacity));
+  }
   stats.content_aware_seam_used = use_content_aware_seam;
   const auto seam_bounds = std::minmax_element(
     impl_->seam_host.begin(), impl_->seam_host.end());

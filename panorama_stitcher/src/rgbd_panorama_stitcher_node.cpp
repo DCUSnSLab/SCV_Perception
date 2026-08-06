@@ -16,6 +16,10 @@
 #include <thread>
 #include <vector>
 
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
+
 #include <cv_bridge/cv_bridge.h>
 #include <opencv2/core.hpp>
 #include <opencv2/imgproc.hpp>
@@ -62,6 +66,26 @@ struct ProjectedDepth
   cv::Mat range;
   cv::Mat mask;
   size_t accepted_points{0};
+};
+
+// What a single frame has to produce. Everything here is derived from live
+// subscription counts, so an unobserved output costs neither GPU time,
+// PCIe bandwidth nor DDS traffic.
+struct FrameDemand
+{
+  bool image{false};
+  bool validity{false};
+  bool range{false};
+  bool pointcloud{false};
+  // The range/validity images are only downloaded when a consumer needs them
+  // on the host: the debug publishers, or the CPU point-cloud fallback.
+  bool host_validity{false};
+  bool host_range{false};
+
+  bool any() const
+  {
+    return image || validity || range || pointcloud;
+  }
 };
 
 class RgbdPanoramaStitcherNode : public rclcpp::Node
@@ -113,6 +137,21 @@ public:
       "pointcloud_publisher_best_effort", true);
     max_output_rate_hz_ = declare_parameter<double>(
       "max_output_rate_hz", 0.0);
+    // A 3220x919 panorama is roughly 9 MB per frame and the range image another
+    // 12 MB. Producing them while nothing is subscribed burns CPU, GPU and DDS
+    // bandwidth for nobody, so every output is gated on demand by default.
+    publish_only_when_subscribed_ = declare_parameter<bool>(
+      "publish_only_when_subscribed", true);
+    // Exposure gain is a slowly varying mean ratio. Sampling every Nth pixel
+    // of the 1080p sources gives the same gain for a small fraction of the CPU.
+    exposure_sample_stride_ = declare_parameter<int>(
+      "exposure_sample_stride", 4);
+    // Keep the reliable reader. Best-effort looks attractive because this node
+    // only ever uses the newest synchronized set, but measured against these
+    // cameras it makes the middleware discard most 6 MB colour samples before
+    // the callback sees them (colour fell to 1-7 Hz while depth stayed near
+    // 30 Hz), and the four-stream timestamp match then almost never succeeds.
+    input_best_effort_ = declare_parameter<bool>("input_best_effort", false);
 
     sync_queue_size_ = declare_parameter<int>("sync_queue_size", 50);
     sync_slop_ms_ = declare_parameter<double>("sync_slop_ms", 45.0);
@@ -286,21 +325,26 @@ public:
         pointcloud_topic_, pointcloud_qos);
     }
 
+    // CameraInfo arrives at the full camera rate. Publishing it into a small
+    // staging slot keeps these callbacks off projection_mutex_, which the
+    // processing thread holds for the whole stitch.
+    pending_left_model_ = left_model_;
+    pending_right_model_ = right_model_;
     const auto camera_info_qos =
       rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
     left_camera_info_subscriber_ = create_subscription<CameraInfo>(
       left_camera_info_topic_, camera_info_qos,
       [this](const CameraInfo::ConstSharedPtr message) {
-        const std::lock_guard<std::mutex> lock(projection_mutex_);
-        update_camera_model(
-          left_model_, *message, "left", left_input_image_rotated_180_);
+        stage_camera_model(
+          pending_left_model_, *message, "left",
+          left_input_image_rotated_180_);
       });
     right_camera_info_subscriber_ = create_subscription<CameraInfo>(
       right_camera_info_topic_, camera_info_qos,
       [this](const CameraInfo::ConstSharedPtr message) {
-        const std::lock_guard<std::mutex> lock(projection_mutex_);
-        update_camera_model(
-          right_model_, *message, "right", right_input_image_rotated_180_);
+        stage_camera_model(
+          pending_right_model_, *message, "right",
+          right_input_image_rotated_180_);
       });
 
     if (depth_aware_color_ || use_rgbd_synchronization_) {
@@ -308,10 +352,8 @@ public:
         rclcpp::CallbackGroupType::Reentrant);
       rclcpp::SubscriptionOptions image_subscription_options;
       image_subscription_options.callback_group = image_callback_group_;
-      const auto color_qos =
-        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
-      const auto depth_qos =
-        rclcpp::QoS(rclcpp::KeepLast(1)).reliable().durability_volatile();
+      const auto color_qos = make_input_qos();
+      const auto depth_qos = make_input_qos();
       left_color_rgbd_subscriber_ = create_subscription<Image>(
         left_color_topic_, color_qos,
         [this](const Image::ConstSharedPtr message) {
@@ -381,6 +423,17 @@ public:
   }
 
 private:
+  rclcpp::QoS make_input_qos() const
+  {
+    auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile();
+    if (input_best_effort_) {
+      qos.best_effort();
+    } else {
+      qos.reliable();
+    }
+    return qos;
+  }
+
   static rclcpp::QoS make_output_qos(bool best_effort)
   {
     auto qos = rclcpp::QoS(rclcpp::KeepLast(1)).durability_volatile();
@@ -549,6 +602,8 @@ private:
     diagnostics_period_sec_ = std::max(diagnostics_period_sec_, 0.2);
     pointcloud_stride_ = std::clamp(pointcloud_stride_, 1, 16);
     max_output_rate_hz_ = std::max(max_output_rate_hz_, 0.0);
+    exposure_sample_stride_ = std::clamp(exposure_sample_stride_, 1, 16);
+    projection_is_rectilinear_ = projection_model_ == "rectilinear";
   }
 
   static void adjust_intrinsics_for_input_rotation(
@@ -561,20 +616,10 @@ private:
     model.cy = static_cast<double>(model.height - 1) - model.cy;
   }
 
-  void update_camera_model(
-    CameraModel & model, const CameraInfo & message,
-    const char * camera_name, bool image_rotated_180)
+  static bool intrinsics_differ(
+    const CameraModel & model, const CameraModel & updated)
   {
-    CameraModel updated = model;
-    updated.fx = message.k[0];
-    updated.fy = message.k[4];
-    updated.cx = message.k[2];
-    updated.cy = message.k[5];
-    updated.width = static_cast<int>(message.width);
-    updated.height = static_cast<int>(message.height);
-    adjust_intrinsics_for_input_rotation(updated, image_rotated_180);
-
-    const bool changed =
+    return
       !model.valid() ||
       model.width != updated.width ||
       model.height != updated.height ||
@@ -582,18 +627,53 @@ private:
       std::abs(model.fy - updated.fy) > 1e-6 ||
       std::abs(model.cx - updated.cx) > 1e-6 ||
       std::abs(model.cy - updated.cy) > 1e-6;
-    if (!changed) {
+  }
+
+  // Runs in the CameraInfo callback. It only touches the small staging model
+  // under a dedicated mutex, so it never waits for a frame to finish stitching.
+  void stage_camera_model(
+    CameraModel & staged, const CameraInfo & message,
+    const char * camera_name, bool image_rotated_180)
+  {
+    const std::lock_guard<std::mutex> lock(camera_info_mutex_);
+    CameraModel updated = staged;
+    updated.fx = message.k[0];
+    updated.fy = message.k[4];
+    updated.cx = message.k[2];
+    updated.cy = message.k[5];
+    updated.width = static_cast<int>(message.width);
+    updated.height = static_cast<int>(message.height);
+    adjust_intrinsics_for_input_rotation(updated, image_rotated_180);
+    if (!intrinsics_differ(staged, updated)) {
       return;
     }
 
-    model = updated;
-    projection_dirty_ = true;
+    staged = updated;
+    camera_info_staged_ = true;
     RCLCPP_INFO(
       get_logger(),
       "%s CameraInfo: %dx%d fx/fy=%.3f/%.3f cx/cy=%.3f/%.3f%s",
-      camera_name, model.width, model.height,
-      model.fx, model.fy, model.cx, model.cy,
+      camera_name, updated.width, updated.height,
+      updated.fx, updated.fy, updated.cx, updated.cy,
       image_rotated_180 ? " (adjusted for 180 deg image rotation)" : "");
+  }
+
+  // Called by the processing thread while it already owns projection_mutex_.
+  void apply_staged_camera_models()
+  {
+    const std::lock_guard<std::mutex> lock(camera_info_mutex_);
+    if (!camera_info_staged_) {
+      return;
+    }
+    camera_info_staged_ = false;
+    if (intrinsics_differ(left_model_, pending_left_model_)) {
+      left_model_ = pending_left_model_;
+      projection_dirty_ = true;
+    }
+    if (intrinsics_differ(right_model_, pending_right_model_)) {
+      right_model_ = pending_right_model_;
+      projection_dirty_ = true;
+    }
   }
 
   static int64_t stamp_nanoseconds(const builtin_interfaces::msg::Time & stamp)
@@ -602,16 +682,33 @@ private:
            static_cast<int64_t>(stamp.nanosec);
   }
 
-  cv::Mat to_bgr(const Image::ConstSharedPtr & message) const
+  struct SourceColor
   {
-    const cv::Mat color = cv_bridge::toCvShare(
-      message, sensor_msgs::image_encodings::BGR8)->image;
-    if (!rotate_color_180_) {
-      return color;
+    cv::Mat image;
+    bool is_rgb{false};
+  };
+
+  // The RealSense wrapper publishes rgb8. Asking cv_bridge for bgr8 forced a
+  // full 1920x1080 conversion plus allocation for both cameras on every frame;
+  // the channel order is now handled where the pixels are already being read.
+  SourceColor to_source_color(const Image::ConstSharedPtr & message) const
+  {
+    SourceColor source;
+    if (message->encoding == sensor_msgs::image_encodings::RGB8) {
+      source.image = cv_bridge::toCvShare(message, message->encoding)->image;
+      source.is_rgb = true;
+    } else if (message->encoding == sensor_msgs::image_encodings::BGR8) {
+      source.image = cv_bridge::toCvShare(message, message->encoding)->image;
+    } else {
+      source.image = cv_bridge::toCvCopy(
+        message, sensor_msgs::image_encodings::BGR8)->image;
     }
-    cv::Mat rotated;
-    cv::rotate(color, rotated, cv::ROTATE_180);
-    return rotated;
+    if (rotate_color_180_) {
+      cv::Mat rotated;
+      cv::rotate(source.image, rotated, cv::ROTATE_180);
+      source.image = rotated;
+    }
+    return source;
   }
 
   cv::Mat to_depth(const Image::ConstSharedPtr & message) const
@@ -651,6 +748,7 @@ private:
 
   void build_projection_if_needed(int width, int height)
   {
+    apply_staged_camera_models();
     if (!projection_dirty_ &&
       source_width_ == width && source_height_ == height)
     {
@@ -700,7 +798,7 @@ private:
             }
             const double angle = std::atan2(ray[0], ray[2]);
             const double vertical_ratio =
-              projection_model_ == "rectilinear" ?
+              projection_is_rectilinear_ ?
               ray[1] / ray[2] :
               ray[1] / std::hypot(ray[0], ray[2]);
             bounds[0] = std::min(bounds[0], angle);
@@ -727,7 +825,7 @@ private:
     const double panorama_max_vertical_ratio =
       std::max(left_bounds[3], right_bounds[3]);
 
-    if (projection_model_ == "rectilinear") {
+    if (projection_is_rectilinear_) {
       panorama_width_ = rectilinear_width_;
       const double minimum_tangent = std::tan(panorama_min_angle_);
       const double maximum_tangent = std::tan(panorama_max_angle_);
@@ -771,7 +869,7 @@ private:
     }
 
     const auto panorama_x_for_angle = [this](double angle) {
-        return projection_model_ == "rectilinear" ?
+        return projection_is_rectilinear_ ?
           virtual_fx_px_ * std::tan(angle) + virtual_cx_px_ :
           (angle - panorama_min_angle_) * panorama_focal_px_;
       };
@@ -796,7 +894,7 @@ private:
     const double seam_angle = auto_seam_center_ ?
       0.5 * (overlap_min_angle_ + overlap_max_angle_) :
       seam_angle_deg_ * kPi / 180.0;
-    if (projection_model_ == "rectilinear") {
+    if (projection_is_rectilinear_) {
       seam_x_ = static_cast<int>(std::lround(
         virtual_fx_px_ * std::tan(seam_angle) + virtual_cx_px_));
     } else {
@@ -804,6 +902,27 @@ private:
         (seam_angle - panorama_min_angle_) * panorama_focal_px_));
     }
     seam_x_ = std::clamp(seam_x_, 0, panorama_width_ - 1);
+
+    // depth_source_columns() scans the full source width with trigonometry.
+    // The result only depends on the projection, so cache it here instead of
+    // recomputing it several times per frame.
+    left_depth_columns_ = depth_source_columns(left_model_);
+    right_depth_columns_ = depth_source_columns(right_model_);
+    depth_columns_valid_ = true;
+
+    if (!projection_is_rectilinear_) {
+      column_sin_.resize(static_cast<std::size_t>(panorama_width_));
+      column_cos_.resize(static_cast<std::size_t>(panorama_width_));
+      for (int x = 0; x < panorama_width_; ++x) {
+        const double angle = panorama_min_angle_ +
+          static_cast<double>(x) / panorama_focal_px_;
+        column_sin_[static_cast<std::size_t>(x)] = std::sin(angle);
+        column_cos_[static_cast<std::size_t>(x)] = std::cos(angle);
+      }
+    } else {
+      column_sin_.clear();
+      column_cos_.clear();
+    }
     projection_dirty_ = false;
 #ifdef PANORAMA_WITH_CUDA
     cuda_backend_configured_ = false;
@@ -839,7 +958,7 @@ private:
         double source_x;
         double source_y;
         cv::Vec3d panorama_ray;
-        if (projection_model_ == "rectilinear") {
+        if (projection_is_rectilinear_) {
           panorama_ray[0] =
             (static_cast<double>(x) - virtual_cx_px_) / virtual_fx_px_;
           panorama_ray[1] =
@@ -889,6 +1008,16 @@ private:
     }
   }
 
+  // Cached counterpart of depth_source_columns() for the per-frame paths.
+  std::array<int, 2> depth_columns_for(const CameraModel & model) const
+  {
+    if (!depth_columns_valid_) {
+      return depth_source_columns(model);
+    }
+    return &model == &left_model_ ?
+           left_depth_columns_ : right_depth_columns_;
+  }
+
   std::array<int, 2> depth_source_columns(
     const CameraModel & model) const
   {
@@ -928,7 +1057,7 @@ private:
       return projected;
     }
 
-    const auto columns = depth_source_columns(model);
+    const auto columns = depth_columns_for(model);
     if (columns[1] < columns[0]) {
       return projected;
     }
@@ -973,7 +1102,7 @@ private:
         const double horizontal_range = std::hypot(rig_x, rig_z);
         int output_x;
         int output_y;
-        if (projection_model_ == "rectilinear") {
+        if (projection_is_rectilinear_) {
           output_x = static_cast<int>(std::lround(
             virtual_fx_px_ * rig_x / rig_z + virtual_cx_px_));
           output_y = static_cast<int>(std::lround(
@@ -1057,7 +1186,7 @@ private:
     const cv::Mat & depth, cv::Mat & state_depth_m,
     const CameraModel & model) const
   {
-    const auto columns = depth_source_columns(model);
+    const auto columns = depth_columns_for(model);
     if (columns[1] < columns[0]) {
       return depth;
     }
@@ -1201,14 +1330,55 @@ private:
     return smoothed_gain_;
   }
 
+  // Mean of the well-exposed pixels on a coarse grid. The previous version
+  // built two grayscale images, four full-resolution masks and two masked means
+  // over both 1920x1080 sources on every frame; sampling every Nth pixel gives
+  // the same slowly varying gain for a fraction of that cost and allocates
+  // nothing. Channel sums stay in source order.
+  bool sample_channel_means(
+    const cv::Mat & image, const std::array<int, 2> & columns,
+    std::array<double, 3> & means) const
+  {
+    const int first_column = std::clamp(columns[0], 0, image.cols - 1);
+    const int last_column = std::clamp(columns[1], first_column, image.cols - 1);
+    const int stride = exposure_sample_stride_;
+    const bool source_is_rgb = source_is_rgb_;
+    std::array<uint64_t, 3> sums{0, 0, 0};
+    std::size_t count = 0;
+    for (int y = 0; y < image.rows; y += stride) {
+      const uint8_t * row = image.ptr<uint8_t>(y);
+      for (int x = first_column; x <= last_column; x += stride) {
+        const uint8_t * pixel = row + static_cast<std::size_t>(x) * 3U;
+        const double luma = source_is_rgb ?
+          0.299 * pixel[0] + 0.587 * pixel[1] + 0.114 * pixel[2] :
+          0.114 * pixel[0] + 0.587 * pixel[1] + 0.299 * pixel[2];
+        if (luma <= 25.0 || luma >= 235.0) {
+          continue;
+        }
+        sums[0] += pixel[0];
+        sums[1] += pixel[1];
+        sums[2] += pixel[2];
+        ++count;
+      }
+    }
+    if (count < 500) {
+      return false;
+    }
+    for (int channel = 0; channel < 3; ++channel) {
+      means[channel] = static_cast<double>(sums[channel]) /
+        static_cast<double>(count);
+    }
+    return true;
+  }
+
   cv::Vec3d estimate_right_gain_from_sources(
     const cv::Mat & left, const cv::Mat & right)
   {
     if (!exposure_compensation_) {
       return smoothed_gain_;
     }
-    const auto left_columns = depth_source_columns(left_model_);
-    const auto right_columns = depth_source_columns(right_model_);
+    const auto left_columns = depth_columns_for(left_model_);
+    const auto right_columns = depth_columns_for(right_model_);
     if (
       left_columns[1] < left_columns[0] ||
       right_columns[1] < right_columns[0])
@@ -1216,37 +1386,24 @@ private:
       return smoothed_gain_;
     }
 
-    const cv::Mat left_region = left(
-      cv::Rect(
-        left_columns[0], 0,
-        left_columns[1] - left_columns[0] + 1,
-        left.rows));
-    const cv::Mat right_region = right(
-      cv::Rect(
-        right_columns[0], 0,
-        right_columns[1] - right_columns[0] + 1,
-        right.rows));
-    cv::Mat left_gray;
-    cv::Mat right_gray;
-    cv::cvtColor(left_region, left_gray, cv::COLOR_BGR2GRAY);
-    cv::cvtColor(right_region, right_gray, cv::COLOR_BGR2GRAY);
-    const cv::Mat left_valid = (left_gray > 25) & (left_gray < 235);
-    const cv::Mat right_valid = (right_gray > 25) & (right_gray < 235);
+    std::array<double, 3> left_mean{0.0, 0.0, 0.0};
+    std::array<double, 3> right_mean{0.0, 0.0, 0.0};
     if (
-      cv::countNonZero(left_valid) < 500 ||
-      cv::countNonZero(right_valid) < 500)
+      !sample_channel_means(left, left_columns, left_mean) ||
+      !sample_channel_means(right, right_columns, right_mean))
     {
       return smoothed_gain_;
     }
 
-    const cv::Scalar left_mean = cv::mean(left_region, left_valid);
-    const cv::Scalar right_mean = cv::mean(right_region, right_valid);
     for (int channel = 0; channel < 3; ++channel) {
       const double measured = std::clamp(
         left_mean[channel] / std::max(right_mean[channel], 1.0),
         min_exposure_gain_, max_exposure_gain_);
-      smoothed_gain_[channel] =
-        (1.0 - exposure_smoothing_) * smoothed_gain_[channel] +
+      // smoothed_gain_ is always indexed as BGR because that is what both the
+      // CUDA kernels and the CPU compositor expect.
+      const int output_channel = source_is_rgb_ ? 2 - channel : channel;
+      smoothed_gain_[output_channel] =
+        (1.0 - exposure_smoothing_) * smoothed_gain_[output_channel] +
         exposure_smoothing_ * measured;
     }
     return smoothed_gain_;
@@ -1296,9 +1453,12 @@ private:
     {
       return false;
     }
-    if (cuda_backend_configured_) {
+    if (cuda_backend_configured_ &&
+      configured_source_is_rgb_ == source_is_rgb_)
+    {
       return true;
     }
+    configured_source_is_rgb_ = source_is_rgb_;
 
     CudaPanoramaConfig config;
     config.source_width = source_width_;
@@ -1306,7 +1466,7 @@ private:
     config.panorama_width = panorama_width_;
     config.panorama_height = panorama_height_;
     config.projection_model =
-      projection_model_ == "rectilinear" ? 1 : 0;
+      projection_is_rectilinear_ ? 1 : 0;
     config.panorama_focal_px =
       static_cast<float>(panorama_focal_px_);
     config.panorama_min_angle =
@@ -1361,6 +1521,9 @@ private:
     config.depth_splat_radius_px = depth_splat_radius_px_;
     config.depth_edge_splat_radius_px = depth_edge_splat_radius_px_;
     config.projected_hole_radius = projected_hole_radius_px_;
+    config.depth_scale_m = static_cast<float>(depth_scale_m_);
+    config.source_channel_swap = source_is_rgb_;
+    config.pointcloud_stride = publish_pointcloud_ ? pointcloud_stride_ : 0;
 
     std::string error;
     if (!cuda_backend_->configure(
@@ -1386,24 +1549,23 @@ private:
     return true;
   }
 
-  static cv::Mat depth_as_float_meters(
-    const cv::Mat & depth, double depth_scale_m)
-  {
-    if (depth.type() == CV_32FC1) {
-      return depth;
-    }
-    cv::Mat depth_m;
-    depth.convertTo(depth_m, CV_32FC1, depth_scale_m);
-    return depth_m;
-  }
 #endif
 
-  cv::Mat stitch_rgbd(
-    const cv::Mat & left_color, const cv::Mat & left_depth,
-    const cv::Mat & right_color, const cv::Mat & right_depth)
+  int pointcloud_capacity() const
   {
-    build_projection_if_needed(left_color.cols, left_color.rows);
+    if (pointcloud_stride_ <= 0) {
+      return 0;
+    }
+    return
+      ((panorama_width_ + pointcloud_stride_ - 1) / pointcloud_stride_) *
+      ((panorama_height_ + pointcloud_stride_ - 1) / pointcloud_stride_);
+  }
 
+  void stitch_rgbd(
+    const cv::Mat & left_source_color, const cv::Mat & left_depth,
+    const cv::Mat & right_source_color, const cv::Mat & right_depth,
+    const FrameDemand & demand, cv::Mat & output, PointCloud2 * cloud)
+  {
     cv::Mat left_projection_depth = left_depth;
     cv::Mat right_projection_depth = right_depth;
     if (depth_aware_color_ && depth_temporal_stabilization_) {
@@ -1413,22 +1575,44 @@ private:
         right_depth, right_stabilized_depth_m_, right_model_);
     }
 
+    gpu_cloud_points_ = 0;
+    gpu_cloud_filled_ = false;
 #ifdef PANORAMA_WITH_CUDA
     if (ensure_cuda_backend_configured()) {
-      const cv::Vec3d gain =
-        estimate_right_gain_from_sources(left_color, right_color);
-      const cv::Mat left_depth_m = depth_as_float_meters(
-        left_projection_depth, depth_scale_m_);
-      const cv::Mat right_depth_m = depth_as_float_meters(
-        right_projection_depth, depth_scale_m_);
-      cv::Mat panorama;
+      const cv::Vec3d gain = estimate_right_gain_from_sources(
+        left_source_color, right_source_color);
+      CudaProcessOptions options;
+      options.download_panorama = demand.image;
+      options.download_validity = demand.host_validity;
+      options.download_range = demand.host_range;
+      CudaPointCloudRequest cloud_request;
+      const int capacity = pointcloud_capacity();
+      if (demand.pointcloud && cloud != nullptr && capacity > 0) {
+        prepare_pointcloud_message(*cloud, capacity);
+        // Read the layout back out of the message instead of assuming it.
+        // PointCloud2Modifier pads an xyz+rgb cloud to 32 bytes per point with
+        // rgb at offset 16.
+        cloud_request.destination = cloud->data.data();
+        cloud_request.capacity_points = capacity;
+        cloud_request.point_step_bytes = static_cast<int>(cloud->point_step);
+        cloud_request.x_offset_bytes = field_offset(*cloud, "x");
+        cloud_request.y_offset_bytes = field_offset(*cloud, "y");
+        cloud_request.z_offset_bytes = field_offset(*cloud, "z");
+        cloud_request.rgb_offset_bytes = field_offset(*cloud, "rgb");
+        options.build_pointcloud =
+          cloud_request.x_offset_bytes >= 0 &&
+          cloud_request.y_offset_bytes >= 0 &&
+          cloud_request.z_offset_bytes >= 0 &&
+          cloud_request.rgb_offset_bytes >= 0;
+      }
       CudaPanoramaStats stats;
       std::string error;
       if (cuda_backend_->process(
-          left_color, left_depth_m,
-          right_color, right_depth_m, gain,
-          panorama, last_validity_mask_, last_range_m_,
-          stats, error))
+          left_source_color, left_projection_depth,
+          right_source_color, right_projection_depth, gain,
+          output, last_validity_mask_, last_range_m_,
+          stats, error, options,
+          options.build_pointcloud ? &cloud_request : nullptr))
       {
         last_left_depth_points_ = stats.left_depth_points;
         last_right_depth_points_ = stats.right_depth_points;
@@ -1439,7 +1623,12 @@ private:
         last_seam_max_x_ = stats.seam_max_x;
         last_seam_mean_x_ = stats.seam_mean_x;
         used_cuda_last_frame_ = true;
-        return panorama;
+        if (options.build_pointcloud) {
+          gpu_cloud_points_ = cloud_request.point_count;
+          gpu_cloud_filled_ = true;
+          finalize_pointcloud_message(*cloud, gpu_cloud_points_);
+        }
+        return;
       }
       cuda_backend_failed_ = true;
       cuda_backend_configured_ = false;
@@ -1450,6 +1639,14 @@ private:
     }
 #endif
 
+    // CPU fallback. It composites in BGR, so an rgb8 source is converted once
+    // here instead of on the fast path.
+    cv::Mat left_color = left_source_color;
+    cv::Mat right_color = right_source_color;
+    if (source_is_rgb_) {
+      cv::cvtColor(left_source_color, left_color, cv::COLOR_RGB2BGR);
+      cv::cvtColor(right_source_color, right_color, cv::COLOR_RGB2BGR);
+    }
     cv::Mat left_base;
     cv::Mat right_base;
     cv::remap(
@@ -1499,8 +1696,9 @@ private:
 
     right_base = apply_gain(right_base, gain);
 
-    cv::Mat panorama = cv::Mat::zeros(
-      panorama_height_, panorama_width_, CV_8UC3);
+    output.create(panorama_height_, panorama_width_, CV_8UC3);
+    output.setTo(cv::Scalar::all(0));
+    cv::Mat & panorama = output;
 
     for (int y = 0; y < panorama_height_; ++y) {
       const int blend_left = seam_x_ - seam_feather_px_;
@@ -1645,7 +1843,7 @@ private:
         panorama_height_, panorama_width_, CV_8UC1);
       last_range_m_ = cv::Mat::zeros(
         panorama_height_, panorama_width_, CV_32FC1);
-      return panorama;
+      return;
     }
 
     last_validity_mask_ = left_projected.mask | right_projected.mask;
@@ -1677,7 +1875,6 @@ private:
         }
       }
     }
-    return panorama;
   }
 
   void receive_rgbd_message(
@@ -1900,6 +2097,80 @@ private:
     color_image_callback(left, right);
   }
 
+  bool has_subscribers(const rclcpp::PublisherBase::SharedPtr & publisher) const
+  {
+    if (!publisher) {
+      return false;
+    }
+    return !publish_only_when_subscribed_ ||
+           publisher->get_subscription_count() > 0 ||
+           publisher->get_intra_process_subscription_count() > 0;
+  }
+
+  FrameDemand compute_frame_demand(bool & auxiliary_due)
+  {
+    FrameDemand demand;
+    demand.image = has_subscribers(output_publisher_);
+    demand.pointcloud = publish_pointcloud_ &&
+      has_subscribers(pointcloud_publisher_);
+
+    auxiliary_due = false;
+    const bool validity_wanted = publish_validity_output_ &&
+      has_subscribers(validity_publisher_);
+    const bool range_wanted = publish_range_output_ &&
+      has_subscribers(range_publisher_);
+    if (validity_wanted || range_wanted) {
+      auxiliary_due = true;
+      if (auxiliary_output_rate_hz_ > 0.0 &&
+        last_auxiliary_publish_time_.time_since_epoch().count() != 0)
+      {
+        const double elapsed_seconds = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() -
+          last_auxiliary_publish_time_).count();
+        auxiliary_due = elapsed_seconds >= 1.0 / auxiliary_output_rate_hz_;
+      }
+    }
+    demand.validity = validity_wanted && auxiliary_due;
+    demand.range = range_wanted && auxiliary_due;
+
+    // Without a CUDA backend the cloud is built on the host, which needs both
+    // images downloaded.
+    const bool cloud_needs_host = demand.pointcloud && !used_cuda_last_frame_;
+    demand.host_validity = demand.validity || cloud_needs_host;
+    demand.host_range = demand.range || cloud_needs_host;
+    return demand;
+  }
+
+  static int field_offset(const PointCloud2 & cloud, const char * name)
+  {
+    for (const auto & field : cloud.fields) {
+      if (field.name == name &&
+        field.datatype == sensor_msgs::msg::PointField::FLOAT32 &&
+        field.count == 1)
+      {
+        return static_cast<int>(field.offset);
+      }
+    }
+    return -1;
+  }
+
+  void prepare_pointcloud_message(PointCloud2 & cloud, int capacity_points)
+  {
+    cloud.height = 1;
+    cloud.is_dense = true;
+    sensor_msgs::PointCloud2Modifier modifier(cloud);
+    modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
+    modifier.resize(static_cast<std::size_t>(capacity_points));
+  }
+
+  static void finalize_pointcloud_message(
+    PointCloud2 & cloud, std::size_t point_count)
+  {
+    cloud.width = static_cast<std::uint32_t>(point_count);
+    cloud.row_step = cloud.point_step * cloud.width;
+    cloud.data.resize(static_cast<std::size_t>(cloud.row_step));
+  }
+
   void process_messages(
     const Image::ConstSharedPtr & left_color_message,
     const Image::ConstSharedPtr & right_color_message,
@@ -1909,18 +2180,28 @@ private:
   {
     const auto callback_start = std::chrono::steady_clock::now();
     try {
-      const cv::Mat left_color = to_bgr(left_color_message);
-      const cv::Mat right_color = to_bgr(right_color_message);
+      bool auxiliary_due = false;
+      validity_ratio_from_mask_this_frame_ = false;
+      const FrameDemand demand = compute_frame_demand(auxiliary_due);
+      if (!demand.any()) {
+        ++idle_frame_count_;
+        maybe_log_diagnostics(std::chrono::steady_clock::now());
+        return;
+      }
+
+      const SourceColor left_source = to_source_color(left_color_message);
+      const SourceColor right_source = to_source_color(right_color_message);
+      cv::Mat right_color = right_source.image;
+      if (left_source.is_rgb != right_source.is_rgb) {
+        // Mixed encodings would corrupt the channel order of one half.
+        cv::cvtColor(
+          right_source.image, right_color, cv::COLOR_RGB2BGR);
+      }
+      source_is_rgb_ = left_source.is_rgb;
       const cv::Mat left_depth = left_depth_message ?
         to_depth(left_depth_message) : cv::Mat();
       const cv::Mat right_depth = right_depth_message ?
         to_depth(right_depth_message) : cv::Mat();
-      cv::Mat panorama;
-      {
-        const std::lock_guard<std::mutex> lock(projection_mutex_);
-        panorama = stitch_rgbd(
-          left_color, left_depth, right_color, right_depth);
-      }
 
       auto newest_message = messages.front();
       int64_t minimum_stamp = stamp_nanoseconds(
@@ -1934,45 +2215,74 @@ private:
           newest_message = message;
         }
       }
-
       std_msgs::msg::Header output_header = newest_message->header;
       output_header.frame_id = output_frame_id_;
-      output_publisher_->publish(
-        *cv_bridge::CvImage(
-          output_header, sensor_msgs::image_encodings::BGR8,
-          panorama).toImageMsg());
-      const auto auxiliary_now = std::chrono::steady_clock::now();
-      bool auxiliary_due = publish_validity_output_ || publish_range_output_;
-      if (auxiliary_due && auxiliary_output_rate_hz_ > 0.0 &&
-        last_auxiliary_publish_time_.time_since_epoch().count() != 0)
+
+      // The panorama is rendered straight into the outgoing message so the
+      // roughly 9 MB frame is never copied on the host.
+      auto image_message = std::make_unique<Image>();
+      auto cloud_message = std::make_unique<PointCloud2>();
+      cv::Mat panorama;
       {
-        const double elapsed_seconds =
-          std::chrono::duration<double>(
-          auxiliary_now - last_auxiliary_publish_time_).count();
-        auxiliary_due = elapsed_seconds >= 1.0 / auxiliary_output_rate_hz_;
+        const std::lock_guard<std::mutex> lock(projection_mutex_);
+        build_projection_if_needed(
+          left_source.image.cols, left_source.image.rows);
+        if (demand.image) {
+          image_message->header = output_header;
+          image_message->height = static_cast<std::uint32_t>(panorama_height_);
+          image_message->width = static_cast<std::uint32_t>(panorama_width_);
+          image_message->encoding = sensor_msgs::image_encodings::BGR8;
+          image_message->is_bigendian = 0U;
+          image_message->step =
+            static_cast<std::uint32_t>(panorama_width_) * 3U;
+          image_message->data.resize(
+            static_cast<std::size_t>(image_message->step) *
+            static_cast<std::size_t>(panorama_height_));
+          panorama = cv::Mat(
+            panorama_height_, panorama_width_, CV_8UC3,
+            image_message->data.data());
+        }
+        cloud_message->header = output_header;
+        stitch_rgbd(
+          left_source.image, left_depth, right_color, right_depth,
+          demand, panorama, cloud_message.get());
       }
+
       if (
         auxiliary_due && !last_validity_mask_.empty() &&
         !last_range_m_.empty())
       {
-        if (publish_validity_output_) {
+        if (demand.validity) {
           validity_publisher_->publish(
             *cv_bridge::CvImage(
               output_header, sensor_msgs::image_encodings::MONO8,
               last_validity_mask_).toImageMsg());
         }
-        if (publish_range_output_) {
+        if (demand.range) {
           range_publisher_->publish(
             *cv_bridge::CvImage(
               output_header, sensor_msgs::image_encodings::TYPE_32FC1,
               last_range_m_).toImageMsg());
         }
-        last_auxiliary_publish_time_ = auxiliary_now;
-        last_validity_ratio_ =
-          static_cast<double>(cv::countNonZero(last_validity_mask_)) /
-          static_cast<double>(last_validity_mask_.total());
+        last_auxiliary_publish_time_ = std::chrono::steady_clock::now();
+        if (demand.host_validity) {
+          last_validity_ratio_ =
+            static_cast<double>(cv::countNonZero(last_validity_mask_)) /
+            static_cast<double>(last_validity_mask_.total());
+          validity_ratio_from_mask_this_frame_ = true;
+        }
       }
-      publish_panorama_pointcloud(output_header, panorama);
+      if (demand.pointcloud) {
+        publish_panorama_pointcloud(panorama, std::move(cloud_message));
+      } else {
+        last_pointcloud_points_ = 0;
+      }
+      // Published last on purpose: `panorama` is a view into image_message's
+      // buffer, and the CPU cloud fallback reads it. Handing the message to the
+      // middleware before that would leave the view dangling.
+      if (demand.image) {
+        output_publisher_->publish(std::move(image_message));
+      }
 
       const double sync_span_ms =
         static_cast<double>(maximum_stamp - minimum_stamp) / 1e6;
@@ -2001,13 +2311,18 @@ private:
   }
 
   void publish_panorama_pointcloud(
-    const std_msgs::msg::Header & header, const cv::Mat & panorama)
+    const cv::Mat & panorama, std::unique_ptr<PointCloud2> cloud)
   {
-    if (
-      !publish_pointcloud_ || !pointcloud_publisher_ ||
-      pointcloud_publisher_->get_subscription_count() == 0)
-    {
+    if (!pointcloud_publisher_) {
       last_pointcloud_points_ = 0;
+      return;
+    }
+
+    // The CUDA backend already compacted the cloud straight into this message.
+    if (gpu_cloud_filled_) {
+      last_pointcloud_points_ = gpu_cloud_points_;
+      update_validity_ratio_from_cloud(gpu_cloud_points_);
+      pointcloud_publisher_->publish(std::move(cloud));
       return;
     }
 
@@ -2018,59 +2333,39 @@ private:
       panorama.size() != last_range_m_.size() ||
       panorama.size() != last_validity_mask_.size())
     {
-      PointCloud2 empty_cloud;
-      empty_cloud.header = header;
-      sensor_msgs::PointCloud2Modifier modifier(empty_cloud);
-      modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
-      modifier.resize(0);
-      pointcloud_publisher_->publish(empty_cloud);
+      prepare_pointcloud_message(*cloud, 0);
+      pointcloud_publisher_->publish(std::move(cloud));
       last_pointcloud_points_ = 0;
       return;
     }
 
+    // Fill the message up to the sampled-grid capacity in a single pass and
+    // shrink afterwards. Counting first meant walking the panorama twice.
+    const int capacity = pointcloud_capacity();
+    prepare_pointcloud_message(*cloud, capacity);
+    const int point_step = static_cast<int>(cloud->point_step);
+    const int x_offset = field_offset(*cloud, "x");
+    const int y_offset = field_offset(*cloud, "y");
+    const int z_offset = field_offset(*cloud, "z");
+    const int rgb_offset = field_offset(*cloud, "rgb");
+    if (x_offset < 0 || y_offset < 0 || z_offset < 0 || rgb_offset < 0) {
+      prepare_pointcloud_message(*cloud, 0);
+      pointcloud_publisher_->publish(std::move(cloud));
+      last_pointcloud_points_ = 0;
+      return;
+    }
+    const bool use_lut =
+      !projection_is_rectilinear_ &&
+      column_sin_.size() == static_cast<std::size_t>(panorama.cols);
     std::size_t point_count = 0;
-    for (int row = 0; row < panorama.rows; row += pointcloud_stride_) {
-      const auto * range_row = last_range_m_.ptr<float>(row);
-      const auto * validity_row = last_validity_mask_.ptr<std::uint8_t>(row);
-      for (int column = 0; column < panorama.cols;
-        column += pointcloud_stride_)
-      {
-        const float horizontal_range = range_row[column];
-        if (!(
-          validity_row[column] == 0 ||
-          !std::isfinite(horizontal_range) || horizontal_range <= 0.0F)
-        ) {
-          ++point_count;
-        }
-      }
-    }
-    if (!(publish_validity_output_ || publish_range_output_)) {
-      const std::size_t sampled_pixels =
-        static_cast<std::size_t>(
-        (panorama.rows + pointcloud_stride_ - 1) / pointcloud_stride_) *
-        static_cast<std::size_t>(
-        (panorama.cols + pointcloud_stride_ - 1) / pointcloud_stride_);
-      last_validity_ratio_ = sampled_pixels == 0 ? 0.0 :
-        static_cast<double>(point_count) /
-        static_cast<double>(sampled_pixels);
-    }
-
-    PointCloud2 cloud;
-    cloud.header = header;
-    cloud.height = 1;
-    cloud.is_dense = true;
-    sensor_msgs::PointCloud2Modifier modifier(cloud);
-    modifier.setPointCloud2FieldsByString(2, "xyz", "rgb");
-    modifier.resize(point_count);
-
-    sensor_msgs::PointCloud2Iterator<float> output_x(cloud, "x");
-    sensor_msgs::PointCloud2Iterator<float> output_y(cloud, "y");
-    sensor_msgs::PointCloud2Iterator<float> output_z(cloud, "z");
-    sensor_msgs::PointCloud2Iterator<float> output_rgb(cloud, "rgb");
+    std::uint8_t * points = cloud->data.data();
     for (int row = 0; row < panorama.rows; row += pointcloud_stride_) {
       const auto * color_row = panorama.ptr<cv::Vec3b>(row);
       const auto * range_row = last_range_m_.ptr<float>(row);
       const auto * validity_row = last_validity_mask_.ptr<std::uint8_t>(row);
+      const double vertical_ratio =
+        (panorama_min_vertical_ + static_cast<double>(row)) /
+        panorama_focal_px_;
       for (int column = 0; column < panorama.cols;
         column += pointcloud_stride_)
       {
@@ -2081,11 +2376,14 @@ private:
         {
           continue;
         }
+        if (static_cast<int>(point_count) >= capacity) {
+          break;
+        }
 
         double x;
         double y;
         double z;
-        if (projection_model_ == "rectilinear") {
+        if (projection_is_rectilinear_) {
           const double ray_x =
             (static_cast<double>(column) - virtual_cx_px_) / virtual_fx_px_;
           const double ray_y =
@@ -2095,15 +2393,19 @@ private:
           x = ray_x * z;
           y = ray_y * z;
         } else {
-          const double angle =
+          const double sine = use_lut ?
+            column_sin_[static_cast<std::size_t>(column)] :
+            std::sin(
             panorama_min_angle_ +
-            static_cast<double>(column) / panorama_focal_px_;
-          const double vertical_ratio =
-            (panorama_min_vertical_ + static_cast<double>(row)) /
-            panorama_focal_px_;
-          x = static_cast<double>(horizontal_range) * std::sin(angle);
+            static_cast<double>(column) / panorama_focal_px_);
+          const double cosine = use_lut ?
+            column_cos_[static_cast<std::size_t>(column)] :
+            std::cos(
+            panorama_min_angle_ +
+            static_cast<double>(column) / panorama_focal_px_);
+          x = static_cast<double>(horizontal_range) * sine;
           y = static_cast<double>(horizontal_range) * vertical_ratio;
-          z = static_cast<double>(horizontal_range) * std::cos(angle);
+          z = static_cast<double>(horizontal_range) * cosine;
         }
 
         const cv::Vec3b bgr = color_row[column];
@@ -2111,21 +2413,36 @@ private:
           (static_cast<std::uint32_t>(bgr[2]) << 16U) |
           (static_cast<std::uint32_t>(bgr[1]) << 8U) |
           static_cast<std::uint32_t>(bgr[0]);
-        *output_x = static_cast<float>(x);
-        *output_y = static_cast<float>(y);
-        *output_z = static_cast<float>(z);
-        float packed_rgb;
-        std::memcpy(&packed_rgb, &rgb, sizeof(packed_rgb));
-        *output_rgb = packed_rgb;
-        ++output_x;
-        ++output_y;
-        ++output_z;
-        ++output_rgb;
+        std::uint8_t * destination =
+          points + point_count * static_cast<std::size_t>(point_step);
+        const float values[3] = {
+          static_cast<float>(x), static_cast<float>(y), static_cast<float>(z)
+        };
+        std::memcpy(destination + x_offset, &values[0], sizeof(float));
+        std::memcpy(destination + y_offset, &values[1], sizeof(float));
+        std::memcpy(destination + z_offset, &values[2], sizeof(float));
+        std::memcpy(destination + rgb_offset, &rgb, sizeof(rgb));
+        ++point_count;
       }
     }
 
+    finalize_pointcloud_message(*cloud, point_count);
     last_pointcloud_points_ = point_count;
-    pointcloud_publisher_->publish(cloud);
+    update_validity_ratio_from_cloud(point_count);
+    pointcloud_publisher_->publish(std::move(cloud));
+  }
+
+  // The exact ratio comes from counting the downloaded validity mask, but that
+  // download only happens when a debug consumer asked for it. Otherwise derive
+  // the ratio from the sampled cloud so the diagnostic never reports a stale 0.
+  void update_validity_ratio_from_cloud(std::size_t point_count)
+  {
+    if (validity_ratio_from_mask_this_frame_) {
+      return;
+    }
+    const int capacity = pointcloud_capacity();
+    last_validity_ratio_ = capacity <= 0 ? 0.0 :
+      static_cast<double>(point_count) / static_cast<double>(capacity);
   }
 
   void maybe_log_diagnostics(
@@ -2133,7 +2450,19 @@ private:
   {
     const double elapsed_sec =
       std::chrono::duration<double>(now - last_diagnostics_time_).count();
-    if (elapsed_sec < diagnostics_period_sec_ || diagnostic_frame_count_ == 0) {
+    if (elapsed_sec < diagnostics_period_sec_) {
+      return;
+    }
+    if (diagnostic_frame_count_ == 0) {
+      if (idle_frame_count_ > 0) {
+        RCLCPP_INFO(
+          get_logger(),
+          "idle: no subscriber on the panorama outputs, %zu synchronized "
+          "frames skipped in the last %.1f s",
+          idle_frame_count_, elapsed_sec);
+        idle_frame_count_ = 0;
+        last_diagnostics_time_ = now;
+      }
       return;
     }
 
@@ -2175,6 +2504,7 @@ private:
 
     last_diagnostics_time_ = now;
     diagnostic_frame_count_ = 0;
+    idle_frame_count_ = 0;
     sync_span_sum_ms_ = 0.0;
     sync_span_max_ms_ = 0.0;
     processing_time_sum_ms_ = 0.0;
@@ -2261,9 +2591,18 @@ private:
   double max_exposure_gain_{1.33};
   double diagnostics_period_sec_{2.0};
   bool use_cuda_{true};
+  bool publish_only_when_subscribed_{true};
+  int exposure_sample_stride_{4};
+  bool input_best_effort_{true};
+  bool projection_is_rectilinear_{false};
+  bool source_is_rgb_{false};
 
   CameraModel left_model_;
   CameraModel right_model_;
+  CameraModel pending_left_model_;
+  CameraModel pending_right_model_;
+  std::mutex camera_info_mutex_;
+  bool camera_info_staged_{false};
   bool projection_dirty_{true};
   int source_width_{0};
   int source_height_{0};
@@ -2297,10 +2636,19 @@ private:
   cv::Vec3d smoothed_gain_{1.0, 1.0, 1.0};
   cv::Mat last_validity_mask_;
   cv::Mat last_range_m_;
+  std::array<int, 2> left_depth_columns_{0, -1};
+  std::array<int, 2> right_depth_columns_{0, -1};
+  bool depth_columns_valid_{false};
+  std::vector<double> column_sin_;
+  std::vector<double> column_cos_;
+  bool gpu_cloud_filled_{false};
+  std::size_t gpu_cloud_points_{0};
+  bool validity_ratio_from_mask_this_frame_{false};
 #ifdef PANORAMA_WITH_CUDA
   std::unique_ptr<CudaPanoramaBackend> cuda_backend_;
   bool cuda_backend_configured_{false};
   bool cuda_backend_failed_{false};
+  bool configured_source_is_rgb_{false};
 #endif
   bool used_cuda_last_frame_{false};
   double last_gpu_time_ms_{0.0};
@@ -2355,6 +2703,7 @@ private:
   std::chrono::steady_clock::time_point last_diagnostics_time_;
   size_t frame_count_{0};
   size_t diagnostic_frame_count_{0};
+  size_t idle_frame_count_{0};
   size_t last_left_depth_points_{0};
   size_t last_right_depth_points_{0};
   size_t last_pointcloud_points_{0};
@@ -2368,6 +2717,14 @@ private:
 
 int main(int argc, char ** argv)
 {
+#ifdef __GLIBC__
+  // Every frame allocates a multi-megabyte output message. With the default
+  // 128 kB threshold glibc serves those from fresh mmap regions and returns
+  // them immediately, so the process re-faults thousands of pages per second.
+  // Keeping the arena warm removes that per-frame page-fault storm.
+  mallopt(M_MMAP_THRESHOLD, 256 * 1024 * 1024);
+  mallopt(M_TRIM_THRESHOLD, 256 * 1024 * 1024);
+#endif
   rclcpp::init(argc, argv);
   const auto node =
     std::make_shared<panorama_stitcher::RgbdPanoramaStitcherNode>();

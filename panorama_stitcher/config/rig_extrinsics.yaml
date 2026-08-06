@@ -1,49 +1,54 @@
-schema_version: 2
-accepted: false
-created_local_time: '2026-08-04T18:15:59.128489+09:00'
-method: charuco_bundle_with_disjoint_frame_holdout
+schema_version: 4
+accepted: true
+provisional: true
+created_local_time: '2026-08-06T13:34:00+09:00'
+method: joint_stereo_charuco_with_symmetric_live_refinement
 convention: X_right_topic_optical = R_right_from_left * X_left_topic_optical + t_right_from_left_m
 inputs:
-  capture_root: /home/ssc/lidar_cam_calib/captures_new_mount_moved_20260804-7AAH1f
-  fit_capture_indices: [20, 21, 22, 23, 24, 25, 26, 27, 28, 29]
-  holdout_capture_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
-  boards: [5]
+  capture_root: /home/ssc/lidar_cam_calib/captures_mount_20260806_1215
+  capture_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
+  boards: [2, 5]
   square_length_m: 0.073
   marker_length_m: 0.056
   left_topic_pixels_rotated_180: true
   right_topic_pixels_rotated_180: false
+  remounted_rig_color_lens_baseline_m: 0.06339742196001438
 quality:
-  fit_reprojection_rms_px: 0.29893503952085787
-  fit_reprojection_p95_px: 0.5103322414448482
-  holdout_reprojection_rms_px: 0.3287905920570967
-  holdout_reprojection_p95_px: 0.5834827289090154
-  train_hold_rotation_delta_deg: 0.03309396019707814
-  train_hold_translation_delta_m: 0.0025724605925844775
-  independent_aruco_rotation_delta_deg: 0.2875653686692393
-  independent_aruco_translation_delta_m: 0.012841912493430438
+  charuco_view_count: 42
+  aruco_view_count: 42
+  full_reprojection_rms_px: 0.4351161315978
+  full_p95_view_rms_px: 0.5705175645467067
+  train_hold_rotation_delta_deg: 0.15964705681687333
+  train_hold_translation_delta_m: 0.008469598448772923
+  independent_aruco_rotation_delta_deg: 0.6749000174456511
 result:
   R_right_from_left:
-  - [0.4337206192290228, 0.00726299754380777, -0.9010181315169365]
-  - [0.010295659084182947, 0.9998622851978125, 0.013015761331191407]
-  - [0.9009885814257665, -0.014921779575067401, 0.43358611213310067]
-  t_right_from_left_m: [-0.05433521835647793, -0.04432839661065536, -0.04582220704259981]
-  estimated_color_lens_baseline_m: 0.08376751970885005
-  relative_rotation_angle_deg: 64.304741906058
-  left_yaw_deg: -32.152370953029
-  right_yaw_deg: 32.14919918558179
-  right_pitch_deg: 0.8549867229646076
+  - [0.48789328422742373, 0.02560219789621183, -0.8725277477929637]
+  - [-0.0029020560747878635, 0.9996118353962045, 0.02770842121757416]
+  - [0.872898459888845, -0.010986628177695553, 0.48777820033798985]
+  t_right_from_left_m: [-0.04933612889085585, -0.025896044703301657, -0.03024193059256596]
+  estimated_color_lens_baseline_m: 0.06339742196001438
+  relative_rotation_angle_deg: 60.8143077608012
+  left_yaw_deg: -30.3952863556818
+  right_yaw_deg: 30.39871979576059
+  left_pitch_deg: -0.7508677878226565
+  right_pitch_deg: 0.49317989249624367
+  R_left_topic_optical_to_panorama_optical:
+  - [0.862515680992685, 0.010597361647451654, -0.5059193571784321]
+  - [-0.00459863862956593, 0.9999035545049233, 0.013104740026983044]
+  - [0.5060094392049219, -0.00897650346923948, 0.8624812286774637]
   R_right_topic_optical_to_panorama_optical:
-  - [0.8467006436555875, 0.0017900416286067292, 0.532066552025385]
-  - [0.00726299754380777, 0.9998622851978125, -0.014921779575067401]
-  - [-0.5320199891920344, 0.016498678431199006, 0.8465710393759824]
-  baseline_left_to_right_in_panorama_optical_m: [0.07046547773820862, 0.04403317961861742, 0.010615691120844824]
-  left_lens_center_in_panorama_optical_m: [-0.03523273886910431, -0.02201658980930871, -0.005307845560422412]
-  right_lens_center_in_panorama_optical_m: [0.03523273886910431, 0.02201658980930871, 0.005307845560422412]
-acceptance_notes:
-- Board 5 was used because its train/hold transforms agree within 0.033 deg and 2.57 mm.
-- Board 2 was rejected as a translation constraint because its partial edge view produced a 0.21 m single-plane baseline and disagreed with its independent ArUco solution.
-- The panorama optical frame bisects the measured 64.305 deg relative yaw.
-rejection_reasons:
-- The fit and holdout frames repeat one static Board 5 pose, so the split does not test pose or depth generalization.
-- The estimated 0.08377 m baseline conflicts with the measured mount and the previous RGB-D 3-D cross-check near 0.12 m.
-- The estimated panorama baseline contains a physically implausible 0.04403 m vertical component that produces the live vertical seam discontinuity.
+  - [0.8625156013310111, -0.005928047395682471, 0.5059957467357596]
+  - [0.011921834474450834, 0.99989188450164, -0.008607506637976166]
+  - [-0.5058900150461246, 0.01345650630117455, 0.862493023226738]
+  R_right_virtual_optical_to_panorama_optical:
+  - [0.8625156013310111, -0.005928047395682471, 0.5059957467357596]
+  - [0.011921834474450834, 0.99989188450164, -0.008607506637976166]
+  - [-0.5058900150461246, 0.01345650630117455, 0.862493023226738]
+  baseline_left_to_right_in_panorama_optical_m: [0.05770195615019533, 0.026221114483449236, 0.0014732694468082563]
+  left_lens_center_in_panorama_optical_m: [-0.028850978075097664, -0.013110557241724618, -0.0007366347234041282]
+  right_lens_center_in_panorama_optical_m: [0.028850978075097664, 0.013110557241724618, 0.0007366347234041282]
+limitations:
+- The current common targets span only 0.069 m in depth, so translation remains provisional pending pose-diverse recapture.
+- The old mount's 0.11 m horizontal baseline is invalid for this remounted geometry.
+- Live common-board center disagreement was reduced from 16-17 mm to about 2.4 mm by the symmetric refinement.

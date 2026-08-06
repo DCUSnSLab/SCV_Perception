@@ -30,5 +30,6 @@ rear_ground_segmentation:
     # One point per costmap-sized 3D cell avoids sending ~140k redundant
     # pixels per frame while preserving 5 cm obstacle geometry.
     obstacle_voxel_size_m: 0.05
+    skip_when_unsubscribed: true
     diagnostics_period_sec: 2.0
     random_seed: 84
