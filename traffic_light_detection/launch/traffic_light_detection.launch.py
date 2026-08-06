@@ -36,7 +36,8 @@ def generate_launch_description():
                     LaunchConfiguration('show_windows'), value_type=bool),
                 'max_fps': ParameterValue(
                     LaunchConfiguration('max_fps'), value_type=float),
-                'detector_device': LaunchConfiguration('detector_device'),
+                'detector_device': ParameterValue(
+                    LaunchConfiguration('detector_device'), value_type=str),
             }],
         ),
     ])
