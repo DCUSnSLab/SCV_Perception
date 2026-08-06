@@ -714,7 +714,7 @@ private:
   cv::Mat to_depth(const Image::ConstSharedPtr & message) const
   {
     const cv::Mat depth = cv_bridge::toCvShare(
-      message, sensor_msgs::image_encodings::TYPE_16UC1)->image;
+      message, message->encoding)->image;
     if (!rotate_aligned_depth_180_) {
       return depth;
     }
