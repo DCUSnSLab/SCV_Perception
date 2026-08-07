@@ -10,6 +10,8 @@ from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 from ultralytics import YOLO
 
+from lane_detection.device_utils import move_model_to_device, resolve_device
+
 # 레인별 고정 색상 (BGR)
 _LANE_COLORS = [
     (0,   255,   0),
@@ -32,6 +34,7 @@ class Yolo26OverlayNode(Node):
         self.declare_parameter(
             'image_topic', '/front_right/front_right/color/image_raw')
         self.declare_parameter('output_topic',         '/lane_detection/overlay')
+        self.declare_parameter('device',               'cuda:0')  # 'cpu' 로 GPU 격리 가능
         self.declare_parameter('conf',                 0.0007)
         self.declare_parameter('imgsz',                640)
         self.declare_parameter('max_det',              64)
@@ -44,6 +47,7 @@ class Yolo26OverlayNode(Node):
         self.model_path          = os.path.expanduser(self.get_parameter('model_path').value)
         self.image_topic         = self.get_parameter('image_topic').value
         self.output_topic        = self.get_parameter('output_topic').value
+        requested_device         = self.get_parameter('device').value
         self.conf                = float(self.get_parameter('conf').value)
         self.imgsz               = int(self.get_parameter('imgsz').value)
         self.max_det             = int(self.get_parameter('max_det').value)
@@ -56,10 +60,12 @@ class Yolo26OverlayNode(Node):
         self.bridge = CvBridge()
         self._last_time: float | None = None
 
+        self.device, self.half = resolve_device(self.get_logger(), requested_device)
         self.get_logger().info(f'모델 로드 중: {self.model_path}')
         self.model = YOLO(self.model_path)
-        self.model.to('cuda')
-        self.get_logger().info('모델 로드 완료')
+        self.device, self.half = move_model_to_device(
+            self.get_logger(), self.model, self.device, self.half)
+        self.get_logger().info(f'모델 로드 완료 (device={self.device})')
 
         self.create_subscription(Image, self.image_topic, self._callback, 1)
         self.pub_overlay = self.create_publisher(Image, self.output_topic, 1)
@@ -116,8 +122,8 @@ class Yolo26OverlayNode(Node):
             conf=self.conf,
             imgsz=self.imgsz,
             max_det=self.max_det,
-            half=True,
-            device='cuda',
+            half=self.half,
+            device=self.device,
             retina_masks=True,
         )
         result = results[0]

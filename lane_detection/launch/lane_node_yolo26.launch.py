@@ -19,6 +19,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'camera_info_topic',
             default_value='/front_right/front_right/color/camera_info'),
+        DeclareLaunchArgument(
+            'device', default_value='cuda:0',
+            description='추론 디바이스. GPU 격리 테스트 시 cpu 로 설정'),
         DeclareLaunchArgument('conf', default_value='0.0007'),
         DeclareLaunchArgument('imgsz', default_value='640'),
         DeclareLaunchArgument('max_det', default_value='64'),
@@ -44,6 +47,7 @@ def generate_launch_description():
                 'image_topic': LaunchConfiguration('image_topic'),
                 'depth_topic': LaunchConfiguration('depth_topic'),
                 'camera_info_topic': LaunchConfiguration('camera_info_topic'),
+                'device': LaunchConfiguration('device'),
                 'conf': LaunchConfiguration('conf'),
                 'imgsz': LaunchConfiguration('imgsz'),
                 'max_det': LaunchConfiguration('max_det'),

@@ -29,6 +29,11 @@ def generate_launch_description():
             description='뎁스 이미지 토픽'
         ),
         DeclareLaunchArgument(
+            'device',
+            default_value='cuda:0',
+            description='추론 디바이스. GPU 격리 테스트 시 cpu 로 설정'
+        ),
+        DeclareLaunchArgument(
             'conf',
             default_value='0.00065',
             description='YOLO confidence 임계값'
@@ -42,6 +47,7 @@ def generate_launch_description():
                 'model_path':  model_path,
                 'image_topic': image_topic,
                 'depth_topic': depth_topic,
+                'device':      LaunchConfiguration('device'),
                 'conf':        conf,
                 'depth_min':   0.1,
                 'depth_max':   10.0,

@@ -24,6 +24,9 @@ def generate_launch_description():
         DeclareLaunchArgument('min_height_ratio',    default_value='0.08'),
         DeclareLaunchArgument('max_lane_instances',  default_value='8'),
         DeclareLaunchArgument('overlay_alpha',       default_value='0.45'),
+        DeclareLaunchArgument(
+            'device', default_value='cuda:0',
+            description='추론 디바이스. GPU 격리 테스트 시 cpu 로 설정'),
 
         # ── Node 1: YOLO overlay + lane_mask 퍼블리셔 ─────────────────
         Node(
@@ -35,6 +38,7 @@ def generate_launch_description():
                 'model_path':          LaunchConfiguration('model_path'),
                 'image_topic':         LaunchConfiguration('image_topic'),
                 'output_topic':        '/lane_detection/overlay',
+                'device':              LaunchConfiguration('device'),
                 'conf':                LaunchConfiguration('conf'),
                 'imgsz':               LaunchConfiguration('imgsz'),
                 'max_det':             LaunchConfiguration('max_det'),

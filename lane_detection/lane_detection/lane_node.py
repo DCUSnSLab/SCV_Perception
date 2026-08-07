@@ -12,6 +12,8 @@ import tf2_ros
 from tf2_ros import TransformException
 from ultralytics import YOLO
 
+from lane_detection.device_utils import move_model_to_device, resolve_device
+
 
 class LaneDetectionNode(Node):
     def __init__(self):
@@ -25,6 +27,7 @@ class LaneDetectionNode(Node):
         self.declare_parameter(
             'depth_topic',
             '/front_right/front_right/aligned_depth_to_color/image_raw')
+        self.declare_parameter('device',       'cuda:0')  # 'cpu' 로 GPU 격리 가능
         self.declare_parameter('conf',         0.00065)  # YOLO-seg confidence threshold
         self.declare_parameter('depth_min',    0.1)   # m
         self.declare_parameter('depth_max',    10.0)  # m
@@ -41,6 +44,7 @@ class LaneDetectionNode(Node):
             self.get_parameter('model_path').get_parameter_value().string_value)
         image_topic = self.get_parameter('image_topic').get_parameter_value().string_value
         depth_topic = self.get_parameter('depth_topic').get_parameter_value().string_value
+        requested_device = self.get_parameter('device').get_parameter_value().string_value
         self.conf       = self.get_parameter('conf').get_parameter_value().double_value
         self.depth_min  = self.get_parameter('depth_min').get_parameter_value().double_value
         self.depth_max  = self.get_parameter('depth_max').get_parameter_value().double_value
@@ -63,10 +67,12 @@ class LaneDetectionNode(Node):
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
         # ── YOLO-seg 모델 로드 ────────────────────────────────────────────────
+        self.device, self.half = resolve_device(self.get_logger(), requested_device)
         self.get_logger().info(f'모델 로드 중: {model_path}')
         self.model = YOLO(model_path)
-        self.model.to('cuda')
-        self.get_logger().info('YOLO-seg 모델 로드 완료')
+        self.device, self.half = move_model_to_device(
+            self.get_logger(), self.model, self.device, self.half)
+        self.get_logger().info(f'YOLO-seg 모델 로드 완료 (device={self.device})')
 
         # ── 구독 ──────────────────────────────────────────────────────────────
         self.create_subscription(
@@ -133,7 +139,9 @@ class LaneDetectionNode(Node):
     def _infer_lane_score(self, img_bgr: np.ndarray) -> np.ndarray:
         """YOLO-seg 추론 → 원본 해상도 점수 맵 (float32 0~1)."""
         h, w = img_bgr.shape[:2]
-        results = self.model.predict(img_bgr, verbose=False, conf=self.conf, half=True, device='cuda')
+        results = self.model.predict(
+            img_bgr, verbose=False, conf=self.conf,
+            half=self.half, device=self.device)
 
         result = results[0]
         if result.masks is None or result.masks.data is None or result.masks.data.shape[0] == 0:

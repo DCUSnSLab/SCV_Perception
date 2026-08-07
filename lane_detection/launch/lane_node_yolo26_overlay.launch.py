@@ -12,6 +12,9 @@ def generate_launch_description():
         DeclareLaunchArgument('model_path',          default_value=default_model_path),
         DeclareLaunchArgument('image_topic',         default_value='/ardu_cam_link/image_raw'),
         DeclareLaunchArgument('output_topic',        default_value='/lane_detection/overlay'),
+        DeclareLaunchArgument(
+            'device', default_value='cuda:0',
+            description='추론 디바이스. GPU 격리 테스트 시 cpu 로 설정'),
         DeclareLaunchArgument('conf',                default_value='0.0007'),
         DeclareLaunchArgument('imgsz',               default_value='640'),
         DeclareLaunchArgument('max_det',             default_value='64'),
@@ -29,6 +32,7 @@ def generate_launch_description():
                 'model_path':          LaunchConfiguration('model_path'),
                 'image_topic':         LaunchConfiguration('image_topic'),
                 'output_topic':        LaunchConfiguration('output_topic'),
+                'device':              LaunchConfiguration('device'),
                 'conf':                LaunchConfiguration('conf'),
                 'imgsz':               LaunchConfiguration('imgsz'),
                 'max_det':             LaunchConfiguration('max_det'),
