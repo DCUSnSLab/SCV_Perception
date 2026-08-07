@@ -17,6 +17,16 @@ check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
   find_package(CUDAToolkit REQUIRED)
+  if(CMAKE_CUDA_ARCHITECTURES)
+    message(STATUS
+      "panorama_stitcher: CUDA ${CUDAToolkit_VERSION}, "
+      "architectures=${CMAKE_CUDA_ARCHITECTURES}")
+  else()
+    message(STATUS
+      "panorama_stitcher: CUDA ${CUDAToolkit_VERSION}, compiler-default "
+      "architecture (override with CUDAARCHS or "
+      "-DCMAKE_CUDA_ARCHITECTURES=<SM>)")
+  endif()
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -58,7 +68,6 @@ if(CMAKE_CUDA_COMPILER)
     src/cuda_panorama_backend.cu
   )
   set_target_properties(panorama_cuda_backend PROPERTIES
-    CUDA_ARCHITECTURES 89
     CUDA_STANDARD 17
     CUDA_STANDARD_REQUIRED ON
     POSITION_INDEPENDENT_CODE ON
