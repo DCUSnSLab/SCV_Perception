@@ -13,6 +13,13 @@ if(NOT CMAKE_CUDA_COMPILER)
 endif()
 
 include(CheckLanguage)
+if(
+  NOT CMAKE_CUDA_ARCHITECTURES AND
+  DEFINED ENV{CUDAARCHS} AND
+  NOT "$ENV{CUDAARCHS}" STREQUAL "")
+  set(CMAKE_CUDA_ARCHITECTURES "$ENV{CUDAARCHS}" CACHE STRING
+    "CUDA architectures for panorama_stitcher")
+endif()
 check_language(CUDA)
 if(CMAKE_CUDA_COMPILER)
   enable_language(CUDA)
