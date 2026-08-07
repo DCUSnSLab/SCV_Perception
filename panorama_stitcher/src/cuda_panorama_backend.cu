@@ -1,10 +1,13 @@
 #include "cuda_panorama_backend.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <sstream>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -21,6 +24,7 @@ constexpr unsigned int kInvalidProjectionRange = 0xffffffffU;
 // PointCloud2 stride the device cloud buffer is sized for. An xyz+rgb cloud
 // built by PointCloud2Modifier uses 32 bytes per point.
 constexpr int kMaxPointCloudStride = 32;
+constexpr int kDefaultGpuTimeoutMs = 500;
 
 std::string cuda_error_message(
   const char * operation, cudaError_t result)
@@ -38,6 +42,59 @@ bool check_cuda(
   }
   error = cuda_error_message(operation, result);
   return false;
+}
+
+bool wait_for_cuda_event(
+  cudaEvent_t event, int timeout_ms,
+  const char * operation, std::string & error)
+{
+  const auto timeout = std::chrono::milliseconds(
+    std::max(timeout_ms, 1));
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (true) {
+    const cudaError_t result = cudaEventQuery(event);
+    if (result == cudaSuccess) {
+      return true;
+    }
+    if (result != cudaErrorNotReady) {
+      error = cuda_error_message(operation, result);
+      return false;
+    }
+    if (std::chrono::steady_clock::now() >= deadline) {
+      std::ostringstream stream;
+      stream << operation << " timed out after " << timeout.count() << " ms";
+      error = stream.str();
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+void copy_rows_to_contiguous(
+  unsigned char * destination,
+  const cv::Mat & source,
+  std::size_t row_bytes,
+  int rows)
+{
+  for (int row = 0; row < rows; ++row) {
+    std::memcpy(
+      destination + static_cast<std::size_t>(row) * row_bytes,
+      source.ptr(row), row_bytes);
+  }
+}
+
+void copy_contiguous_to_rows(
+  cv::Mat & destination,
+  const unsigned char * source,
+  std::size_t row_bytes,
+  int rows)
+{
+  for (int row = 0; row < rows; ++row) {
+    std::memcpy(
+      destination.ptr(row),
+      source + static_cast<std::size_t>(row) * row_bytes,
+      row_bytes);
+  }
 }
 
 __device__ __forceinline__ float clamp_channel(float value)
@@ -1144,6 +1201,8 @@ struct CudaPanoramaBackend::Impl
   cudaEvent_t start_event{nullptr};
   cudaEvent_t stop_event{nullptr};
   std::string initialization_error;
+  bool quarantined{false};
+  std::string quarantine_reason;
 
   unsigned char * left_source{nullptr};
   unsigned char * right_source{nullptr};
@@ -1179,12 +1238,36 @@ struct CudaPanoramaBackend::Impl
   unsigned char * pointcloud{nullptr};
   unsigned int * pointcloud_count{nullptr};
   int pointcloud_capacity{0};
+
+  // CUDA never reads or writes memory owned by process() callers. These
+  // page-locked staging buffers remain valid if a timed-out stream is still
+  // draining while the node switches permanently to the CPU backend.
+  unsigned char * left_source_host{nullptr};
+  unsigned char * right_source_host{nullptr};
+  unsigned char * left_depth_host{nullptr};
+  unsigned char * right_depth_host{nullptr};
+  unsigned char * output_host{nullptr};
+  unsigned char * validity_host{nullptr};
+  float * output_range_host{nullptr};
+  float * seam_cost_staging{nullptr};
+  unsigned char * pointcloud_host{nullptr};
+  unsigned int * left_count_host{nullptr};
+  unsigned int * right_count_host{nullptr};
+  unsigned int * pointcloud_count_host{nullptr};
   std::vector<float> seam_cost_host;
   std::vector<int> seam_host;
   std::vector<int> previous_seam_host;
 
   void release()
   {
+    // Once CUDA has timed out or reported a fatal error, even deallocation can
+    // synchronize with the unhealthy context. Keep all handles alive until
+    // process exit instead of turning a recoverable GPU failure into a node or
+    // machine shutdown hang.
+    if (quarantined) {
+      configured = false;
+      return;
+    }
     cudaFree(left_source);
     cudaFree(right_source);
     cudaFree(left_raw_depth);
@@ -1218,6 +1301,42 @@ struct CudaPanoramaBackend::Impl
     cudaFree(output_range_m);
     cudaFree(pointcloud);
     cudaFree(pointcloud_count);
+    if (left_source_host != nullptr) {
+      cudaFreeHost(left_source_host);
+    }
+    if (right_source_host != nullptr) {
+      cudaFreeHost(right_source_host);
+    }
+    if (left_depth_host != nullptr) {
+      cudaFreeHost(left_depth_host);
+    }
+    if (right_depth_host != nullptr) {
+      cudaFreeHost(right_depth_host);
+    }
+    if (output_host != nullptr) {
+      cudaFreeHost(output_host);
+    }
+    if (validity_host != nullptr) {
+      cudaFreeHost(validity_host);
+    }
+    if (output_range_host != nullptr) {
+      cudaFreeHost(output_range_host);
+    }
+    if (seam_cost_staging != nullptr) {
+      cudaFreeHost(seam_cost_staging);
+    }
+    if (pointcloud_host != nullptr) {
+      cudaFreeHost(pointcloud_host);
+    }
+    if (left_count_host != nullptr) {
+      cudaFreeHost(left_count_host);
+    }
+    if (right_count_host != nullptr) {
+      cudaFreeHost(right_count_host);
+    }
+    if (pointcloud_count_host != nullptr) {
+      cudaFreeHost(pointcloud_count_host);
+    }
     left_source = nullptr;
     right_source = nullptr;
     left_raw_depth = nullptr;
@@ -1252,6 +1371,18 @@ struct CudaPanoramaBackend::Impl
     pointcloud = nullptr;
     pointcloud_count = nullptr;
     pointcloud_capacity = 0;
+    left_source_host = nullptr;
+    right_source_host = nullptr;
+    left_depth_host = nullptr;
+    right_depth_host = nullptr;
+    output_host = nullptr;
+    validity_host = nullptr;
+    output_range_host = nullptr;
+    seam_cost_staging = nullptr;
+    pointcloud_host = nullptr;
+    left_count_host = nullptr;
+    right_count_host = nullptr;
+    pointcloud_count_host = nullptr;
     seam_cost_host.clear();
     seam_host.clear();
     previous_seam_host.clear();
@@ -1284,6 +1415,19 @@ CudaPanoramaBackend::CudaPanoramaBackend()
 
 CudaPanoramaBackend::~CudaPanoramaBackend()
 {
+  if (impl_->quarantined) {
+    return;
+  }
+  if (impl_->stream != nullptr) {
+    const cudaError_t stream_state = cudaStreamQuery(impl_->stream);
+    if (stream_state != cudaSuccess) {
+      impl_->quarantined = true;
+      impl_->quarantine_reason = stream_state == cudaErrorNotReady ?
+        "CUDA stream still active during destruction" :
+        cuda_error_message("query CUDA stream during destruction", stream_state);
+      return;
+    }
+  }
   impl_->release();
   if (impl_->start_event != nullptr) {
     cudaEventDestroy(impl_->start_event);
@@ -1294,6 +1438,26 @@ CudaPanoramaBackend::~CudaPanoramaBackend()
   if (impl_->stream != nullptr) {
     cudaStreamDestroy(impl_->stream);
   }
+}
+
+void CudaPanoramaBackend::quarantine(const std::string & reason) noexcept
+{
+  if (!impl_->quarantined) {
+    impl_->quarantine_reason = reason.empty() ?
+      "unspecified CUDA backend failure" : reason;
+  }
+  impl_->quarantined = true;
+  impl_->configured = false;
+}
+
+bool CudaPanoramaBackend::is_quarantined() const noexcept
+{
+  return impl_->quarantined;
+}
+
+std::string CudaPanoramaBackend::quarantine_reason() const
+{
+  return impl_->quarantine_reason;
 }
 
 bool CudaPanoramaBackend::runtime_available(std::string & description)
@@ -1333,12 +1497,19 @@ bool CudaPanoramaBackend::configure(
   const cv::Mat & right_map_y,
   std::string & error)
 {
+  if (impl_->quarantined) {
+    error = "CUDA backend is quarantined: " + impl_->quarantine_reason;
+    return false;
+  }
   impl_->release();
   if (!impl_->initialization_error.empty()) {
     error = impl_->initialization_error;
     return false;
   }
   impl_->config = config;
+  impl_->config.operation_timeout_ms =
+    config.operation_timeout_ms > 0 ?
+    config.operation_timeout_ms : kDefaultGpuTimeoutMs;
   impl_->left_camera = left_camera;
   impl_->right_camera = right_camera;
 
@@ -1379,6 +1550,14 @@ bool CudaPanoramaBackend::configure(
 
   auto allocate = [&error](void ** pointer, std::size_t bytes, const char * name) {
       const cudaError_t result = cudaMalloc(pointer, bytes);
+      if (result == cudaSuccess) {
+        return true;
+      }
+      error = cuda_error_message(name, result);
+      return false;
+    };
+  auto allocate_host = [&error](void ** pointer, std::size_t bytes, const char * name) {
+      const cudaError_t result = cudaHostAlloc(pointer, bytes, cudaHostAllocDefault);
       if (result == cudaSuccess) {
         return true;
       }
@@ -1490,6 +1669,47 @@ bool CudaPanoramaBackend::configure(
     return false;
   }
   if (
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->left_source_host),
+      source_color_bytes, "cudaHostAlloc left source") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->right_source_host),
+      source_color_bytes, "cudaHostAlloc right source") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->left_depth_host),
+      source_depth_bytes, "cudaHostAlloc left depth") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->right_depth_host),
+      source_depth_bytes, "cudaHostAlloc right depth") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->output_host),
+      panorama_color_bytes, "cudaHostAlloc output") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->validity_host),
+      panorama_mask_bytes, "cudaHostAlloc validity") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->output_range_host),
+      panorama_pixels * sizeof(float), "cudaHostAlloc output range") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->seam_cost_staging),
+      seam_cost_bytes, "cudaHostAlloc seam cost") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->pointcloud_host),
+      pointcloud_bytes, "cudaHostAlloc point cloud") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->left_count_host),
+      sizeof(unsigned int), "cudaHostAlloc left count") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->right_count_host),
+      sizeof(unsigned int), "cudaHostAlloc right count") ||
+    !allocate_host(
+      reinterpret_cast<void **>(&impl_->pointcloud_count_host),
+      sizeof(unsigned int), "cudaHostAlloc point cloud count"))
+  {
+    impl_->release();
+    return false;
+  }
+  if (
     !check_cuda(
       cudaMemset(
         impl_->left_previous_depth, 0, source_depth_bytes),
@@ -1591,6 +1811,10 @@ bool CudaPanoramaBackend::process(
   const CudaProcessOptions & options,
   CudaPointCloudRequest * pointcloud)
 {
+  if (impl_->quarantined) {
+    error = "CUDA backend is quarantined: " + impl_->quarantine_reason;
+    return false;
+  }
   if (!impl_->configured) {
     error = "CUDA backend is not configured";
     return false;
@@ -1659,6 +1883,23 @@ bool CudaPanoramaBackend::process(
   const std::size_t projection_range_bytes =
     panorama_pixels * sizeof(unsigned int);
 
+  // Copy caller-owned inputs before submitting CUDA work. If the GPU later
+  // times out, no in-flight DMA retains pointers into ROS/OpenCV messages.
+  copy_rows_to_contiguous(
+    impl_->left_source_host, left_source_color,
+    source_color_row_bytes, config.source_height);
+  copy_rows_to_contiguous(
+    impl_->right_source_host, right_source_color,
+    source_color_row_bytes, config.source_height);
+  if (config.depth_aware_color) {
+    copy_rows_to_contiguous(
+      impl_->left_depth_host, left_depth,
+      source_depth_row_bytes, config.source_height);
+    copy_rows_to_contiguous(
+      impl_->right_depth_host, right_depth,
+      source_depth_row_bytes, config.source_height);
+  }
+
   if (!check_cuda(
       cudaEventRecord(impl_->start_event, impl_->stream),
       "record CUDA panorama start", error))
@@ -1669,7 +1910,8 @@ bool CudaPanoramaBackend::process(
     this, &error](
     void * destination,
     std::size_t destination_pitch,
-    const cv::Mat & source,
+    const void * source,
+    std::size_t source_pitch,
     std::size_t row_bytes,
     int rows,
     const char * operation)
@@ -1678,8 +1920,8 @@ bool CudaPanoramaBackend::process(
         cudaMemcpy2DAsync(
           destination,
           destination_pitch,
-          source.data,
-          source.step,
+          source,
+          source_pitch,
           row_bytes,
           rows,
           cudaMemcpyHostToDevice,
@@ -1690,11 +1932,13 @@ bool CudaPanoramaBackend::process(
   if (
     !copy_to_device(
       impl_->left_source, source_color_row_bytes,
-      left_source_color, source_color_row_bytes,
+      impl_->left_source_host, source_color_row_bytes,
+      source_color_row_bytes,
       config.source_height, "upload left source") ||
     !copy_to_device(
       impl_->right_source, source_color_row_bytes,
-      right_source_color, source_color_row_bytes,
+      impl_->right_source_host, source_color_row_bytes,
+      source_color_row_bytes,
       config.source_height, "upload right source"))
   {
     return false;
@@ -1711,11 +1955,13 @@ bool CudaPanoramaBackend::process(
     if (
       !copy_to_device(
         left_destination, source_depth_row_bytes,
-        left_depth, source_depth_row_bytes,
+        impl_->left_depth_host, source_depth_row_bytes,
+        source_depth_row_bytes,
         config.source_height, "upload left depth") ||
       !copy_to_device(
         right_destination, source_depth_row_bytes,
-        right_depth, source_depth_row_bytes,
+        impl_->right_depth_host, source_depth_row_bytes,
+        source_depth_row_bytes,
         config.source_height, "upload right depth"))
     {
       return false;
@@ -1929,7 +2175,7 @@ bool CudaPanoramaBackend::process(
         cudaGetLastError(), "launch content-aware seam cost", error) ||
       !check_cuda(
         cudaMemcpy2DAsync(
-          impl_->seam_cost_host.data(),
+          impl_->seam_cost_staging,
           static_cast<std::size_t>(seam_width) * sizeof(float),
           impl_->seam_cost,
           static_cast<std::size_t>(seam_width) * sizeof(float),
@@ -1939,11 +2185,18 @@ bool CudaPanoramaBackend::process(
           impl_->stream),
         "download seam cost", error) ||
       !check_cuda(
-        cudaStreamSynchronize(impl_->stream),
-        "synchronize seam cost", error))
+        cudaEventRecord(impl_->stop_event, impl_->stream),
+        "record seam cost stop", error) ||
+      !wait_for_cuda_event(
+        impl_->stop_event, config.operation_timeout_ms,
+        "CUDA seam cost", error))
     {
       return false;
     }
+    std::memcpy(
+      impl_->seam_cost_host.data(), impl_->seam_cost_staging,
+      static_cast<std::size_t>(seam_width) *
+      static_cast<std::size_t>(config.panorama_height) * sizeof(float));
     impl_->seam_host = find_content_aware_seam(
       impl_->seam_cost_host,
       seam_width,
@@ -1992,7 +2245,6 @@ bool CudaPanoramaBackend::process(
     return false;
   }
 
-  unsigned int cloud_count = 0;
   if (build_pointcloud) {
     const int stride = config.pointcloud_stride;
     const int sampled_columns =
@@ -2042,14 +2294,12 @@ bool CudaPanoramaBackend::process(
     }
   }
 
-  unsigned int left_count = 0;
-  unsigned int right_count = 0;
   if (
     options.download_panorama &&
     !check_cuda(
       cudaMemcpy2DAsync(
-        panorama.data,
-        panorama.step,
+        impl_->output_host,
+        panorama_color_row_bytes,
         impl_->output,
         panorama_color_row_bytes,
         panorama_color_row_bytes,
@@ -2064,8 +2314,8 @@ bool CudaPanoramaBackend::process(
     options.download_validity &&
     !check_cuda(
       cudaMemcpy2DAsync(
-        validity.data,
-        validity.step,
+        impl_->validity_host,
+        static_cast<std::size_t>(config.panorama_width),
         impl_->validity,
         static_cast<std::size_t>(config.panorama_width),
         static_cast<std::size_t>(config.panorama_width),
@@ -2080,8 +2330,8 @@ bool CudaPanoramaBackend::process(
     options.download_range &&
     !check_cuda(
       cudaMemcpy2DAsync(
-        range_m.data,
-        range_m.step,
+        impl_->output_range_host,
+        static_cast<std::size_t>(config.panorama_width) * sizeof(float),
         impl_->output_range_m,
         static_cast<std::size_t>(config.panorama_width) * sizeof(float),
         static_cast<std::size_t>(config.panorama_width) * sizeof(float),
@@ -2099,7 +2349,7 @@ bool CudaPanoramaBackend::process(
     if (
       !check_cuda(
         cudaMemcpyAsync(
-          pointcloud->destination,
+          impl_->pointcloud_host,
           impl_->pointcloud,
           static_cast<std::size_t>(impl_->pointcloud_capacity) *
           static_cast<std::size_t>(pointcloud->point_step_bytes),
@@ -2108,7 +2358,7 @@ bool CudaPanoramaBackend::process(
         "download point cloud", error) ||
       !check_cuda(
         cudaMemcpyAsync(
-          &cloud_count,
+          impl_->pointcloud_count_host,
           impl_->pointcloud_count,
           sizeof(unsigned int),
           cudaMemcpyDeviceToHost,
@@ -2121,7 +2371,7 @@ bool CudaPanoramaBackend::process(
   if (
     !check_cuda(
       cudaMemcpyAsync(
-        &left_count,
+        impl_->left_count_host,
         impl_->left_accepted_points,
         sizeof(unsigned int),
         cudaMemcpyDeviceToHost,
@@ -2129,7 +2379,7 @@ bool CudaPanoramaBackend::process(
       "download left count", error) ||
     !check_cuda(
       cudaMemcpyAsync(
-        &right_count,
+        impl_->right_count_host,
         impl_->right_accepted_points,
         sizeof(unsigned int),
         cudaMemcpyDeviceToHost,
@@ -2142,11 +2392,40 @@ bool CudaPanoramaBackend::process(
     !check_cuda(
       cudaEventRecord(impl_->stop_event, impl_->stream),
       "record CUDA panorama stop", error) ||
-    !check_cuda(
-      cudaEventSynchronize(impl_->stop_event),
-      "synchronize CUDA panorama", error))
+    !wait_for_cuda_event(
+      impl_->stop_event, config.operation_timeout_ms,
+      "CUDA panorama", error))
   {
     return false;
+  }
+  if (options.download_panorama) {
+    copy_contiguous_to_rows(
+      panorama, impl_->output_host,
+      panorama_color_row_bytes, config.panorama_height);
+  }
+  if (options.download_validity) {
+    copy_contiguous_to_rows(
+      validity, impl_->validity_host,
+      static_cast<std::size_t>(config.panorama_width),
+      config.panorama_height);
+  }
+  if (options.download_range) {
+    copy_contiguous_to_rows(
+      range_m,
+      reinterpret_cast<const unsigned char *>(impl_->output_range_host),
+      static_cast<std::size_t>(config.panorama_width) * sizeof(float),
+      config.panorama_height);
+  }
+  const unsigned int left_count = *impl_->left_count_host;
+  const unsigned int right_count = *impl_->right_count_host;
+  if (build_pointcloud) {
+    const std::size_t cloud_count = std::min(
+      static_cast<std::size_t>(*impl_->pointcloud_count_host),
+      static_cast<std::size_t>(impl_->pointcloud_capacity));
+    std::memcpy(
+      pointcloud->destination, impl_->pointcloud_host,
+      cloud_count * static_cast<std::size_t>(pointcloud->point_step_bytes));
+    pointcloud->point_count = cloud_count;
   }
   float elapsed_ms = 0.0F;
   if (!check_cuda(
@@ -2159,11 +2438,6 @@ bool CudaPanoramaBackend::process(
   stats.left_depth_points = left_count;
   stats.right_depth_points = right_count;
   stats.gpu_time_ms = elapsed_ms;
-  if (build_pointcloud) {
-    pointcloud->point_count = std::min(
-      static_cast<std::size_t>(cloud_count),
-      static_cast<std::size_t>(impl_->pointcloud_capacity));
-  }
   stats.content_aware_seam_used = use_content_aware_seam;
   const auto seam_bounds = std::minmax_element(
     impl_->seam_host.begin(), impl_->seam_host.end());

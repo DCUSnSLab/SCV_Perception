@@ -11,26 +11,36 @@ panorama_ground_segmentation:
     max_ground_tilt_deg: 25.0
 
     # Fit only plausible road points and reject vertical walls by normal.
-    ransac_iterations: 160
+    # With the remounted cameras, this lower ROI raises the observed ground
+    # share of the RANSAC candidates from about 19% to 30%. 240 iterations then
+    # keep robust sampling probability high without increasing the old total
+    # point-plane comparisons (the candidate set is smaller).
+    ransac_iterations: 240
     max_ransac_points: 30000
     ransac_distance_threshold_m: 0.05
     min_ground_inliers: 300
     min_ground_inlier_ratio: 0.03
     ground_candidate_min_range_m: 0.4
     ground_candidate_max_range_m: 8.0
-    ground_candidate_min_down_m: 0.15
+    ground_candidate_min_down_m: 0.35
     ground_candidate_max_down_m: 2.5
-    min_plane_distance_from_origin_m: 0.15
-    max_plane_distance_from_origin_m: 2.5
+    # Camera-only measurement after the fixed-mount recalibration puts the
+    # visible floor plane at 0.96..1.36 m from panorama_optical_frame. Reject
+    # nearer shelves/vehicle surfaces that previously won the inlier count.
+    # This is a plane-distance gate, not a fixed Y cut, so tilted road planes
+    # remain valid up to max_ground_tilt_deg.
+    min_plane_distance_from_origin_m: 0.80
+    max_plane_distance_from_origin_m: 1.40
 
     # Only points clearly above the fitted ground enter the costmap.
     obstacle_min_height_m: 0.10
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0
-    # The costmap resolution is 5 cm; one point per 5 cm 3D voxel preserves
-    # usable geometry without publishing redundant depth pixels.
-    obstacle_voxel_size_m: 0.05
+    # Four-centimetre voxels retain about 28% more obstacle samples than the
+    # previous 5 cm setting. The 12 cm / 3-neighbour costmap radius filter still
+    # removes isolated depth noise before the 5 cm occupancy grid is updated.
+    obstacle_voxel_size_m: 0.04
     # RANSAC over tens of thousands of points is the bulk of this node's cost.
     # Skip it while neither output cloud has a subscriber.
     skip_when_unsubscribed: true

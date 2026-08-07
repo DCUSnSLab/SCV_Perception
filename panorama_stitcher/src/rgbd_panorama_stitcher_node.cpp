@@ -12,6 +12,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -167,8 +168,9 @@ public:
       "rotate_aligned_depth_180", false);
 
     const double half_yaw_deg = declare_parameter<double>(
-      "camera_half_yaw_deg", 32.0);
-    baseline_m_ = declare_parameter<double>("camera_baseline_m", 0.10);
+      "camera_half_yaw_deg", 30.397);
+    baseline_m_ = declare_parameter<double>(
+      "camera_baseline_m", 0.06339742196001438);
     set_default_yaw_extrinsics(
       left_model_, -half_yaw_deg * kPi / 180.0, -baseline_m_ * 0.5);
     set_default_yaw_extrinsics(
@@ -271,13 +273,18 @@ public:
     diagnostics_period_sec_ = declare_parameter<double>(
       "diagnostics_period_sec", 2.0);
     use_cuda_ = declare_parameter<bool>("use_cuda", true);
+    cuda_timeout_ms_ = declare_parameter<int>("cuda_timeout_ms", 500);
+    cuda_slow_frame_ms_ = declare_parameter<double>(
+      "cuda_slow_frame_ms", 150.0);
+    cuda_slow_frame_limit_ = declare_parameter<int>(
+      "cuda_slow_frame_limit", 3);
 
     set_parameter_camera_model(
-      left_model_, "left", 1369.7860107421875, 1369.6165771484375,
-      967.3739013671875, 566.1657104492188);
-    set_parameter_camera_model(
-      right_model_, "right", 1375.93896484375, 1376.0078125,
+      left_model_, "left", 1375.93896484375, 1376.0078125,
       962.9755859375, 539.9728393554688);
+    set_parameter_camera_model(
+      right_model_, "right", 1369.7860107421875, 1369.6165771484375,
+      967.3739013671875, 566.1657104492188);
     validate_parameters();
 
 #ifdef PANORAMA_WITH_CUDA
@@ -600,6 +607,9 @@ private:
     min_exposure_gain_ = std::max(min_exposure_gain_, 0.01);
     max_exposure_gain_ = std::max(max_exposure_gain_, min_exposure_gain_);
     diagnostics_period_sec_ = std::max(diagnostics_period_sec_, 0.2);
+    cuda_timeout_ms_ = std::clamp(cuda_timeout_ms_, 50, 5000);
+    cuda_slow_frame_ms_ = std::max(cuda_slow_frame_ms_, 0.0);
+    cuda_slow_frame_limit_ = std::clamp(cuda_slow_frame_limit_, 1, 100);
     pointcloud_stride_ = std::clamp(pointcloud_stride_, 1, 16);
     max_output_rate_hz_ = std::max(max_output_rate_hz_, 0.0);
     exposure_sample_stride_ = std::clamp(exposure_sample_stride_, 1, 16);
@@ -1524,6 +1534,7 @@ private:
     config.depth_scale_m = static_cast<float>(depth_scale_m_);
     config.source_channel_swap = source_is_rgb_;
     config.pointcloud_stride = publish_pointcloud_ ? pointcloud_stride_ : 0;
+    config.operation_timeout_ms = cuda_timeout_ms_;
 
     std::string error;
     if (!cuda_backend_->configure(
@@ -1534,6 +1545,7 @@ private:
         left_map_x_, left_map_y_,
         right_map_x_, right_map_y_, error))
     {
+      cuda_backend_->quarantine(error);
       cuda_backend_failed_ = true;
       RCLCPP_ERROR(
         get_logger(),
@@ -1623,6 +1635,27 @@ private:
         last_seam_max_x_ = stats.seam_max_x;
         last_seam_mean_x_ = stats.seam_mean_x;
         used_cuda_last_frame_ = true;
+        if (
+          cuda_slow_frame_ms_ > 0.0 &&
+          static_cast<double>(stats.gpu_time_ms) > cuda_slow_frame_ms_)
+        {
+          ++cuda_slow_frame_count_;
+        } else {
+          cuda_slow_frame_count_ = 0;
+        }
+        if (cuda_slow_frame_count_ >= cuda_slow_frame_limit_) {
+          std::ostringstream reason;
+          reason << "CUDA circuit breaker opened after "
+                 << cuda_slow_frame_count_ << " consecutive frames over "
+                 << cuda_slow_frame_ms_ << " ms (latest "
+                 << stats.gpu_time_ms << " ms)";
+          cuda_backend_->quarantine(reason.str());
+          cuda_backend_failed_ = true;
+          cuda_backend_configured_ = false;
+          RCLCPP_ERROR(
+            get_logger(), "%s; subsequent frames use CPU fallback",
+            reason.str().c_str());
+        }
         if (options.build_pointcloud) {
           gpu_cloud_points_ = cloud_request.point_count;
           gpu_cloud_filled_ = true;
@@ -1630,6 +1663,7 @@ private:
         }
         return;
       }
+      cuda_backend_->quarantine(error);
       cuda_backend_failed_ = true;
       cuda_backend_configured_ = false;
       RCLCPP_ERROR(
@@ -2591,6 +2625,9 @@ private:
   double max_exposure_gain_{1.33};
   double diagnostics_period_sec_{2.0};
   bool use_cuda_{true};
+  int cuda_timeout_ms_{500};
+  double cuda_slow_frame_ms_{150.0};
+  int cuda_slow_frame_limit_{3};
   bool publish_only_when_subscribed_{true};
   int exposure_sample_stride_{4};
   bool input_best_effort_{true};
@@ -2649,6 +2686,7 @@ private:
   bool cuda_backend_configured_{false};
   bool cuda_backend_failed_{false};
   bool configured_source_is_rgb_{false};
+  int cuda_slow_frame_count_{0};
 #endif
   bool used_cuda_last_frame_{false};
   double last_gpu_time_ms_{0.0};

@@ -15,48 +15,46 @@ metric_panorama_stitcher:
     # Queue depth remains one, so a slow viewer cannot accumulate stale frames.
     publisher_best_effort: false
 
-    # Calibrated virtual-color optical frames -> panorama_optical_frame.
-    # The displayed RealSense images are already rotated 180 degrees, so these
-    # matrices intentionally describe those rotated optical frames.
-    # 2026-07-30 external recalibration after the camera was moved:
-    # optical-axis yaw is -30.00 deg (front/front) and +30.47 deg
-    # (camera/camera); right pitch is +2.26 deg. A metric Board 2 + Board 5
-    # bundle adjustment estimates the color-lens baseline as 0.11586 m; the
-    # approximately 11 cm ruler measurement is validation-only, not imposed.
+    # Same 2026-08-06 remounted-rig calibration as rgbd_panorama.yaml.
+    # Physical pitch/roll and vertical/forward baseline are constrained to
+    # zero; the small symmetric pitch terms correct the topic/CameraInfo
+    # convention. The measured color-lens baseline is 0.063397 m.
     left_rotation_camera_to_rig: [
-      0.8660254037844387, 0.0, -0.49999999999999994,
-      0.0, 1.0, 0.0,
-      0.49999999999999994, 0.0, 0.8660254037844387
+      0.8625552969843766, 0.001445420725720489, -0.5059607399819862,
+      0.0, 0.9999959194165541, 0.002856772696656394,
+      0.5059628046054309, -0.002464124421781315, 0.8625517772555107
     ]
     left_translation_camera_in_rig_m: [
-      -0.05481567046279521, 0.002380891489614025, 0.01858394254726097
+      -0.03169871098000719, 0.0, 0.0
     ]
     right_rotation_camera_to_rig: [
-      0.8615756695982157, 0.030948921839358188, 0.5066848426718206,
-      -0.012661318395165565, 0.9991393851368948, -0.039499114987100514,
-      -0.5074712371877668, 0.02761617832447575, 0.8612260389246649
+      0.8625249756985842, 0.001445568385372199, 0.5060124273456135,
+      0.0, 0.9999959194165542, -0.0028567726966563945,
+      -0.5060144921799736, 0.0024640378007599354, 0.8625214560934468
     ]
     right_translation_camera_in_rig_m: [
-      0.05481567046279521, -0.002380891489614025, -0.01858394254726097
+      0.03169871098000719, 0.0, 0.0
     ]
 
     # realsense_multi rotates the front color/depth streams by 180 degrees.
     # CameraInfo keeps the native principal point, so adjust the intrinsics but
     # do not rotate the already-upright image data a second time.
     input_images_rotated_180: true
+    left_input_image_rotated_180: true
+    right_input_image_rotated_180: false
     rotate_color_180: false
     rotate_aligned_depth_180: false
 
-    left_fx: 1369.7860107421875
-    left_fy: 1369.6165771484375
-    left_cx: 967.3739013671875
-    left_cy: 566.1657104492188
+    left_fx: 1375.93896484375
+    left_fy: 1376.0078125
+    left_cx: 962.9755859375
+    left_cy: 539.9728393554688
     left_width: 1920
     left_height: 1080
-    right_fx: 1375.93896484375
-    right_fy: 1376.0078125
-    right_cx: 962.9755859375
-    right_cy: 539.9728393554688
+    right_fx: 1369.7860107421875
+    right_fy: 1369.6165771484375
+    right_cx: 967.3739013671875
+    right_cy: 566.1657104492188
     right_width: 1920
     right_height: 1080
 
@@ -88,6 +86,9 @@ metric_panorama_stitcher:
     projected_hole_radius_px: 0
     allow_color_fallback: true
     use_cuda: true
+    cuda_timeout_ms: 500
+    cuda_slow_frame_ms: 150.0
+    cuda_slow_frame_limit: 3
 
     # Always put the cut inside the actual calibrated overlap.
     auto_seam_center: true

@@ -18,21 +18,20 @@ panorama_stitcher:
     publish_auxiliary_outputs: false
     publish_range_output: true
     publish_validity_output: false
-    # RViz Image requests RELIABLE by default. Keep this large 32FC1 debug
-    # image at 2 Hz so a reliable publisher remains useful without flooding
-    # DDS/RViz with roughly 12 MB per frame.
-    auxiliary_output_rate_hz: 2.0
+    # Do not rate-limit the metric depth panorama separately. Publication is
+    # still subscriber-gated below, and the native RGB-D inputs are 30 Hz.
+    auxiliary_output_rate_hz: 0.0
     publish_pointcloud: true
-    # Six pixels are still denser than the 5 cm local-costmap cells throughout
-    # the useful D435 depth range, while cutting cloud traffic by about 55%.
-    pointcloud_stride: 6
+    # Stride 4 samples 2.25x as many panorama pixels as stride 6. The ground
+    # node's ROI/cap and voxel filter keep RANSAC and costmap traffic bounded.
+    pointcloud_stride: 4
     publisher_best_effort: false
     auxiliary_publisher_best_effort: false
     pointcloud_publisher_best_effort: true
-    # The original cameras are 30 Hz, but 20 Hz is sufficient for this driving
-    # pipeline and prevents idle systems from pushing every large frame through
-    # CUDA, DDS and RViz simultaneously.
-    max_output_rate_hz: 20.0
+    # Process the newest synchronized RGB-D set as soon as the CUDA worker is
+    # free. Zero disables the former 20 Hz cap; the 30 Hz camera inputs become
+    # the effective upper bound.
+    max_output_rate_hz: 0.0
 
     # Produce each output only while something subscribes to it. The panorama is
     # about 9 MB per frame and the range image about 12 MB, so an unobserved
@@ -54,24 +53,28 @@ panorama_stitcher:
     # 2026-08-06 remounted-rig calibration. The left topic is wrapper-rotated
     # by 180 degrees and the right topic is native/upright. Both rotation and
     # translation below come from the remounted rig's joint ChArUco stereo
-    # solution (42 common board views, 0.435 px full reprojection RMS), followed
-    # by a symmetric live refinement of 0.299 deg pitch and 0.120 deg yaw across
-    # the pair. Do not reuse the previous mount's 0.11 m horizontal baseline.
+    # solution (42 common board views, 0.435 px full reprojection RMS). For the
+    # current symmetric-mount test, physical roll and vertical/forward baseline
+    # are constrained to zero. A small symmetric effective-pitch correction
+    # (-0.164/+0.164 deg) reduces the measured 7.54 px CameraInfo/convention
+    # offset without treating it as a physical mounting pitch. The calibrated
+    # yaw and 0.0634 m lens-center distance are retained. Do not reuse the
+    # previous mount's 0.11 m horizontal baseline.
     left_rotation_camera_to_rig: [
-      0.862515680992685, 0.010597361647451654, -0.5059193571784321,
-      -0.00459863862956593, 0.9999035545049233, 0.013104740026983044,
-      0.5060094392049219, -0.00897650346923948, 0.8624812286774637
+      0.8625552969843766, 0.001445420725720489, -0.5059607399819862,
+      0.0, 0.9999959194165541, 0.002856772696656394,
+      0.5059628046054309, -0.002464124421781315, 0.8625517772555107
     ]
     left_translation_camera_in_rig_m: [
-      -0.028850978075097664, -0.013110557241724618, -0.0007366347234041282
+      -0.03169871098000719, 0.0, 0.0
     ]
     right_rotation_camera_to_rig: [
-      0.8625156013310111, -0.005928047395682471, 0.5059957467357596,
-      0.011921834474450834, 0.99989188450164, -0.008607506637976166,
-      -0.5058900150461246, 0.01345650630117455, 0.862493023226738
+      0.8625249756985842, 0.001445568385372199, 0.5060124273456135,
+      0.0, 0.9999959194165542, -0.0028567726966563945,
+      -0.5060144921799736, 0.0024640378007599354, 0.8625214560934468
     ]
     right_translation_camera_in_rig_m: [
-      0.028850978075097664, 0.013110557241724618, 0.0007366347234041282
+      0.03169871098000719, 0.0, 0.0
     ]
 
     # The 2026-08-06 mount has asymmetric physical camera orientation.
@@ -85,8 +88,10 @@ panorama_stitcher:
 
     left_fx: 1375.93896484375
     left_fy: 1376.0078125
-    left_cx: 956.0244140625
-    left_cy: 539.0271606445312
+    # Keep native CameraInfo values here; the node applies the 180-degree
+    # principal-point transform exactly once for the wrapper-rotated image.
+    left_cx: 962.9755859375
+    left_cy: 539.9728393554688
     left_width: 1920
     left_height: 1080
     right_fx: 1369.7860107421875
@@ -114,13 +119,19 @@ panorama_stitcher:
     min_depth_m: 0.20
     max_depth_m: 15.0
     # Board 2 spans beyond the pure rotation-overlap boundary because of the
-    # 0.11520 m baseline. Five degrees retains its outer columns while keeping
+    # 0.06340 m baseline. Five degrees retains its outer columns while keeping
     # depth reprojection limited to the central band.
     depth_overlap_margin_deg: 5.0
     # The RGB renderer remains smooth, but metric range/validity are built by
     # deprojecting the complete aligned-depth images into the rig frame.
     full_depth_reprojection: true
     use_cuda: true
+    # CUDA safety circuit breaker. Normal frames are about 10 ms; three
+    # consecutive frames above 150 ms or one 500 ms timeout permanently move
+    # this process to the CPU backend without attempting risky CUDA cleanup.
+    cuda_timeout_ms: 500
+    cuda_slow_frame_ms: 150.0
+    cuda_slow_frame_limit: 3
 
     # Always put the cut inside the actual calibrated overlap. Color is kept
     # independent of sparse depth reprojection; fused depth is the next stage.

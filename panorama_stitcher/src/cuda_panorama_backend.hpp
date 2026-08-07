@@ -76,6 +76,10 @@ struct CudaPanoramaConfig
   bool source_channel_swap{false};
   // Sampling stride of the GPU point-cloud builder. 0 disables it.
   int pointcloud_stride{0};
+  // Maximum time a submitted frame may remain incomplete. A timeout opens
+  // the circuit breaker: the backend is quarantined and must not issue any
+  // more CUDA runtime calls in this process.
+  int operation_timeout_ms{500};
 };
 
 // Per-frame selection of the outputs that are actually needed. Downloading the
@@ -127,6 +131,15 @@ public:
   CudaPanoramaBackend & operator=(const CudaPanoramaBackend &) = delete;
 
   static bool runtime_available(std::string & description);
+
+  // Permanently disables this instance without touching CUDA resources. This
+  // is deliberate: after a timeout or fatal runtime error, cleanup calls such
+  // as cudaFree may themselves synchronize with a wedged context. The node
+  // falls back to CPU and process teardown lets the OS/driver reclaim the
+  // quarantined context.
+  void quarantine(const std::string & reason) noexcept;
+  bool is_quarantined() const noexcept;
+  std::string quarantine_reason() const;
 
   bool configure(
     const CudaPanoramaConfig & config,

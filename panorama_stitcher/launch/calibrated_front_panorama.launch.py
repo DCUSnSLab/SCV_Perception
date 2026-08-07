@@ -1,3 +1,7 @@
+import os
+import yaml
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
@@ -26,7 +30,41 @@ def static_tf(name, parent, child, translation, quaternion):
     )
 
 
+def load_runtime_tf_poses():
+    """Load every calibrated runtime TF from the source-of-truth YAML."""
+    calibration_path = os.path.join(
+        get_package_share_directory('panorama_stitcher'),
+        'config',
+        'rig_extrinsics.yaml',
+    )
+    with open(calibration_path, 'r', encoding='utf-8') as stream:
+        calibration = yaml.safe_load(stream) or {}
+    poses = calibration.get('runtime_tf', {})
+
+    pose_keys = {
+        'front_camera_rig': 'front_camera_rig_in_velodyne',
+        'front_left': 'front_left_link_in_front_camera_rig',
+        'front_right': 'front_right_link_in_front_camera_rig',
+    }
+    result = {}
+    for name, key in pose_keys.items():
+        pose = poses.get(key, {})
+        translation = pose.get('translation_m')
+        quaternion = pose.get('quaternion_xyzw')
+        if not isinstance(translation, list) or len(translation) != 3:
+            raise RuntimeError(
+                f'{calibration_path}: runtime_tf.{key}.translation_m '
+                'must contain 3 values')
+        if not isinstance(quaternion, list) or len(quaternion) != 4:
+            raise RuntimeError(
+                f'{calibration_path}: runtime_tf.{key}.quaternion_xyzw '
+                'must contain 4 values')
+        result[name] = (translation, quaternion)
+    return result
+
+
 def generate_launch_description():
+    runtime_tf_poses = load_runtime_tf_poses()
     default_config = PathJoinSubstitution([
         FindPackageShare('panorama_stitcher'),
         'config',
@@ -36,16 +74,13 @@ def generate_launch_description():
     # External calibration convention:
     #   p_velodyne = R * p_front_camera_rig + t
     # front_camera_rig: x forward, y left, z up; origin at the midpoint of
-    # the two RGB lens centers. 2026-08-04 new-mount recalibration; see
-    # lidar_rig_extrinsics_20260804.yaml and rig_extrinsics.yaml.
+    # the two RGB lens centers. The pose is loaded from the 2026-08-06
+    # remounted-rig calibration recorded in rig_extrinsics.yaml.
     rig_in_velodyne = static_tf(
         'velodyne_to_front_camera_rig',
         'velodyne',
         'front_camera_rig',
-        (-0.00448541435124259, 0.02500756951604277,
-         0.21625076381657354),
-        (0.010795577032945527, 0.03790650713358004,
-         -0.04021168161650252, 0.9984135280008133),
+        *runtime_tf_poses['front_camera_rig'],
     )
 
     # These attach the RealSense trees at their role-specific root frames.
@@ -54,19 +89,13 @@ def generate_launch_description():
         'front_camera_rig_to_front_left_link',
         'front_camera_rig',
         'front_left_link',
-        (0.0027668551625554174, 0.022891964978233523,
-         0.022070886433021613),
-        (-0.004055179658881763, -0.0018700761474020188,
-         0.27668413709010087, 0.9609505432725678),
+        *runtime_tf_poses['front_left'],
     )
     right_link_in_rig = static_tf(
         'front_camera_rig_to_front_right_link',
         'front_camera_rig',
         'front_right_link',
-        (-0.0020299669272732714, -0.047836572251912846,
-         -0.02196040437160633),
-        (-0.003141950239487204, -0.00632642612279132,
-         -0.2787819097627938, 0.9603284600959273),
+        *runtime_tf_poses['front_right'],
     )
 
     panorama_optical_in_rig = static_tf(

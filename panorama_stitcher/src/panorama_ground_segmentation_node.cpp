@@ -56,9 +56,9 @@ struct VoxelKeyHash
   {
     std::size_t seed = std::hash<std::int64_t>{}(key.x);
     seed ^= std::hash<std::int64_t>{}(key.y) + 0x9e3779b9U +
-      (seed << 6U) + (seed >> 2U);
+    (seed << 6U) + (seed >> 2U);
     seed ^= std::hash<std::int64_t>{}(key.z) + 0x9e3779b9U +
-      (seed << 6U) + (seed >> 2U);
+    (seed << 6U) + (seed >> 2U);
     return seed;
   }
 };
@@ -476,30 +476,53 @@ private:
       eigenvectors.at<double>(2, 1),
       eigenvectors.at<double>(2, 2));
     double refined_offset = -refined_normal.dot(centroid);
-    if (!orient_and_validate_plane(refined_normal, refined_offset)) {
-      best.valid = false;
-      return best;
+
+    // Coefficient refinement normally reduces noise, but a mixed inlier set
+    // can move the fitted plane outside the camera-height gate. Keep the
+    // original valid RANSAC model as a fallback instead of publishing an empty
+    // cloud for that frame. Evaluate both models against the full candidate
+    // set and retain the one with the stronger support.
+    const auto evaluate_full_candidates =
+      [&](PlaneModel model) -> PlaneModel
+      {
+        model.inliers = 0;
+        model.squared_error = 0.0;
+        for (const std::size_t index : candidate_indices) {
+          const double distance = std::abs(
+            model.normal.dot(points[index].position) + model.offset);
+          if (distance <= ransac_distance_threshold_m_) {
+            ++model.inliers;
+            model.squared_error += distance * distance;
+          }
+        }
+        const double full_ratio =
+          static_cast<double>(model.inliers) /
+          static_cast<double>(candidate_indices.size());
+        model.valid =
+          model.inliers >= static_cast<std::size_t>(min_ground_inliers_) &&
+          full_ratio >= min_ground_inlier_ratio_;
+        return model;
+      };
+
+    PlaneModel ransac_model = evaluate_full_candidates(best);
+    PlaneModel refined_model;
+    if (orient_and_validate_plane(refined_normal, refined_offset)) {
+      refined_model.normal = refined_normal;
+      refined_model.offset = refined_offset;
+      refined_model.valid = true;
+      refined_model = evaluate_full_candidates(refined_model);
     }
 
-    best.normal = refined_normal;
-    best.offset = refined_offset;
-    best.inliers = 0;
-    best.squared_error = 0.0;
-    for (const std::size_t index : candidate_indices) {
-      const double distance = std::abs(
-        best.normal.dot(points[index].position) + best.offset);
-      if (distance <= ransac_distance_threshold_m_) {
-        ++best.inliers;
-        best.squared_error += distance * distance;
-      }
+    if (
+      refined_model.valid &&
+      (!ransac_model.valid ||
+      refined_model.inliers > ransac_model.inliers ||
+      (refined_model.inliers == ransac_model.inliers &&
+      refined_model.squared_error < ransac_model.squared_error)))
+    {
+      return refined_model;
     }
-    const double full_ratio =
-      static_cast<double>(best.inliers) /
-      static_cast<double>(candidate_indices.size());
-    best.valid =
-      best.inliers >= static_cast<std::size_t>(min_ground_inliers_) &&
-      full_ratio >= min_ground_inlier_ratio_;
-    return best;
+    return ransac_model;
   }
 
   PointCloud2 make_cloud(

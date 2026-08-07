@@ -16,48 +16,44 @@ panorama_far_hybrid_stitcher:
     pointcloud_stride: 4
     publisher_best_effort: false
 
-    # Calibrated virtual-color optical frames -> panorama_optical_frame.
-    # The displayed RealSense images are already rotated 180 degrees, so these
-    # matrices intentionally describe those rotated optical frames.
-    # 2026-07-30 22:31 external recalibration after final hand alignment:
-    # optical-axis yaw is -30.00 deg (front_left) and +29.02 deg
-    # (front_right); right pitch is +0.69 deg. A metric Board 2 + Board 5
-    # bundle adjustment estimates the color-lens baseline as 0.11942 m; the
-    # approximately 11 cm ruler measurement is validation-only, not imposed.
+    # Same 2026-08-06 remounted-rig calibration as rgbd_panorama.yaml.
+    # The measured color-lens baseline is 0.063397 m.
     left_rotation_camera_to_rig: [
-      0.8660254037844387, 0.0, -0.49999999999999994,
-      0.0, 1.0, 0.0,
-      0.49999999999999994, 0.0, 0.8660254037844387
+      0.8625552969843766, 0.001445420725720489, -0.5059607399819862,
+      0.0, 0.9999959194165541, 0.002856772696656394,
+      0.5059628046054309, -0.002464124421781315, 0.8625517772555107
     ]
     left_translation_camera_in_rig_m: [
-      -0.05756401257455473, 0.0020147697986997917, 0.01573918593812528
+      -0.03169871098000719, 0.0, 0.0
     ]
     right_rotation_camera_to_rig: [
-      0.8733047561579894, 0.0447965811344322, 0.485110368050922,
-      -0.044572148340580695, 0.9989340333846635, -0.012005021372459743,
-      -0.48513104050775824, -0.01113836902397199, 0.8743705223023852
+      0.8625249756985842, 0.001445568385372199, 0.5060124273456135,
+      0.0, 0.9999959194165542, -0.0028567726966563945,
+      -0.5060144921799736, 0.0024640378007599354, 0.8625214560934468
     ]
     right_translation_camera_in_rig_m: [
-      0.05756401257455473, -0.0020147697986997917, -0.01573918593812528
+      0.03169871098000719, 0.0, 0.0
     ]
 
     # realsense_multi rotates the front color/depth streams by 180 degrees.
     # CameraInfo keeps the native principal point, so adjust the intrinsics but
     # do not rotate the already-upright image data a second time.
     input_images_rotated_180: true
+    left_input_image_rotated_180: true
+    right_input_image_rotated_180: false
     rotate_color_180: false
     rotate_aligned_depth_180: false
 
-    left_fx: 1369.7860107421875
-    left_fy: 1369.6165771484375
-    left_cx: 967.3739013671875
-    left_cy: 566.1657104492188
+    left_fx: 1375.93896484375
+    left_fy: 1376.0078125
+    left_cx: 962.9755859375
+    left_cy: 539.9728393554688
     left_width: 1920
     left_height: 1080
-    right_fx: 1375.93896484375
-    right_fy: 1376.0078125
-    right_cx: 962.9755859375
-    right_cy: 539.9728393554688
+    right_fx: 1369.7860107421875
+    right_fy: 1369.6165771484375
+    right_cx: 967.3739013671875
+    right_cy: 566.1657104492188
     right_width: 1920
     right_height: 1080
 
@@ -81,7 +77,7 @@ panorama_far_hybrid_stitcher:
     min_depth_m: 0.20
     max_depth_m: 15.0
     # Board 2 spans beyond the pure rotation-overlap boundary because of the
-    # 0.11520 m baseline. Five degrees retains its outer columns while keeping
+    # 0.06340 m baseline. Five degrees retains its outer columns while keeping
     # depth reprojection limited to the central band.
     depth_overlap_margin_deg: 5.0
     # The RGB renderer remains smooth, but metric range/validity are built by

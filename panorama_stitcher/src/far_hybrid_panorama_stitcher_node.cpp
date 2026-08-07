@@ -106,14 +106,19 @@ public:
     sync_slop_ms_ = declare_parameter<double>("sync_slop_ms", 45.0);
     input_images_rotated_180_ = declare_parameter<bool>(
       "input_images_rotated_180", true);
+    left_input_image_rotated_180_ = declare_parameter<bool>(
+      "left_input_image_rotated_180", input_images_rotated_180_);
+    right_input_image_rotated_180_ = declare_parameter<bool>(
+      "right_input_image_rotated_180", input_images_rotated_180_);
     rotate_color_180_ = declare_parameter<bool>(
       "rotate_color_180", false);
     rotate_aligned_depth_180_ = declare_parameter<bool>(
       "rotate_aligned_depth_180", false);
 
     const double half_yaw_deg = declare_parameter<double>(
-      "camera_half_yaw_deg", 32.0);
-    baseline_m_ = declare_parameter<double>("camera_baseline_m", 0.10);
+      "camera_half_yaw_deg", 30.397);
+    baseline_m_ = declare_parameter<double>(
+      "camera_baseline_m", 0.06339742196001438);
     set_default_yaw_extrinsics(
       left_model_, -half_yaw_deg * kPi / 180.0, -baseline_m_ * 0.5);
     set_default_yaw_extrinsics(
@@ -226,11 +231,11 @@ public:
     use_cuda_ = declare_parameter<bool>("use_cuda", true);
 
     set_parameter_camera_model(
-      left_model_, "left", 1369.7860107421875, 1369.6165771484375,
-      967.3739013671875, 566.1657104492188);
-    set_parameter_camera_model(
-      right_model_, "right", 1375.93896484375, 1376.0078125,
+      left_model_, "left", 1375.93896484375, 1376.0078125,
       962.9755859375, 539.9728393554688);
+    set_parameter_camera_model(
+      right_model_, "right", 1369.7860107421875, 1369.6165771484375,
+      967.3739013671875, 566.1657104492188);
     validate_parameters();
 
 #ifdef PANORAMA_WITH_CUDA
@@ -281,13 +286,15 @@ public:
       left_camera_info_topic_, camera_info_qos,
       [this](const CameraInfo::ConstSharedPtr message) {
         const std::lock_guard<std::mutex> lock(projection_mutex_);
-        update_camera_model(left_model_, *message, "left");
+        update_camera_model(
+          left_model_, *message, "left", left_input_image_rotated_180_);
       });
     right_camera_info_subscriber_ = create_subscription<CameraInfo>(
       right_camera_info_topic_, camera_info_qos,
       [this](const CameraInfo::ConstSharedPtr message) {
         const std::lock_guard<std::mutex> lock(projection_mutex_);
-        update_camera_model(right_model_, *message, "right");
+        update_camera_model(
+          right_model_, *message, "right", right_input_image_rotated_180_);
       });
 
     if (depth_aware_color_ || use_rgbd_synchronization_) {
@@ -448,7 +455,10 @@ private:
     model.cy = declare_parameter<double>(prefix + "_cy", default_cy);
     model.width = declare_parameter<int>(prefix + "_width", 1920);
     model.height = declare_parameter<int>(prefix + "_height", 1080);
-    adjust_intrinsics_for_input_rotation(model);
+    const bool image_rotated_180 =
+      prefix == "left" ? left_input_image_rotated_180_ :
+      right_input_image_rotated_180_;
+    adjust_intrinsics_for_input_rotation(model, image_rotated_180);
   }
 
   void validate_parameters()
@@ -521,9 +531,10 @@ private:
     pointcloud_stride_ = std::clamp(pointcloud_stride_, 1, 16);
   }
 
-  void adjust_intrinsics_for_input_rotation(CameraModel & model) const
+  static void adjust_intrinsics_for_input_rotation(
+    CameraModel & model, bool image_rotated_180)
   {
-    if (!input_images_rotated_180_) {
+    if (!image_rotated_180) {
       return;
     }
     model.cx = static_cast<double>(model.width - 1) - model.cx;
@@ -532,7 +543,7 @@ private:
 
   void update_camera_model(
     CameraModel & model, const CameraInfo & message,
-    const char * camera_name)
+    const char * camera_name, bool image_rotated_180)
   {
     CameraModel updated = model;
     updated.fx = message.k[0];
@@ -541,7 +552,7 @@ private:
     updated.cy = message.k[5];
     updated.width = static_cast<int>(message.width);
     updated.height = static_cast<int>(message.height);
-    adjust_intrinsics_for_input_rotation(updated);
+    adjust_intrinsics_for_input_rotation(updated, image_rotated_180);
 
     const bool changed =
       !model.valid() ||
@@ -562,7 +573,7 @@ private:
       "%s CameraInfo: %dx%d fx/fy=%.3f/%.3f cx/cy=%.3f/%.3f%s",
       camera_name, model.width, model.height,
       model.fx, model.fy, model.cx, model.cy,
-      input_images_rotated_180_ ? " (adjusted for 180 deg image rotation)" : "");
+      image_rotated_180 ? " (adjusted for 180 deg image rotation)" : "");
   }
 
   static int64_t stamp_nanoseconds(const builtin_interfaces::msg::Time & stamp)
@@ -1340,6 +1351,7 @@ private:
         left_map_x_, left_map_y_,
         right_map_x_, right_map_y_, error))
     {
+      cuda_backend_->quarantine(error);
       cuda_backend_failed_ = true;
       RCLCPP_ERROR(
         get_logger(),
@@ -1410,6 +1422,7 @@ private:
         used_cuda_last_frame_ = true;
         return panorama;
       }
+      cuda_backend_->quarantine(error);
       cuda_backend_failed_ = true;
       cuda_backend_configured_ = false;
       RCLCPP_ERROR(
@@ -2132,6 +2145,8 @@ private:
   int sync_queue_size_{50};
   double sync_slop_ms_{45.0};
   bool input_images_rotated_180_{true};
+  bool left_input_image_rotated_180_{true};
+  bool right_input_image_rotated_180_{true};
   bool rotate_color_180_{false};
   bool rotate_aligned_depth_180_{false};
   double baseline_m_{0.10};

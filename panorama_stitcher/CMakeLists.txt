@@ -51,35 +51,57 @@ add_executable(panorama_ground_segmentation_node
 )
 
 if(CMAKE_CUDA_COMPILER)
-  target_sources(rgbd_panorama_stitcher_node PRIVATE
+  # Build the CUDA implementation once. Keeping it in a standalone library
+  # gives both panorama nodes the exact same lifecycle/error handling and
+  # makes the backend independently testable under compute-sanitizer.
+  add_library(panorama_cuda_backend STATIC
     src/cuda_panorama_backend.cu
   )
+  set_target_properties(panorama_cuda_backend PROPERTIES
+    CUDA_ARCHITECTURES 89
+    CUDA_STANDARD 17
+    CUDA_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON
+  )
+  target_link_libraries(panorama_cuda_backend
+    CUDA::cudart
+    ${OpenCV_LIBS}
+  )
+
   target_compile_definitions(rgbd_panorama_stitcher_node PRIVATE
     PANORAMA_WITH_CUDA=1
   )
-  set_target_properties(rgbd_panorama_stitcher_node PROPERTIES
-    CUDA_ARCHITECTURES 89
-    CUDA_STANDARD 17
-    CUDA_STANDARD_REQUIRED ON
-  )
   target_link_libraries(rgbd_panorama_stitcher_node
-    CUDA::cudart
+    panorama_cuda_backend
   )
 
-  target_sources(far_hybrid_panorama_stitcher_node PRIVATE
-    src/cuda_panorama_backend.cu
-  )
   target_compile_definitions(far_hybrid_panorama_stitcher_node PRIVATE
     PANORAMA_WITH_CUDA=1
   )
-  set_target_properties(far_hybrid_panorama_stitcher_node PROPERTIES
-    CUDA_ARCHITECTURES 89
-    CUDA_STANDARD 17
-    CUDA_STANDARD_REQUIRED ON
-  )
   target_link_libraries(far_hybrid_panorama_stitcher_node
-    CUDA::cudart
+    panorama_cuda_backend
   )
+
+  if(BUILD_TESTING)
+    add_executable(cuda_panorama_backend_smoke_test
+      test/cuda_panorama_backend_smoke_test.cpp
+    )
+    target_include_directories(cuda_panorama_backend_smoke_test PRIVATE
+      ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+    target_link_libraries(cuda_panorama_backend_smoke_test
+      panorama_cuda_backend
+      ${OpenCV_LIBS}
+    )
+    add_test(
+      NAME cuda_panorama_backend_smoke_test
+      COMMAND cuda_panorama_backend_smoke_test
+    )
+    set_tests_properties(cuda_panorama_backend_smoke_test PROPERTIES
+      SKIP_RETURN_CODE 77
+      TIMEOUT 20
+    )
+  endif()
 endif()
 
 add_executable(front_rgbd_fusion_node
