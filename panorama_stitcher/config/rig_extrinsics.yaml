@@ -1,8 +1,8 @@
-schema_version: 4
+schema_version: 5
 accepted: true
 provisional: true
-created_local_time: '2026-08-06T13:34:00+09:00'
-method: joint_stereo_charuco_with_symmetric_live_refinement
+created_local_time: '2026-08-06T16:23:02+09:00'
+method: symmetric_mount_camera_only_common_corner_refinement
 convention: X_right_topic_optical = R_right_from_left * X_left_topic_optical + t_right_from_left_m
 inputs:
   capture_root: /home/ssc/lidar_cam_calib/captures_mount_20260806_1215
@@ -13,42 +13,69 @@ inputs:
   left_topic_pixels_rotated_180: true
   right_topic_pixels_rotated_180: false
   remounted_rig_color_lens_baseline_m: 0.06339742196001438
+  symmetric_validation_capture_root: /home/ssc/lidar_cam_calib/captures_symmetric_alignment_20260806_1555
+  symmetric_validation_capture_indices: [0, 1, 2]
 quality:
-  charuco_view_count: 42
-  aruco_view_count: 42
-  full_reprojection_rms_px: 0.4351161315978
-  full_p95_view_rms_px: 0.5705175645467067
-  train_hold_rotation_delta_deg: 0.15964705681687333
-  train_hold_translation_delta_m: 0.008469598448772923
-  independent_aruco_rotation_delta_deg: 0.6749000174456511
+  base_stereo_solution:
+    method: joint_stereo_charuco
+    charuco_view_count: 42
+    aruco_view_count: 42
+    full_reprojection_rms_px: 0.4351161315978
+    full_p95_view_rms_px: 0.5705175645467067
+    train_hold_rotation_delta_deg: 0.15964705681687333
+    train_hold_translation_delta_m: 0.008469598448772923
+    independent_aruco_rotation_delta_deg: 0.6749000174456511
+  symmetric_common_corner_validation:
+    boards: [2, 5]
+    common_corner_count: 78
+    zero_effective_pitch_vertical_rms_px: 7.53839485319233
+    zero_effective_pitch_vertical_median_px: 7.389691429023458
+    applied_vertical_rms_px: 0.9660675586010881
+    applied_vertical_p95_px: 1.9800100952711108
+    applied_vertical_max_px: 2.2552853947915708
+    live_validation_image: /home/ssc/lidar_cam_calib/validation_mount_20260806/panorama_symmetric_effective_pitch_reloaded.png
 result:
   R_right_from_left:
-  - [0.48789328422742373, 0.02560219789621183, -0.8725277477929637]
-  - [-0.0029020560747878635, 0.9996118353962045, 0.02770842121757416]
-  - [0.872898459888845, -0.010986628177695553, 0.48777820033798985]
-  t_right_from_left_m: [-0.04933612889085585, -0.025896044703301657, -0.03024193059256596]
+  - [0.4879509749357622, 0.002493594144282238, -0.8728674745042813]
+  - [0.0024935941442822377, 0.999987856608543, 0.004250720373669779]
+  - [0.8728674745042813, -0.004250720373669779, 0.48793883154430545]
+  t_right_from_left_m: [-0.05468185983541429, -9.164530889949797e-05, -0.032079883373440976]
   estimated_color_lens_baseline_m: 0.06339742196001438
-  relative_rotation_angle_deg: 60.8143077608012
+  relative_rotation_angle_deg: 60.794803247857594
   left_yaw_deg: -30.3952863556818
   right_yaw_deg: 30.39871979576059
-  left_pitch_deg: -0.7508677878226565
-  right_pitch_deg: 0.49317989249624367
+  physical_pitch_constraint_deg: [0.0, 0.0]
+  physical_roll_constraint_deg: [0.0, 0.0]
+  effective_projection_pitch_deg: [-0.163681241185, 0.163681241185]
   R_left_topic_optical_to_panorama_optical:
-  - [0.862515680992685, 0.010597361647451654, -0.5059193571784321]
-  - [-0.00459863862956593, 0.9999035545049233, 0.013104740026983044]
-  - [0.5060094392049219, -0.00897650346923948, 0.8624812286774637]
+  - [0.8625552969843766, 0.001445420725720489, -0.5059607399819862]
+  - [0.0, 0.9999959194165541, 0.002856772696656394]
+  - [0.5059628046054309, -0.002464124421781315, 0.8625517772555107]
   R_right_topic_optical_to_panorama_optical:
-  - [0.8625156013310111, -0.005928047395682471, 0.5059957467357596]
-  - [0.011921834474450834, 0.99989188450164, -0.008607506637976166]
-  - [-0.5058900150461246, 0.01345650630117455, 0.862493023226738]
+  - [0.8625249756985842, 0.001445568385372199, 0.5060124273456135]
+  - [0.0, 0.9999959194165542, -0.0028567726966563945]
+  - [-0.5060144921799736, 0.0024640378007599354, 0.8625214560934468]
   R_right_virtual_optical_to_panorama_optical:
-  - [0.8625156013310111, -0.005928047395682471, 0.5059957467357596]
-  - [0.011921834474450834, 0.99989188450164, -0.008607506637976166]
-  - [-0.5058900150461246, 0.01345650630117455, 0.862493023226738]
-  baseline_left_to_right_in_panorama_optical_m: [0.05770195615019533, 0.026221114483449236, 0.0014732694468082563]
-  left_lens_center_in_panorama_optical_m: [-0.028850978075097664, -0.013110557241724618, -0.0007366347234041282]
-  right_lens_center_in_panorama_optical_m: [0.028850978075097664, 0.013110557241724618, 0.0007366347234041282]
+  - [0.8625249756985842, 0.001445568385372199, 0.5060124273456135]
+  - [0.0, 0.9999959194165542, -0.0028567726966563945]
+  - [-0.5060144921799736, 0.0024640378007599354, 0.8625214560934468]
+  baseline_left_to_right_in_panorama_optical_m: [0.06339742196001438, 0.0, 0.0]
+  left_lens_center_in_panorama_optical_m: [-0.03169871098000719, 0.0, 0.0]
+  right_lens_center_in_panorama_optical_m: [0.03169871098000719, 0.0, 0.0]
+runtime_tf:
+  convention: each entry is the pose of the named child frame in its parent frame
+  lidar_rig_calibration: /home/ssc/lidar_cam_calib/extrinsic_dual_front_rig_mount_20260806_baseline063.yaml
+  front_camera_rig_in_velodyne:
+    translation_m: [0.03515346226897896, 0.009178495080172683, 0.24613491314078179]
+    quaternion_xyzw: [0.0016179109821002906, 0.037815911856597634, -0.020348317695667525, 0.999076215882184]
+  front_left_link_in_front_camera_rig:
+    translation_m: [0.007801762937863374, 0.01937749880482871, 0.00015326596830672777]
+    quaternion_xyzw: [-0.005251678476815351, 0.0005767024988907184, 0.2602506648580249, 0.9655266328425953]
+  front_right_link_in_front_camera_rig:
+    translation_m: [-0.007229518027530282, -0.0445528728389074, 5.506461241890305e-05]
+    quaternion_xyzw: [-0.004810897677422798, -0.0008715510773705323, -0.2624107046679924, 0.9649438935699343]
 limitations:
 - The current common targets span only 0.069 m in depth, so translation remains provisional pending pose-diverse recapture.
 - The old mount's 0.11 m horizontal baseline is invalid for this remounted geometry.
-- Live common-board center disagreement was reduced from 16-17 mm to about 2.4 mm by the symmetric refinement.
+- The final effective-pitch correction is a camera-topic convention correction, not evidence of physical mount pitch.
+- LiDAR was not used for this final camera-camera refinement.

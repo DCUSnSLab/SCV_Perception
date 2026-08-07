@@ -28,14 +28,14 @@ STATE_UNKNOWN = 0
 STATE_RED = 1
 STATE_YELLOW = 2
 STATE_GREEN = 3
-STATE_RED_GREEN = 4
+STATE_LEFT_ARROW = 4
 
 STATE_LABELS = {
     STATE_UNKNOWN: 'UNKNOWN',
     STATE_RED: 'RED',
     STATE_YELLOW: 'YELLOW',
     STATE_GREEN: 'GREEN',
-    STATE_RED_GREEN: 'RED+GREEN',
+    STATE_LEFT_ARROW: 'LEFT ARROW',
 }
 
 STATE_COLORS = {
@@ -43,7 +43,7 @@ STATE_COLORS = {
     STATE_RED: (70, 70, 235),
     STATE_YELLOW: (0, 215, 255),
     STATE_GREEN: (70, 205, 95),
-    STATE_RED_GREEN: (80, 220, 220),
+    STATE_LEFT_ARROW: (80, 220, 220),
 }
 
 SOURCE_COLORS = {
@@ -181,6 +181,7 @@ class TLFusionNode(Node):
         self.fallback_red_green_yellow_max = float(
             self._declare_param('fallback_red_green_yellow_max', 0.12)
         )
+        self.fallback_gamma_lut = self._build_gamma_lut(self.fallback_gamma)
 
         self.state_window_size = int(self._declare_param('state_window_size', 5))
         self.hold_ms = int(self._declare_param('hold_ms', 250))
@@ -267,12 +268,14 @@ class TLFusionNode(Node):
                 analysis = self._analyze_selected_candidate(frame, selected)
                 decision = self._decide_state(selected, analysis)
             stable_state = self._update_stable_state(decision.proposed_state, selected is not None)
-            overlay_candidates = self._build_overlay_candidates(
-                detections,
-                selected,
-                stable_state,
-            )
-            debug_image = self._build_debug_image(frame, overlay_candidates)
+            debug_image = None
+            if self._should_render_debug():
+                overlay_candidates = self._build_overlay_candidates(
+                    detections,
+                    selected,
+                    stable_state,
+                )
+                debug_image = self._build_debug_image(frame, overlay_candidates)
             self._publish_outputs(msg, debug_image, stable_state, decision)
 
             self.processed_frames += 1
@@ -476,14 +479,12 @@ class TLFusionNode(Node):
             for name in COLOR_ORDER
         }
         valid_pixels = int(sum(int(np.count_nonzero(mask)) for mask in masks.values()))
-        component_sizes = {
-            name: self._largest_component(mask)
-            for name, mask in masks.items()
-        }
         top_color = max(COLOR_ORDER, key=lambda name: scores[name])
-        sorted_scores = sorted(scores.values(), reverse=True)
-        top_score = sorted_scores[0] if sorted_scores else 0.0
-        second_score = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
+        top_score = float(scores[top_color])
+        second_score = max(
+            (float(scores[name]) for name in COLOR_ORDER if name != top_color),
+            default=0.0,
+        )
         score_gap = top_score - second_score
 
         red_green_decisive = (
@@ -493,17 +494,25 @@ class TLFusionNode(Node):
             and scores['yellow'] <= self.fallback_red_green_yellow_max
         )
 
+        component_size = 0
+        if (
+            valid_pixels >= self.fallback_min_valid_pixels
+            and top_score >= self.fallback_score_threshold
+            and score_gap >= self.fallback_score_gap
+        ):
+            component_size = self._largest_component(masks[top_color])
+
         decisive = (
             valid_pixels >= self.fallback_min_valid_pixels
             and top_score >= self.fallback_score_threshold
             and score_gap >= self.fallback_score_gap
-            and component_sizes[top_color] >= self.fallback_min_component_pixels
+            and component_size >= self.fallback_min_component_pixels
         )
 
         if red_green_decisive:
-            state = STATE_RED_GREEN
+            state = STATE_LEFT_ARROW
             decisive = True
-            reason = 'color_red_green'
+            reason = 'color_left_arrow'
         elif decisive:
             state = COLOR_TO_STATE[top_color]
             reason = f'color_{top_color}'
@@ -612,13 +621,14 @@ class TLFusionNode(Node):
     def _publish_outputs(
         self,
         msg: Image,
-        debug_image: np.ndarray,
+        debug_image: np.ndarray | None,
         stable_state: int,
         decision: DecisionResult,
     ) -> None:
-        debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
-        debug_msg.header = msg.header
-        self.debug_pub.publish(debug_msg)
+        if debug_image is not None:
+            debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
+            debug_msg.header = msg.header
+            self.debug_pub.publish(debug_msg)
 
         self.state_pub.publish(Int32(data=int(stable_state)))
         self.state_label_pub.publish(String(data=STATE_LABELS[stable_state]))
@@ -626,7 +636,7 @@ class TLFusionNode(Node):
             String(data=f'{STATE_LABELS[stable_state]} {decision.source} {decision.reason}')
         )
 
-        if self.show_windows:
+        if self.show_windows and debug_image is not None:
             cv2.imshow('TL Debug', debug_image)
             self._destroy_window_if_exists('TL Zoom')
             self._destroy_window_if_exists('TL Panel')
@@ -977,9 +987,13 @@ class TLFusionNode(Node):
         has_red = 'red' in normalized
         has_yellow = 'yellow' in normalized
         has_green = 'green' in normalized
+        has_left_arrow = (
+            'green_arrow' in normalized
+            or ('left' in normalized and 'arrow' in normalized)
+        )
 
-        if has_red and has_green:
-            return STATE_RED_GREEN, True
+        if has_left_arrow or (has_red and has_green):
+            return STATE_LEFT_ARROW, True
         if has_yellow:
             return STATE_YELLOW, True
         if has_green:
@@ -1010,13 +1024,13 @@ class TLFusionNode(Node):
         y1 = min(frame.shape[0], y1)
         if x1 <= x0 or y1 <= y0:
             return np.zeros((64, 64, 3), dtype=np.uint8)
-        return frame[y0:y1, x0:x1].copy()
+        return frame[y0:y1, x0:x1]
 
     def _enhance_crop(self, crop: np.ndarray) -> np.ndarray:
         if crop.size == 0:
             return np.zeros((64, 64, 3), dtype=np.uint8)
 
-        working = crop.copy()
+        working = crop
         if min(working.shape[:2]) < 64:
             scale = 64.0 / float(max(1, min(working.shape[:2])))
             new_width = max(1, int(round(working.shape[1] * scale)))
@@ -1038,17 +1052,27 @@ class TLFusionNode(Node):
         hsv = cv2.merge((h_channel, s_channel, v_channel))
         enhanced = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
 
-        gamma = max(0.1, self.fallback_gamma)
-        inv_gamma = 1.0 / gamma
-        lut = np.array(
-            [((index / 255.0) ** inv_gamma) * 255.0 for index in range(256)],
-            dtype=np.uint8,
-        )
-        enhanced = cv2.LUT(enhanced, lut)
+        enhanced = cv2.LUT(enhanced, self.fallback_gamma_lut)
 
         blurred = cv2.GaussianBlur(enhanced, (0, 0), 1.0)
         enhanced = cv2.addWeighted(enhanced, 1.35, blurred, -0.35, 0.0)
         return enhanced
+
+    def _build_gamma_lut(self, gamma: float) -> np.ndarray:
+        gamma = max(0.1, gamma)
+        inv_gamma = 1.0 / gamma
+        return np.array(
+            [((index / 255.0) ** inv_gamma) * 255.0 for index in range(256)],
+            dtype=np.uint8,
+        )
+
+    def _should_render_debug(self) -> bool:
+        if self.show_windows:
+            return True
+        try:
+            return self.debug_pub.get_subscription_count() > 0
+        except AttributeError:
+            return True
 
     def _clean_mask(self, mask: np.ndarray) -> np.ndarray:
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, self.fallback_kernel, iterations=1)
