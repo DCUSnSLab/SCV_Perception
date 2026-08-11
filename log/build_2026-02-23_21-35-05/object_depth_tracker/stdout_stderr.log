@@ -1,0 +1,24 @@
+/home/jay/.local/lib/python3.10/site-packages/setuptools/_distutils/dist.py:289: UserWarning: Unknown distribution option: 'tests_require'
+  warnings.warn(msg)
+running develop
+running egg_info
+creating object_depth_tracker.egg-info
+writing object_depth_tracker.egg-info/PKG-INFO
+writing dependency_links to object_depth_tracker.egg-info/dependency_links.txt
+writing entry points to object_depth_tracker.egg-info/entry_points.txt
+writing requirements to object_depth_tracker.egg-info/requires.txt
+writing top-level names to object_depth_tracker.egg-info/top_level.txt
+writing manifest file 'object_depth_tracker.egg-info/SOURCES.txt'
+reading manifest file 'object_depth_tracker.egg-info/SOURCES.txt'
+writing manifest file 'object_depth_tracker.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jay/SCV_Perception/install/object_depth_tracker/lib/python3.10/site-packages/object-depth-tracker.egg-link (link to .)
+Installing object_depth_tracker_node script to /home/jay/SCV_Perception/install/object_depth_tracker/lib/object_depth_tracker
+
+Installed /home/jay/SCV_Perception/build/object_depth_tracker
+running symlink_data
+creating /home/jay/SCV_Perception/install/object_depth_tracker/share/ament_index/resource_index/packages
+symbolically linking /home/jay/SCV_Perception/build/object_depth_tracker/resource/object_depth_tracker -> /home/jay/SCV_Perception/install/object_depth_tracker/share/ament_index/resource_index/packages
+symbolically linking /home/jay/SCV_Perception/build/object_depth_tracker/package.xml -> /home/jay/SCV_Perception/install/object_depth_tracker/share/object_depth_tracker
+creating /home/jay/SCV_Perception/install/object_depth_tracker/share/object_depth_tracker/launch
+symbolically linking /home/jay/SCV_Perception/build/object_depth_tracker/launch/object_tracker.launch.py -> /home/jay/SCV_Perception/install/object_depth_tracker/share/object_depth_tracker/launch

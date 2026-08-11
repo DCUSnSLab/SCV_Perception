@@ -1,0 +1,28 @@
+[0.789s] Invoking command in '/home/jay/SCV_Perception/build/ultralytics_ros2': PYTHONPATH=/home/jay/SCV_Perception/build/ultralytics_ros2/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jay/SCV_Perception/install/ultralytics_ros2/lib/python3.10/site-packages:/home/jay/SCV_Perception/install/perception_interface/local/lib/python3.10/dist-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jay/SCV_Perception/build/ultralytics_ros2/build --no-deps symlink_data
+[0.913s] /home/jay/.local/lib/python3.10/site-packages/setuptools/_distutils/dist.py:289: UserWarning: Unknown distribution option: 'tests_require'
+[0.913s]   warnings.warn(msg)
+[1.078s] running develop
+[1.298s] running egg_info
+[1.315s] creating ultralytics_ros2.egg-info
+[1.315s] writing ultralytics_ros2.egg-info/PKG-INFO
+[1.315s] writing dependency_links to ultralytics_ros2.egg-info/dependency_links.txt
+[1.316s] writing entry points to ultralytics_ros2.egg-info/entry_points.txt
+[1.316s] writing requirements to ultralytics_ros2.egg-info/requires.txt
+[1.316s] writing top-level names to ultralytics_ros2.egg-info/top_level.txt
+[1.316s] writing manifest file 'ultralytics_ros2.egg-info/SOURCES.txt'
+[1.357s] reading manifest file 'ultralytics_ros2.egg-info/SOURCES.txt'
+[1.358s] writing manifest file 'ultralytics_ros2.egg-info/SOURCES.txt'
+[1.376s] running build_ext
+[1.376s] Creating /home/jay/SCV_Perception/install/ultralytics_ros2/lib/python3.10/site-packages/ultralytics-ros2.egg-link (link to .)
+[1.377s] Installing seg_run script to /home/jay/SCV_Perception/install/ultralytics_ros2/lib/ultralytics_ros2
+[1.377s] 
+[1.377s] Installed /home/jay/SCV_Perception/build/ultralytics_ros2
+[1.377s] running symlink_data
+[1.377s] creating /home/jay/SCV_Perception/install/ultralytics_ros2/share/ament_index/resource_index/packages
+[1.377s] symbolically linking /home/jay/SCV_Perception/build/ultralytics_ros2/resource/ultralytics_ros2 -> /home/jay/SCV_Perception/install/ultralytics_ros2/share/ament_index/resource_index/packages
+[1.377s] symbolically linking /home/jay/SCV_Perception/build/ultralytics_ros2/package.xml -> /home/jay/SCV_Perception/install/ultralytics_ros2/share/ultralytics_ros2
+[1.378s] creating /home/jay/SCV_Perception/install/ultralytics_ros2/share/ultralytics_ros2/launch
+[1.378s] symbolically linking /home/jay/SCV_Perception/build/ultralytics_ros2/launch/seg.launch.py -> /home/jay/SCV_Perception/install/ultralytics_ros2/share/ultralytics_ros2/launch
+[1.378s] creating /home/jay/SCV_Perception/install/ultralytics_ros2/share/ultralytics_ros2/model
+[1.378s] creating /home/jay/SCV_Perception/install/ultralytics_ros2/share/ultralytics_ros2/params
+[1.403s] Invoked command in '/home/jay/SCV_Perception/build/ultralytics_ros2' returned '0': PYTHONPATH=/home/jay/SCV_Perception/build/ultralytics_ros2/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jay/SCV_Perception/install/ultralytics_ros2/lib/python3.10/site-packages:/home/jay/SCV_Perception/install/perception_interface/local/lib/python3.10/dist-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jay/SCV_Perception/build/ultralytics_ros2/build --no-deps symlink_data

@@ -121,7 +121,7 @@ class MemorySORT:
     def __init__(self, iou_thr_active=0.3, iou_thr_memory=0.2,
                  max_age_active=0, min_hits=3, memory_ttl_frames=30,
                  q_scale=1e-2, r_scale=1e-1, class_match=False,
-                 output_coasting=False, coast_inflate=0.05,
+                 output_coasting=True, coast_inflate=0.05,
                  use_mask_assoc=False, output_masks=False):
         self.iou_thr_active = float(iou_thr_active)
         self.iou_thr_memory = float(iou_thr_memory)
@@ -341,11 +341,11 @@ class MemorySortNode(Node):
         self.overlay_mask  = bool(p('overlay_mask', False).value)
         self.mask_alpha    = float(p('mask_alpha', 0.40).value)
 
-        self.iou_thr_active= float(p('iou_thr_active', 0.30).value)
-        self.iou_thr_memory= float(p('iou_thr_memory', 0.20).value)
+        self.iou_thr_active= float(p('iou_thr_active', 0.2).value)
+        self.iou_thr_memory= float(p('iou_thr_memory', 0.1).value)
         self.max_age_active= int(p('max_age_active', 0).value)
-        self.min_hits      = int(p('min_hits', 3).value)
-        self.memory_ttl_sec= float(p('memory_ttl_sec', 1.0).value)
+        self.min_hits      = int(p('min_hits', 1).value)
+        self.memory_ttl_sec= float(p('memory_ttl_sec', 2.0).value)
         self.q_scale       = float(p('q_scale', 1e-2).value)
         self.r_scale       = float(p('r_scale', 1e-1).value)
         self.class_match   = bool(p('class_match', False).value)
@@ -427,7 +427,7 @@ class MemorySortNode(Node):
             memory_ttl_frames=ttl_frames,
             q_scale=self.q_scale, r_scale=self.r_scale,
             class_match=self.class_match,
-            output_coasting=False,
+            output_coasting=True,
             coast_inflate=0.05,
             use_mask_assoc=self.assoc_mask,
             output_masks=self.output_masks
@@ -472,25 +472,41 @@ class MemorySortNode(Node):
 
         # draw
         for item in tracks:
+            # unpack basic data
             if len(item) >= 7:
-                x1,y1,x2,y2,tid,cls,pred = item[:7]
+                x1, y1, x2, y2, track_id, cls_id, is_pred = item[:7]
             else:
-                x1,y1,x2,y2,tid,cls = item; pred = 0
-            mask = item[7] if (len(item) >= 8) else None
+                x1, y1, x2, y2, track_id, cls_id = item
+                is_pred = 0
 
-            x1,y1,x2,y2 = map(int,[x1,y1,x2,y2])
-            color = (0,255,0) if pred == 0 else (0,200,255)
-            cv2.rectangle(frame,(x1,y1),(x2,y2),color,2)
-            lbl = f'ID {int(tid)}'
-            if pred == 1: lbl += ' (pred)'
-            if 0 <= int(cls) < len(self.COCO): lbl += f' {self.COCO[int(cls)]}'
-            cv2.putText(frame,lbl,(x1,max(15,y1-5)),cv2.FONT_HERSHEY_SIMPLEX,0.55,color,2)
+            mask = item[7] if len(item) >= 8 else None
 
+            # convert coordinates
+            x1, y1, x2, y2 = map(int, [x1, y1, x2, y2])
+
+            # color depending on prediction state
+            if is_pred == 1:
+                color = (128, 128, 128)   # gray for predicted (no detection)
+                label = f'ID {int(track_id)} (pred)'
+            else:
+                color = (0, 255, 0)       # green for detection + tracking
+                label = f'ID {int(track_id)}'
+
+            # add class name (if available)
+            if 0 <= int(cls_id) < len(self.COCO):
+                label += f' {self.COCO[int(cls_id)]}'
+
+            # draw rectangle and label
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, label, (x1, max(15, y1 - 5)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+            # optional segmentation mask overlay
             if self.overlay_mask and isinstance(mask, np.ndarray) and mask.shape[:2] == frame.shape[:2]:
                 overlay = frame.copy()
-                rng = np.random.default_rng(int(cls) + 12345)
-                col = tuple(int(c) for c in rng.integers(80, 255, size=3))
-                overlay[mask] = col
+                rng = np.random.default_rng(int(cls_id) + 12345)
+                mask_color = tuple(int(c) for c in rng.integers(80, 255, size=3))
+                overlay[mask] = mask_color
                 frame[:] = cv2.addWeighted(overlay, self.mask_alpha, frame, 1.0 - self.mask_alpha, 0)
 
         # publish overlay

@@ -1,0 +1,2 @@
+[console_scripts]
+object_depth_tracker_node = object_depth_tracker.object_depth_tracker_node:main

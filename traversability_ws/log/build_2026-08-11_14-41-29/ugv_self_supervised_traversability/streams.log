@@ -1,0 +1,20 @@
+[60.514s] Invoking command in '/home/jay/traversability_ws/build/ugv_self_supervised_traversability': CONDA_PROMPT_MODIFIER=(base) PYTHONPATH=/home/jay/traversability_ws/build/ugv_self_supervised_traversability/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jay/traversability_ws/build/ugv_self_supervised_traversability/build --no-deps symlink_data
+[60.804s] running develop
+[61.028s] running egg_info
+[61.046s] writing ugv_self_supervised_traversability.egg-info/PKG-INFO
+[61.046s] writing dependency_links to ugv_self_supervised_traversability.egg-info/dependency_links.txt
+[61.046s] writing entry points to ugv_self_supervised_traversability.egg-info/entry_points.txt
+[61.046s] writing requirements to ugv_self_supervised_traversability.egg-info/requires.txt
+[61.046s] writing top-level names to ugv_self_supervised_traversability.egg-info/top_level.txt
+[61.087s] reading manifest file 'ugv_self_supervised_traversability.egg-info/SOURCES.txt'
+[61.088s] writing manifest file 'ugv_self_supervised_traversability.egg-info/SOURCES.txt'
+[61.107s] running build_ext
+[61.107s] Creating /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/python3.10/site-packages/ugv-self-supervised-traversability.egg-link (link to .)
+[61.107s] Installing footprint_generator script to /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/ugv_self_supervised_traversability
+[61.108s] Installing label_visualizer script to /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/ugv_self_supervised_traversability
+[61.108s] Installing trajectory_recorder script to /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/ugv_self_supervised_traversability
+[61.108s] Installing traversability_labeler script to /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/ugv_self_supervised_traversability
+[61.108s] 
+[61.108s] Installed /home/jay/traversability_ws/build/ugv_self_supervised_traversability
+[61.108s] running symlink_data
+[61.130s] Invoked command in '/home/jay/traversability_ws/build/ugv_self_supervised_traversability' returned '0': CONDA_PROMPT_MODIFIER=(base) PYTHONPATH=/home/jay/traversability_ws/build/ugv_self_supervised_traversability/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jay/traversability_ws/build/ugv_self_supervised_traversability/build --no-deps symlink_data

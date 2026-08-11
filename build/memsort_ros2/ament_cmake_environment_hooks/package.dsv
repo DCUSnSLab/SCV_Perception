@@ -1,0 +1,4 @@
+source;share/memsort_ros2/local_setup.bash
+source;share/memsort_ros2/local_setup.dsv
+source;share/memsort_ros2/local_setup.sh
+source;share/memsort_ros2/local_setup.zsh

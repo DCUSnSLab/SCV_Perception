@@ -1,0 +1,1 @@
+/home/jay/SCV_Perception/build/ultralytics_ros2/launch/seg.launch.py

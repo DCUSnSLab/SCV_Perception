@@ -1,0 +1,13 @@
+Metadata-Version: 2.4
+Name: object_depth_tracker
+Version: 0.0.0
+Summary: 3D object depth tracking with multiple filtering algorithms
+Maintainer: d2-521-30
+Maintainer-email: zxc81808080@gmail.com
+License: Apache-2.0
+Requires-Dist: setuptools
+Dynamic: license
+Dynamic: maintainer
+Dynamic: maintainer-email
+Dynamic: requires-dist
+Dynamic: summary

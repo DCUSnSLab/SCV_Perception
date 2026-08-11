@@ -1,0 +1,27 @@
+running develop
+running egg_info
+creating ugv_self_supervised_traversability.egg-info
+writing ugv_self_supervised_traversability.egg-info/PKG-INFO
+writing dependency_links to ugv_self_supervised_traversability.egg-info/dependency_links.txt
+writing entry points to ugv_self_supervised_traversability.egg-info/entry_points.txt
+writing requirements to ugv_self_supervised_traversability.egg-info/requires.txt
+writing top-level names to ugv_self_supervised_traversability.egg-info/top_level.txt
+writing manifest file 'ugv_self_supervised_traversability.egg-info/SOURCES.txt'
+reading manifest file 'ugv_self_supervised_traversability.egg-info/SOURCES.txt'
+writing manifest file 'ugv_self_supervised_traversability.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/python3.10/site-packages/ugv-self-supervised-traversability.egg-link (link to .)
+Installing footprint_generator script to /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/ugv_self_supervised_traversability
+Installing label_visualizer script to /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/ugv_self_supervised_traversability
+Installing trajectory_recorder script to /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/ugv_self_supervised_traversability
+Installing traversability_labeler script to /home/jay/traversability_ws/install/ugv_self_supervised_traversability/lib/ugv_self_supervised_traversability
+
+Installed /home/jay/traversability_ws/build/ugv_self_supervised_traversability
+running symlink_data
+creating /home/jay/traversability_ws/install/ugv_self_supervised_traversability/share/ament_index/resource_index/packages
+symbolically linking /home/jay/traversability_ws/build/ugv_self_supervised_traversability/resource/ugv_self_supervised_traversability -> /home/jay/traversability_ws/install/ugv_self_supervised_traversability/share/ament_index/resource_index/packages
+symbolically linking /home/jay/traversability_ws/build/ugv_self_supervised_traversability/package.xml -> /home/jay/traversability_ws/install/ugv_self_supervised_traversability/share/ugv_self_supervised_traversability
+creating /home/jay/traversability_ws/install/ugv_self_supervised_traversability/share/ugv_self_supervised_traversability/launch
+symbolically linking /home/jay/traversability_ws/build/ugv_self_supervised_traversability/launch/traversability_labeling.launch.py -> /home/jay/traversability_ws/install/ugv_self_supervised_traversability/share/ugv_self_supervised_traversability/launch
+creating /home/jay/traversability_ws/install/ugv_self_supervised_traversability/share/ugv_self_supervised_traversability/config
+symbolically linking /home/jay/traversability_ws/build/ugv_self_supervised_traversability/config/traversability.yaml -> /home/jay/traversability_ws/install/ugv_self_supervised_traversability/share/ugv_self_supervised_traversability/config

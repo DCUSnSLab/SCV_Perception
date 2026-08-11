@@ -1,0 +1,9 @@
+source;share/ugv_self_supervised_traversability/hook/pythonpath.ps1
+source;share/ugv_self_supervised_traversability/hook/pythonpath.dsv
+source;share/ugv_self_supervised_traversability/hook/pythonpath.sh
+source;share/ugv_self_supervised_traversability/hook/ament_prefix_path.ps1
+source;share/ugv_self_supervised_traversability/hook/ament_prefix_path.dsv
+source;share/ugv_self_supervised_traversability/hook/ament_prefix_path.sh
+source;../../build/ugv_self_supervised_traversability/share/ugv_self_supervised_traversability/hook/pythonpath_develop.ps1
+source;../../build/ugv_self_supervised_traversability/share/ugv_self_supervised_traversability/hook/pythonpath_develop.dsv
+source;../../build/ugv_self_supervised_traversability/share/ugv_self_supervised_traversability/hook/pythonpath_develop.sh

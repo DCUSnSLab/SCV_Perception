@@ -1,0 +1,5 @@
+[console_scripts]
+footprint_generator = ugv_self_supervised_traversability.footprint_generator:main
+label_visualizer = ugv_self_supervised_traversability.label_visualizer:main
+trajectory_recorder = ugv_self_supervised_traversability.trajectory_recorder:main
+traversability_labeler = ugv_self_supervised_traversability.traversability_labeler:main

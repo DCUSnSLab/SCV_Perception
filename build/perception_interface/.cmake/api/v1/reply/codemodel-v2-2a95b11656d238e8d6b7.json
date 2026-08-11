@@ -1,0 +1,233 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-1ffdc3e2a7f2daa4817c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12,
+						13,
+						14,
+						15,
+						16,
+						17
+					]
+				},
+				{
+					"build" : "perception_interface__py",
+					"jsonFile" : "directory-perception_interface__py-c7584d3aa4877a443863.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.12"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 0,
+					"source" : "/home/jay/SCV_Perception/build/perception_interface/perception_interface__py",
+					"targetIndexes" : 
+					[
+						4
+					]
+				}
+			],
+			"name" : "",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0,
+						1
+					],
+					"name" : "perception_interface",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12,
+						13,
+						14,
+						15,
+						16,
+						17
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "ament_cmake_python_build_perception_interface_egg::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ament_cmake_python_build_perception_interface_egg-fa450c116ff7606358b0.json",
+					"name" : "ament_cmake_python_build_perception_interface_egg",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ament_cmake_python_symlink_perception_interface::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ament_cmake_python_symlink_perception_interface-16573fe4214084f98849.json",
+					"name" : "ament_cmake_python_symlink_perception_interface",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface-b9dc83c10cb1c3b146e3.json",
+					"name" : "perception_interface",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__cpp-ab3805a8968d7e3028d0.json",
+					"name" : "perception_interface__cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "perception_interface__py::@1cd489eab5ecd30f4088",
+					"jsonFile" : "target-perception_interface__py-a29c1908754e9123db7e.json",
+					"name" : "perception_interface__py",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_generator_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_generator_c-9026b5133dd8cd9fbf9e.json",
+					"name" : "perception_interface__rosidl_generator_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_generator_py::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_generator_py-1d2f95d56b67296d7b31.json",
+					"name" : "perception_interface__rosidl_generator_py",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_c-c19fd338746498bc6d50.json",
+					"name" : "perception_interface__rosidl_typesupport_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_c__pyext::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_c__pyext-e96f1ec078225faf3a21.json",
+					"name" : "perception_interface__rosidl_typesupport_c__pyext",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_cpp-dfe8f543e8ad36698ac8.json",
+					"name" : "perception_interface__rosidl_typesupport_cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_fastrtps_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_fastrtps_c-5100fcbf23a3625c5df2.json",
+					"name" : "perception_interface__rosidl_typesupport_fastrtps_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_fastrtps_c__pyext::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_fastrtps_c__pyext-189c311752331f535065.json",
+					"name" : "perception_interface__rosidl_typesupport_fastrtps_c__pyext",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_fastrtps_cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_fastrtps_cpp-c6755abb1c9e7204ee51.json",
+					"name" : "perception_interface__rosidl_typesupport_fastrtps_cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_introspection_c::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_introspection_c-8397222a8eb91bc9f417.json",
+					"name" : "perception_interface__rosidl_typesupport_introspection_c",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_introspection_c__pyext::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_introspection_c__pyext-f57dbd72b9c875a37d51.json",
+					"name" : "perception_interface__rosidl_typesupport_introspection_c__pyext",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface__rosidl_typesupport_introspection_cpp::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface__rosidl_typesupport_introspection_cpp-7cd1d534c48ce1e186cd.json",
+					"name" : "perception_interface__rosidl_typesupport_introspection_cpp",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "perception_interface_uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-perception_interface_uninstall-d37001ce3efa1d9d138c.json",
+					"name" : "perception_interface_uninstall",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "uninstall::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-uninstall-25977d1f515621c3142a.json",
+					"name" : "uninstall",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/jay/SCV_Perception/build/perception_interface",
+		"source" : "/home/jay/SCV_Perception/perception_interface"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

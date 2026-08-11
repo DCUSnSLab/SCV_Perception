@@ -1,0 +1,1 @@
+/home/jay/SCV_Perception/build/perception_interface/ament_cmake_environment_hooks/local_setup.sh

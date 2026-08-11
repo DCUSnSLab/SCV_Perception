@@ -1,0 +1,36 @@
+// generated from rosidl_adapter/resource/msg.idl.em
+// with input from perception_interface/msg/DetectionResult.msg
+// generated code does not contain a copyright notice
+
+#include "geometry_msgs/msg/Point.idl"
+#include "geometry_msgs/msg/Polygon.idl"
+#include "sensor_msgs/msg/Image.idl"
+#include "std_msgs/msg/Header.idl"
+
+module perception_interface {
+  module msg {
+    @verbatim (language="comment", text=
+      "Detection result message for object detection")
+    struct DetectionResult {
+      std_msgs::msg::Header header;
+
+      @verbatim (language="comment", text=
+        "Detection info")
+      string class_name;
+
+      double confidence;
+
+      geometry_msgs::msg::Polygon bounding_box;
+
+      geometry_msgs::msg::Point centroid;
+
+      @verbatim (language="comment", text=
+        "Tracking info (optional, -1 if not available)")
+      int32 track_id;
+
+      @verbatim (language="comment", text=
+        "Segmentation mask (optional, for segmentation models)")
+      sensor_msgs::msg::Image mask;
+    };
+  };
+};

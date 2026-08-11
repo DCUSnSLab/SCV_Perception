@@ -1,0 +1,26 @@
+[0.775s] Invoking command in '/home/jay/SCV_Perception/build/object_depth_tracker': PYTHONPATH=/home/jay/SCV_Perception/build/object_depth_tracker/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jay/SCV_Perception/install/object_depth_tracker/lib/python3.10/site-packages:/home/jay/SCV_Perception/install/perception_interface/local/lib/python3.10/dist-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jay/SCV_Perception/build/object_depth_tracker/build --no-deps symlink_data
+[0.896s] /home/jay/.local/lib/python3.10/site-packages/setuptools/_distutils/dist.py:289: UserWarning: Unknown distribution option: 'tests_require'
+[0.896s]   warnings.warn(msg)
+[1.054s] running develop
+[1.291s] running egg_info
+[1.308s] creating object_depth_tracker.egg-info
+[1.308s] writing object_depth_tracker.egg-info/PKG-INFO
+[1.308s] writing dependency_links to object_depth_tracker.egg-info/dependency_links.txt
+[1.308s] writing entry points to object_depth_tracker.egg-info/entry_points.txt
+[1.308s] writing requirements to object_depth_tracker.egg-info/requires.txt
+[1.308s] writing top-level names to object_depth_tracker.egg-info/top_level.txt
+[1.308s] writing manifest file 'object_depth_tracker.egg-info/SOURCES.txt'
+[1.348s] reading manifest file 'object_depth_tracker.egg-info/SOURCES.txt'
+[1.349s] writing manifest file 'object_depth_tracker.egg-info/SOURCES.txt'
+[1.367s] running build_ext
+[1.367s] Creating /home/jay/SCV_Perception/install/object_depth_tracker/lib/python3.10/site-packages/object-depth-tracker.egg-link (link to .)
+[1.367s] Installing object_depth_tracker_node script to /home/jay/SCV_Perception/install/object_depth_tracker/lib/object_depth_tracker
+[1.367s] 
+[1.367s] Installed /home/jay/SCV_Perception/build/object_depth_tracker
+[1.367s] running symlink_data
+[1.368s] creating /home/jay/SCV_Perception/install/object_depth_tracker/share/ament_index/resource_index/packages
+[1.368s] symbolically linking /home/jay/SCV_Perception/build/object_depth_tracker/resource/object_depth_tracker -> /home/jay/SCV_Perception/install/object_depth_tracker/share/ament_index/resource_index/packages
+[1.368s] symbolically linking /home/jay/SCV_Perception/build/object_depth_tracker/package.xml -> /home/jay/SCV_Perception/install/object_depth_tracker/share/object_depth_tracker
+[1.368s] creating /home/jay/SCV_Perception/install/object_depth_tracker/share/object_depth_tracker/launch
+[1.368s] symbolically linking /home/jay/SCV_Perception/build/object_depth_tracker/launch/object_tracker.launch.py -> /home/jay/SCV_Perception/install/object_depth_tracker/share/object_depth_tracker/launch
+[1.391s] Invoked command in '/home/jay/SCV_Perception/build/object_depth_tracker' returned '0': PYTHONPATH=/home/jay/SCV_Perception/build/object_depth_tracker/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jay/SCV_Perception/install/object_depth_tracker/lib/python3.10/site-packages:/home/jay/SCV_Perception/install/perception_interface/local/lib/python3.10/dist-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jay/SCV_Perception/build/object_depth_tracker/build --no-deps symlink_data
