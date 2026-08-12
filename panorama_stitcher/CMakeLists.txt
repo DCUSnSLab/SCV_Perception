@@ -45,11 +45,16 @@ if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
 endif()
 
 find_package(ament_cmake REQUIRED)
+find_package(ament_cmake_python REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(message_filters REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
+
+if(BUILD_TESTING)
+  find_package(ament_cmake_pytest REQUIRED)
+endif()
 
 add_executable(panorama_stitcher_node
   src/panorama_stitcher_node.cpp
@@ -61,10 +66,6 @@ add_executable(rgbd_panorama_stitcher_node
 
 add_executable(far_hybrid_panorama_stitcher_node
   src/far_hybrid_panorama_stitcher_node.cpp
-)
-
-add_executable(panorama_ground_segmentation_node
-  src/panorama_ground_segmentation_node.cpp
 )
 
 if(CMAKE_CUDA_COMPILER)
@@ -120,6 +121,19 @@ if(CMAKE_CUDA_COMPILER)
   endif()
 endif()
 
+if(BUILD_TESTING)
+  ament_add_pytest_test(
+    panorama_ground_segmentation_python_test
+    test/test_ground_segmentation_python.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
+    panorama_triton_projection_test
+    test/test_panorama_triton_projection.py
+    TIMEOUT 30
+  )
+endif()
+
 add_executable(front_rgbd_fusion_node
   src/front_rgbd_fusion_node.cpp
 )
@@ -127,7 +141,6 @@ add_executable(front_rgbd_fusion_node
 target_compile_features(panorama_stitcher_node PUBLIC cxx_std_17)
 target_compile_features(rgbd_panorama_stitcher_node PUBLIC cxx_std_17)
 target_compile_features(far_hybrid_panorama_stitcher_node PUBLIC cxx_std_17)
-target_compile_features(panorama_ground_segmentation_node PUBLIC cxx_std_17)
 target_compile_features(front_rgbd_fusion_node PUBLIC cxx_std_17)
 
 ament_target_dependencies(panorama_stitcher_node
@@ -151,11 +164,6 @@ ament_target_dependencies(far_hybrid_panorama_stitcher_node
   sensor_msgs
 )
 
-ament_target_dependencies(panorama_ground_segmentation_node
-  rclcpp
-  sensor_msgs
-)
-
 ament_target_dependencies(front_rgbd_fusion_node
   cv_bridge
   message_filters
@@ -175,10 +183,6 @@ target_link_libraries(far_hybrid_panorama_stitcher_node
   ${OpenCV_LIBS}
 )
 
-target_link_libraries(panorama_ground_segmentation_node
-  ${OpenCV_LIBS}
-)
-
 target_link_libraries(front_rgbd_fusion_node
   ${OpenCV_LIBS}
 )
@@ -187,9 +191,16 @@ install(TARGETS
   panorama_stitcher_node
   rgbd_panorama_stitcher_node
   far_hybrid_panorama_stitcher_node
-  panorama_ground_segmentation_node
   front_rgbd_fusion_node
   DESTINATION lib/${PROJECT_NAME}
+)
+
+ament_python_install_package(panorama_stitcher_py)
+
+install(PROGRAMS
+  scripts/panorama_ground_segmentation_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME panorama_ground_segmentation_node
 )
 
 install(PROGRAMS
@@ -202,6 +213,17 @@ install(PROGRAMS
   scripts/multiboard_bundle_calibrator.py
   DESTINATION lib/${PROJECT_NAME}
   RENAME multiboard_bundle_calibrator
+)
+
+install(PROGRAMS
+  scripts/rgbd_panorama_torch_node.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME rgbd_panorama_torch_node
+)
+
+install(FILES
+  scripts/panorama_triton_kernels.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY

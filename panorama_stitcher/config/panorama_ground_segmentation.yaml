@@ -6,9 +6,12 @@ panorama_ground_segmentation:
     publish_ground_cloud: true
 
     # panorama_optical_frame follows the optical convention:
-    # +X right, +Y down, +Z forward. Therefore physical up is -Y.
-    expected_up_vector: [0.0, -1.0, 0.0]
-    max_ground_tilt_deg: 25.0
+    # +X right, +Y down, +Z forward. This vector is vehicle +Z expressed in
+    # panorama_optical_frame, calculated from the 2026-08-11 calibrated
+    # velodyne -> front_camera_rig -> panorama_optical_frame TF chain.
+    expected_up_vector: [0.006981518272723905, -0.9988446355899094, -0.047546318005377564]
+    # Accept road planes up to 35 deg from the calibrated vehicle-up direction.
+    max_ground_tilt_deg: 35.0
 
     # Fit only plausible road points and reject vertical walls by normal.
     # With the remounted cameras, this lower ROI raises the observed ground
@@ -28,7 +31,7 @@ panorama_ground_segmentation:
     # visible floor plane at 0.96..1.36 m from panorama_optical_frame. Reject
     # nearer shelves/vehicle surfaces that previously won the inlier count.
     # This is a plane-distance gate, not a fixed Y cut, so tilted road planes
-    # remain valid up to max_ground_tilt_deg.
+    # can remain valid up to max_ground_tilt_deg when this distance gate is met.
     min_plane_distance_from_origin_m: 0.80
     max_plane_distance_from_origin_m: 1.40
 
@@ -37,10 +40,9 @@ panorama_ground_segmentation:
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0
-    # Four-centimetre voxels retain about 28% more obstacle samples than the
-    # previous 5 cm setting. The 12 cm / 3-neighbour costmap radius filter still
-    # removes isolated depth noise before the 5 cm occupancy grid is updated.
-    obstacle_voxel_size_m: 0.04
+    # Publish every obstacle point from the source depth cloud, just like the
+    # ground output. The costmap keeps its own 12 cm / 3-neighbour noise filter.
+    obstacle_voxel_size_m: 0.0
     # RANSAC over tens of thousands of points is the bulk of this node's cost.
     # Skip it while neither output cloud has a subscriber.
     skip_when_unsubscribed: true

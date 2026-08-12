@@ -55,23 +55,24 @@ panorama_stitcher:
     # translation below come from the remounted rig's joint ChArUco stereo
     # solution (42 common board views, 0.435 px full reprojection RMS). For the
     # current symmetric-mount test, physical roll and vertical/forward baseline
-    # are constrained to zero. A small symmetric effective-pitch correction
-    # (-0.164/+0.164 deg) reduces the measured 7.54 px CameraInfo/convention
-    # offset without treating it as a physical mounting pitch. The calibrated
-    # yaw and 0.0634 m lens-center distance are retained. Do not reuse the
-    # previous mount's 0.11 m horizontal baseline.
+    # are constrained to zero. A symmetric effective-pitch correction was
+    # re-fitted after the fixed mount was installed on 2026-08-12. The new
+    # -0.323/+0.323 deg pair reduces the current 360-corner cylindrical vertical
+    # residual from 6.73 px RMS to 0.58 px RMS. This is a projection convention
+    # correction, not a claim that the physical mount has pitch. Calibrated yaw
+    # and the 0.0634 m lens-center distance are retained.
     left_rotation_camera_to_rig: [
-      0.8625552969843766, 0.001445420725720489, -0.5059607399819862,
-      0.0, 0.9999959194165541, 0.002856772696656394,
-      0.5059628046054309, -0.002464124421781315, 0.8625517772555107
+      0.8625552969842162, 0.0028483105705196152, -0.5059547872798167,
+      0.0, 0.9999841543176392, 0.005629486089870369,
+      0.5059628046057049, -0.0048557430461166505, 0.8625416292069615
     ]
     left_translation_camera_in_rig_m: [
       -0.03169871098000719, 0.0, 0.0
     ]
     right_rotation_camera_to_rig: [
-      0.8625249756985842, 0.001445568385372199, 0.5060124273456135,
-      0.0, 0.9999959194165542, -0.0028567726966563945,
-      -0.5060144921799736, 0.0024640378007599354, 0.8625214560934468
+      0.8625249756982363, 0.00284860154500332, 0.5060064740356538,
+      0.0, 0.9999841543176392, -0.005629486089870369,
+      -0.5060144921805668, 0.004855572352859, 0.8625113084014431
     ]
     right_translation_camera_in_rig_m: [
       0.03169871098000719, 0.0, 0.0
