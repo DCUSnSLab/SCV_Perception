@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import math
-from typing import Optional, Tuple
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -20,6 +20,10 @@ class GroundSegmentationConfig:
     max_ground_tilt_deg: float = 25.0
     min_ground_inliers: int = 300
     min_ground_inlier_ratio: float = 0.03
+    secondary_ransac_iterations: int = 60
+    secondary_min_ground_inlier_ratio: float = 0.20
+    secondary_min_normal_delta_deg: float = 4.0
+    secondary_max_plane_distance_from_origin_m: float = 2.5
     ground_candidate_min_range_m: float = 0.4
     ground_candidate_max_range_m: float = 8.0
     ground_candidate_min_down_m: float = 0.15
@@ -52,6 +56,20 @@ class GroundSegmentationConfig:
             min_ground_inliers=max(3, int(self.min_ground_inliers)),
             min_ground_inlier_ratio=min(
                 1.0, max(0.0, float(self.min_ground_inlier_ratio))),
+            secondary_ransac_iterations=max(
+                0, int(self.secondary_ransac_iterations)),
+            secondary_min_ground_inlier_ratio=min(
+                1.0,
+                max(0.0, float(self.secondary_min_ground_inlier_ratio)),
+            ),
+            secondary_min_normal_delta_deg=min(
+                89.0,
+                max(0.0, float(self.secondary_min_normal_delta_deg)),
+            ),
+            secondary_max_plane_distance_from_origin_m=max(
+                float(self.min_plane_distance_from_origin_m),
+                float(self.secondary_max_plane_distance_from_origin_m),
+            ),
             ground_candidate_min_range_m=max(
                 0.0, float(self.ground_candidate_min_range_m)),
             ground_candidate_max_range_m=max(
@@ -278,20 +296,76 @@ def fit_ground_plane(
 
 def classify_points(
     points: np.ndarray,
-    plane: PlaneModel,
+    plane: PlaneModel | Sequence[PlaneModel],
     config: GroundSegmentationConfig,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Return obstacle and ground masks for all finite input points."""
+    planes = (plane,) if isinstance(plane, PlaneModel) else tuple(plane)
+    if not planes:
+        raise ValueError('at least one ground plane is required')
     squared_range = points[:, 0] ** 2 + points[:, 2] ** 2
-    height = points @ plane.normal + plane.offset
+    signed_heights = np.column_stack([
+        points @ model.normal + model.offset for model in planes
+    ])
+    positive_heights = np.where(signed_heights >= 0.0, signed_heights, np.inf)
+    height = np.min(positive_heights, axis=1)
     obstacle_mask = (
         (squared_range >= config.obstacle_min_range_m ** 2)
         & (squared_range <= config.obstacle_max_range_m ** 2)
         & (height >= config.obstacle_min_height_m)
         & (height <= config.obstacle_max_height_m)
     )
-    ground_mask = np.abs(height) <= config.ransac_distance_threshold_m
+    ground_mask = np.any(
+        np.abs(signed_heights) <= config.ransac_distance_threshold_m,
+        axis=1,
+    )
+    obstacle_mask &= ~ground_mask
     return obstacle_mask, ground_mask
+
+
+def fit_ground_planes(
+    points: np.ndarray,
+    config: GroundSegmentationConfig,
+    rng: np.random.Generator,
+) -> Tuple[PlaneModel, ...]:
+    """Fit the dominant road plane and one distinct residual slope plane."""
+    primary = fit_ground_plane(points, config, rng)
+    if primary is None:
+        return ()
+    planes = [primary]
+    if config.secondary_ransac_iterations <= 0:
+        return tuple(planes)
+
+    candidate_indices = select_ground_candidates(points, config)
+    candidates = points[candidate_indices]
+    primary_distance = np.abs(candidates @ primary.normal + primary.offset)
+    residual = candidates[
+        primary_distance > config.ransac_distance_threshold_m]
+    if len(residual) < config.min_ground_inliers:
+        return tuple(planes)
+
+    secondary_config = replace(
+        config,
+        ransac_iterations=config.secondary_ransac_iterations,
+        min_ground_inlier_ratio=max(
+            config.min_ground_inlier_ratio,
+            config.secondary_min_ground_inlier_ratio,
+        ),
+        max_plane_distance_from_origin_m=(
+            config.secondary_max_plane_distance_from_origin_m),
+        secondary_ransac_iterations=0,
+    )
+    secondary = fit_ground_plane(residual, secondary_config, rng)
+    if secondary is None:
+        return tuple(planes)
+
+    alignment = float(np.clip(
+        primary.normal @ secondary.normal, -1.0, 1.0))
+    normal_delta_deg = math.degrees(math.acos(alignment))
+    if normal_delta_deg < config.secondary_min_normal_delta_deg:
+        return tuple(planes)
+    planes.append(secondary)
+    return tuple(planes)
 
 
 def voxel_first_indices(points: np.ndarray, voxel_size: float) -> np.ndarray:

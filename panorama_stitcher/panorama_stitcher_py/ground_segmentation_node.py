@@ -22,7 +22,7 @@ from sensor_msgs_py import point_cloud2
 from panorama_stitcher_py.ground_segmentation import (
     GroundSegmentationConfig,
     classify_points,
-    fit_ground_plane,
+    fit_ground_planes,
     select_ground_candidates,
     voxel_first_indices,
 )
@@ -76,7 +76,7 @@ def arrays_to_cloud(header, xyz: np.ndarray, rgb: np.ndarray) -> PointCloud2:
 
 
 class PanoramaGroundSegmentationNode(Node):
-    """Fit one road plane and publish ground-relative obstacle returns."""
+    """Fit road surfaces and publish ground-relative obstacle returns."""
 
     def __init__(self) -> None:
         super().__init__('panorama_ground_segmentation')
@@ -134,6 +134,10 @@ class PanoramaGroundSegmentationNode(Node):
             'max_ground_tilt_deg': 25.0,
             'min_ground_inliers': 300,
             'min_ground_inlier_ratio': 0.03,
+            'secondary_ransac_iterations': 60,
+            'secondary_min_ground_inlier_ratio': 0.20,
+            'secondary_min_normal_delta_deg': 4.0,
+            'secondary_max_plane_distance_from_origin_m': 2.5,
             'ground_candidate_min_range_m': 0.4,
             'ground_candidate_max_range_m': 8.0,
             'ground_candidate_min_down_m': 0.15,
@@ -166,6 +170,14 @@ class PanoramaGroundSegmentationNode(Node):
             max_ground_tilt_deg=float(value('max_ground_tilt_deg')),
             min_ground_inliers=int(value('min_ground_inliers')),
             min_ground_inlier_ratio=float(value('min_ground_inlier_ratio')),
+            secondary_ransac_iterations=int(
+                value('secondary_ransac_iterations')),
+            secondary_min_ground_inlier_ratio=float(
+                value('secondary_min_ground_inlier_ratio')),
+            secondary_min_normal_delta_deg=float(
+                value('secondary_min_normal_delta_deg')),
+            secondary_max_plane_distance_from_origin_m=float(
+                value('secondary_max_plane_distance_from_origin_m')),
             ground_candidate_min_range_m=float(
                 value('ground_candidate_min_range_m')),
             ground_candidate_max_range_m=float(
@@ -223,8 +235,8 @@ class PanoramaGroundSegmentationNode(Node):
         try:
             xyz, rgb = cloud_to_arrays(message)
             candidate_count = len(select_ground_candidates(xyz, self.config))
-            plane = fit_ground_plane(xyz, self.config, self.rng)
-            if plane is None:
+            planes = fit_ground_planes(xyz, self.config, self.rng)
+            if not planes:
                 self._publish_empty(message.header)
                 self._diagnostic(
                     'warning',
@@ -234,7 +246,7 @@ class PanoramaGroundSegmentationNode(Node):
                 return
 
             obstacle_mask, ground_mask = classify_points(
-                xyz, plane, self.config)
+                xyz, planes, self.config)
             obstacle_xyz = xyz[obstacle_mask]
             obstacle_rgb = rgb[obstacle_mask]
             raw_obstacle_count = len(obstacle_xyz)
@@ -253,14 +265,18 @@ class PanoramaGroundSegmentationNode(Node):
                     message.header, xyz[ground_mask], rgb[ground_mask]))
 
             processing_ms = (time.perf_counter() - started) * 1000.0
-            ratio = plane.inliers / candidate_count if candidate_count else 0.0
-            normal = plane.normal
+            primary = planes[0]
+            ratio = primary.inliers / candidate_count if candidate_count else 0.0
+            plane_text = '; '.join(
+                f'{model.normal[0]:.4f} {model.normal[1]:.4f} '
+                f'{model.normal[2]:.4f} {model.offset:.4f} '
+                f'n={model.inliers}'
+                for model in planes
+            )
             self._diagnostic(
                 'info',
-                'ground=['
-                f'{normal[0]:.4f} {normal[1]:.4f} {normal[2]:.4f} '
-                f'{plane.offset:.4f}] input={len(xyz)} '
-                f'candidates={candidate_count} inliers={plane.inliers}'
+                f'ground_planes={len(planes)} [{plane_text}] input={len(xyz)} '
+                f'candidates={candidate_count} inliers={primary.inliers}'
                 f'({ratio * 100.0:.1f}%) obstacles={raw_obstacle_count}'
                 f'->{len(selected)} processing={processing_ms:.1f} ms',
             )

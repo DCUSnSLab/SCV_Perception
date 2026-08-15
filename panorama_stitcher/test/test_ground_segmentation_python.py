@@ -1,5 +1,7 @@
 """Tests for the ROS-independent ground segmentation geometry."""
 
+from dataclasses import replace
+
 import numpy as np
 from std_msgs.msg import Header
 
@@ -7,6 +9,7 @@ from panorama_stitcher_py.ground_segmentation import (
     GroundSegmentationConfig,
     classify_points,
     fit_ground_plane,
+    fit_ground_planes,
     voxel_first_indices,
 )
 from panorama_stitcher_py.ground_segmentation_node import (
@@ -58,6 +61,78 @@ def test_invalid_vertical_plane_is_rejected() -> None:
     points = np.column_stack((np.ones(200), y, z))
     assert fit_ground_plane(
         points, _config(), np.random.default_rng(42)) is None
+
+
+def test_second_plane_removes_ramp_without_removing_obstacle() -> None:
+    rng = np.random.default_rng(12)
+    flat_x = rng.uniform(-2.0, 2.0, 700)
+    flat_z = rng.uniform(0.5, 4.2, 700)
+    flat = np.column_stack((
+        flat_x,
+        1.0 + rng.normal(0.0, 0.006, len(flat_x)),
+        flat_z,
+    ))
+
+    ramp_x = rng.uniform(-2.0, 2.0, 550)
+    ramp_z = rng.uniform(4.0, 7.0, 550)
+    ramp_y = 1.0 - np.tan(np.deg2rad(9.0)) * (ramp_z - 4.0)
+    ramp = np.column_stack((
+        ramp_x,
+        ramp_y + rng.normal(0.0, 0.006, len(ramp_x)),
+        ramp_z,
+    ))
+    obstacle_z = rng.uniform(5.0, 5.5, 80)
+    obstacle = np.column_stack((
+        rng.uniform(-0.25, 0.25, len(obstacle_z)),
+        1.0 - np.tan(np.deg2rad(9.0)) * (obstacle_z - 4.0) - 0.40,
+        obstacle_z,
+    ))
+    points = np.vstack((flat, ramp, obstacle))
+    config = replace(
+        _config(),
+        max_plane_distance_from_origin_m=1.4,
+        secondary_max_plane_distance_from_origin_m=1.8,
+        secondary_ransac_iterations=80,
+        secondary_min_ground_inlier_ratio=0.20,
+    ).normalized()
+
+    planes = fit_ground_planes(points, config, np.random.default_rng(42))
+
+    assert len(planes) == 2
+    obstacle_mask, ground_mask = classify_points(points, planes, config)
+    assert ground_mask[:len(flat)].mean() > 0.95
+    assert ground_mask[len(flat):len(flat) + len(ramp)].mean() > 0.95
+    assert obstacle_mask[len(flat):len(flat) + len(ramp)].mean() < 0.05
+    assert obstacle_mask[-len(obstacle):].mean() > 0.95
+
+    legacy_planes = fit_ground_planes(
+        points,
+        replace(config, secondary_ransac_iterations=0),
+        np.random.default_rng(42),
+    )
+    assert len(legacy_planes) == 1
+
+
+def test_parallel_residual_surface_stays_obstacle() -> None:
+    rng = np.random.default_rng(19)
+    ground = np.column_stack((
+        rng.uniform(-2.0, 2.0, 700),
+        1.0 + rng.normal(0.0, 0.006, 700),
+        rng.uniform(0.5, 6.0, 700),
+    ))
+    platform = np.column_stack((
+        rng.uniform(-1.0, 1.0, 400),
+        0.82 + rng.normal(0.0, 0.004, 400),
+        rng.uniform(2.0, 5.0, 400),
+    ))
+    points = np.vstack((ground, platform))
+    config = _config()
+
+    planes = fit_ground_planes(points, config, np.random.default_rng(42))
+
+    assert len(planes) == 1
+    obstacle_mask, _ = classify_points(points, planes, config)
+    assert obstacle_mask[-len(platform):].mean() > 0.95
 
 
 def test_voxel_filter_preserves_first_source_point() -> None:
