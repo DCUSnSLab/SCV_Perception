@@ -4,7 +4,13 @@
 Unlike ``multiboard_bundle_calibrator.py``, every frame/board pair owns an
 independent target pose.  The same ChArUco board may therefore be moved between
 captures.  A calibration is accepted only when target pose diversity, a
-disjoint-frame holdout, and an independent ArUco-corner solve all agree.
+disjoint-session holdout, and an independent ArUco-corner solve all agree.
+
+For a fixed rig and a static target scene, pass each separately positioned
+target capture as another ``--capture-root`` together with
+``--static-sessions``.  Only the best observation of each board in each
+session is then retained.  This prevents repeated frames of one unchanged
+scene from masquerading as independent calibration poses.
 """
 
 import argparse
@@ -126,7 +132,8 @@ def common_aruco_view(images, metadata, detector):
     return objects.astype(np.float32), left, right, common
 
 
-def collect_views(capture_root, boards, aruco_detector, indices):
+def collect_views(
+        capture_root, boards, aruco_detector, indices, session_index=0):
     result = {"charuco": [], "aruco": []}
     for frame_index in indices:
         paths = [
@@ -143,6 +150,8 @@ def collect_views(capture_root, boards, aruco_detector, indices):
             if charuco is not None:
                 objects, left_map, right_map, common = charuco
                 result["charuco"].append({
+                    "session": session_index,
+                    "capture_root": os.path.abspath(capture_root),
                     "frame": frame_index,
                     "board": board_index,
                     "object": objects,
@@ -155,6 +164,8 @@ def collect_views(capture_root, boards, aruco_detector, indices):
             if aruco is not None:
                 objects, left, right, _ = aruco
                 result["aruco"].append({
+                    "session": session_index,
+                    "capture_root": os.path.abspath(capture_root),
                     "frame": frame_index,
                     "board": board_index,
                     "object": objects,
@@ -162,6 +173,40 @@ def collect_views(capture_root, boards, aruco_detector, indices):
                     "right": right,
                 })
     return result
+
+
+def select_best_static_observations(views):
+    """Keep one non-duplicated observation for each session/board pair."""
+    selected = {}
+    for view in views:
+        key = (view["session"], view["board"])
+        score = (len(view["object"]), -view["frame"])
+        current = selected.get(key)
+        if current is None or score > current[0]:
+            selected[key] = (score, view)
+    return [selected[key][1] for key in sorted(selected)]
+
+
+def validate_camera_models(capture_roots):
+    reference = {
+        camera: load_camera(capture_roots[0], camera) for camera in CAMERAS
+    }
+    for capture_root in capture_roots[1:]:
+        candidate = {
+            camera: load_camera(capture_root, camera) for camera in CAMERAS
+        }
+        for camera in CAMERAS:
+            if (candidate[camera]["width"] != reference[camera]["width"] or
+                    candidate[camera]["height"] !=
+                    reference[camera]["height"] or
+                    not np.allclose(candidate[camera]["K"],
+                                    reference[camera]["K"], atol=1.0e-6) or
+                    not np.allclose(candidate[camera]["D"],
+                                    reference[camera]["D"], atol=1.0e-9)):
+                raise RuntimeError(
+                    f"camera model changed between capture sessions: "
+                    f"{camera} in {capture_root}")
+    return reference
 
 
 def solve(views, cameras):
@@ -240,27 +285,76 @@ def panorama_geometry(rotation, translation):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--capture-root", required=True)
+    parser.add_argument(
+        "--capture-root", action="append", required=True,
+        help=("capture directory; repeat the option for independently "
+              "positioned static target sessions"))
+    parser.add_argument(
+        "--static-sessions", action="store_true",
+        help=("retain one best view per board/session and split holdout by "
+              "capture session instead of repeated frame"))
     parser.add_argument(
         "--board-params",
         default="/home/ssc/lidar_cam_calib/board_params.yaml")
     parser.add_argument("--boards", nargs="+", type=int, required=True)
     parser.add_argument("--frame-start", type=int, required=True)
     parser.add_argument("--frame-end", type=int, required=True)
+    parser.add_argument("--expected-baseline-m", type=float, default=0.12)
+    parser.add_argument("--baseline-tolerance-m", type=float, default=0.02)
+    parser.add_argument("--expected-relative-angle-deg", type=float, default=58.0)
+    parser.add_argument("--relative-angle-tolerance-deg", type=float, default=4.0)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    cameras = {
-        camera: load_camera(args.capture_root, camera) for camera in CAMERAS
-    }
+    capture_roots = [os.path.abspath(root) for root in args.capture_root]
+    if args.static_sessions and len(set(capture_roots)) != len(capture_roots):
+        parser.error(
+            "--static-sessions requires distinct capture roots; repeated "
+            "copies of one unchanged scene are not independent poses")
+    cameras = validate_camera_models(capture_roots)
     params, boards, aruco_detector = load_boards(
         args.board_params, args.boards)
     indices = list(range(args.frame_start, args.frame_end + 1))
-    observations = collect_views(
-        args.capture_root, boards, aruco_detector, indices)
+    observations = {"charuco": [], "aruco": []}
+    for session_index, capture_root in enumerate(capture_roots):
+        session = collect_views(
+            capture_root, boards, aruco_detector, indices, session_index)
+        observations["charuco"].extend(session["charuco"])
+        observations["aruco"].extend(session["aruco"])
+    raw_charuco_count = len(observations["charuco"])
+    raw_aruco_count = len(observations["aruco"])
+    if args.static_sessions:
+        observations = {
+            name: select_best_static_observations(views)
+            for name, views in observations.items()
+        }
     charuco = observations["charuco"]
-    train = [view for view in charuco if view["frame"] % 4 != 3]
-    holdout = [view for view in charuco if view["frame"] % 4 == 3]
+    if args.static_sessions:
+        train = [view for view in charuco if view["session"] % 2 == 0]
+        holdout = [view for view in charuco if view["session"] % 2 == 1]
+    else:
+        train = [view for view in charuco if view["frame"] % 4 != 3]
+        holdout = [view for view in charuco if view["frame"] % 4 == 3]
+
+    view_counts = {
+        "all ChArUco": len(charuco),
+        "training ChArUco": len(train),
+        "holdout ChArUco": len(holdout),
+        "independent ArUco": len(observations["aruco"]),
+    }
+    insufficient = {
+        name: count for name, count in view_counts.items() if count < 4
+    }
+    if insufficient:
+        details = ", ".join(
+            f"{name}={count}" for name, count in insufficient.items())
+        mode_hint = (
+            "; collect enough independent static sessions for at least 12 "
+            "total, 8 training, and 4 holdout views (typically eight "
+            "sessions when two boards are jointly visible)"
+            if args.static_sessions else "")
+        print(f"insufficient common target views ({details}){mode_hint}")
+        raise SystemExit(2)
 
     full = solve(charuco, cameras)
     train_result = solve(train, cameras)
@@ -292,35 +386,57 @@ def main():
         gates.append("target image-position span is below 120 px")
     if full["rms_px"] > 1.0 or full["p95_view_rms_px"] > 1.5:
         gates.append("ChArUco stereo reprojection error is too high")
-    if not 0.10 <= baseline <= 0.14:
-        gates.append("estimated baseline is outside 0.10..0.14 m")
-    if not 54.0 <= relative_angle <= 62.0:
-        gates.append("relative camera angle is outside 54..62 deg")
+    baseline_min = args.expected_baseline_m - args.baseline_tolerance_m
+    baseline_max = args.expected_baseline_m + args.baseline_tolerance_m
+    if not baseline_min <= baseline <= baseline_max:
+        gates.append(
+            f"estimated baseline is outside {baseline_min:.3f}.."
+            f"{baseline_max:.3f} m")
+    angle_min = (
+        args.expected_relative_angle_deg - args.relative_angle_tolerance_deg)
+    angle_max = (
+        args.expected_relative_angle_deg + args.relative_angle_tolerance_deg)
+    if not angle_min <= relative_angle <= angle_max:
+        gates.append(
+            f"relative camera angle is outside {angle_min:.1f}.."
+            f"{angle_max:.1f} deg")
     if train_hold_rotation > 0.7 or train_hold_translation > 0.02:
-        gates.append("disjoint-frame holdout transform is unstable")
+        holdout_kind = "session" if args.static_sessions else "frame"
+        gates.append(f"disjoint-{holdout_kind} holdout transform is unstable")
     if independent_rotation > 0.7 or independent_translation > 0.02:
         gates.append("independent ArUco solve disagrees with ChArUco solve")
     if abs(float(baseline_rig[1])) > 0.03:
         gates.append("estimated vertical baseline exceeds 3 cm")
 
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
         "accepted": not gates,
         "created_local_time": datetime.datetime.now().astimezone().isoformat(),
-        "method": "pose_diverse_stereo_charuco_with_aruco_holdout",
+        "method": (
+            "static_session_stereo_charuco_with_aruco_holdout"
+            if args.static_sessions else
+            "pose_diverse_stereo_charuco_with_aruco_holdout"),
         "convention": (
             "X_right_topic_optical = R_right_from_left * "
             "X_left_topic_optical + t_right_from_left_m"),
         "inputs": {
-            "capture_root": os.path.abspath(args.capture_root),
+            "capture_roots": capture_roots,
             "capture_indices": indices,
+            "static_sessions": args.static_sessions,
             "boards": args.boards,
             "square_length_m": float(params["square_length_m"]),
             "marker_length_m": float(params["marker_length_m"]),
             "left_topic_pixels_rotated_180": True,
             "right_topic_pixels_rotated_180": False,
+            "expected_baseline_m": args.expected_baseline_m,
+            "baseline_tolerance_m": args.baseline_tolerance_m,
+            "expected_relative_angle_deg": args.expected_relative_angle_deg,
+            "relative_angle_tolerance_deg":
+                args.relative_angle_tolerance_deg,
         },
         "quality": {
+            "raw_charuco_observation_count": raw_charuco_count,
+            "raw_aruco_observation_count": raw_aruco_count,
             "charuco_view_count": len(charuco),
             "aruco_view_count": len(observations["aruco"]),
             "full_reprojection_rms_px": full["rms_px"],

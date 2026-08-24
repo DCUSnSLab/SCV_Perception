@@ -212,8 +212,15 @@ class SolveResult:
 
 class CharucoRigCalibrator(Node):
     def __init__(self) -> None:
-        super().__init__("charuco_rig_calibrator")
-        self._declare_parameters()
+        super().__init__(
+            "charuco_rig_calibrator",
+            automatically_declare_parameters_from_overrides=True,
+        )
+        if not self.has_parameter("board_params_file"):
+            raise RuntimeError(
+                "No calibration parameters loaded; pass "
+                "config/rig_calibration.yaml"
+            )
         self.bridge = CvBridge()
         self.finished = False
         self.capture_started_at: Optional[float] = None
@@ -274,67 +281,6 @@ class CharucoRigCalibrator(Node):
         self.get_logger().info(
             "This tool does not stop or modify the running panorama node."
         )
-
-    def _declare_parameters(self) -> None:
-        defaults = {
-            "front_color_topic": "/front_left/front_left/color/image_raw",
-            "front_depth_topic": (
-                "/front_left/front_left/aligned_depth_to_color/image_raw"
-            ),
-            "front_camera_info_topic": "/front_left/front_left/color/camera_info",
-            "camera_color_topic": "/front_right/front_right/color/image_raw",
-            "camera_depth_topic": (
-                "/front_right/front_right/aligned_depth_to_color/image_raw"
-            ),
-            "camera_camera_info_topic": "/front_right/front_right/color/camera_info",
-            "board_params_file": "/home/ssc/lidar_cam_calib/board_params.yaml",
-            "board_index": 0,
-            "capture_duration_sec": 20.0,
-            "sample_period_sec": 0.10,
-            "front_roi_min_x": 0.82,
-            "front_roi_max_x": 1.0,
-            "camera_roi_min_x": 0.0,
-            "camera_roi_max_x": 0.18,
-            "roi_scale": 3.0,
-            "input_images_rotated_180": True,
-            "rotate_live_streams_180": False,
-            "depth_scale_m": 0.001,
-            "max_color_depth_delta_ms": 80.0,
-            "min_corner_observations": 5,
-            "min_markers_per_camera": 4,
-            "min_depth_markers_per_camera": 4,
-            "min_common_depth_points": 6,
-            "min_common_markers": 2,
-            "min_common_second_axis_rms_m": 0.03,
-            "marker_inner_fraction": 0.60,
-            "depth_patch_radius_px": 2,
-            "pixel_sigma": 1.5,
-            "depth_xy_sigma_m": 0.03,
-            "depth_z_sigma_m": 0.08,
-            "nominal_native_relative_yaw_deg": 64.0,
-            "max_rotation_prior_error_deg": 15.0,
-            "housing_center_distance_m": 0.10,
-            "min_optical_baseline_m": 0.02,
-            "max_optical_baseline_m": 0.19,
-            "max_reprojection_rms_px": 3.0,
-            "max_depth_residual_median_m": 0.05,
-            "max_depth_residual_p95_m": 0.12,
-            "max_split_rotation_delta_deg": 2.0,
-            "max_split_translation_delta_m": 0.03,
-            "output_calibration_file": (
-                "/home/ssc/SSC/src/perception/panorama_stitcher/config/"
-                "rig_extrinsics.yaml"
-            ),
-            "output_report_file": (
-                "/home/ssc/SSC/src/perception/panorama_stitcher/config/"
-                "rig_calibration_report.yaml"
-            ),
-            "front_serial": "239122073045",
-            "camera_serial": "239122071306",
-            "device_model": "Intel RealSense D435if",
-        }
-        for name, value in defaults.items():
-            self.declare_parameter(name, value)
 
     def _load_board(self) -> None:
         with open(self.board_params_path, "r", encoding="utf-8") as stream:

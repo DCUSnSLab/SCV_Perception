@@ -6,30 +6,61 @@ panorama_ground_segmentation:
     publish_ground_cloud: true
 
     # panorama_optical_frame follows the optical convention:
-    # +X right, +Y down, +Z forward. Therefore physical up is -Y.
-    expected_up_vector: [0.0, -1.0, 0.0]
-    max_ground_tilt_deg: 25.0
+    # +X right, +Y down, +Z forward. This vector is vehicle +Z expressed in
+    # panorama_optical_frame, calculated from the 2026-08-11 calibrated
+    # velodyne -> front_camera_rig -> panorama_optical_frame TF chain.
+    expected_up_vector: [0.006981518272723905, -0.9988446355899094, -0.047546318005377564]
+    # Accept road planes up to 35 deg from the calibrated vehicle-up direction.
+    max_ground_tilt_deg: 35.0
 
     # Fit only plausible road points and reject vertical walls by normal.
-    ransac_iterations: 160
-    max_ransac_points: 30000
+    # With the remounted cameras, this lower ROI raises the observed ground
+    # share of the RANSAC candidates from about 19% to 30%. 240 hypotheses are
+    # scored against a deterministic 4,000-point sample, then the winner is
+    # validated/refined against every candidate.
+    ransac_iterations: 240
+    max_ransac_points: 4000
     ransac_distance_threshold_m: 0.05
     min_ground_inliers: 300
     min_ground_inlier_ratio: 0.03
+    # A single global plane turns the uphill surface into an obstacle at the
+    # flat-to-ramp transition. Fit one distinct residual road plane as well;
+    # reject near-parallel residual planes so horizontal obstacle tops are not
+    # silently reclassified as ground.
+    # Rollback: set to 0 to restore the original single-plane behavior.
+    secondary_ransac_iterations: 60
+    secondary_min_ground_inlier_ratio: 0.20
+    secondary_min_normal_delta_deg: 4.0
+    # A tilted ramp can extrapolate farther from the camera origin than the
+    # local flat road; this relaxed limit applies only to the residual plane.
+    secondary_max_plane_distance_from_origin_m: 1.80
     ground_candidate_min_range_m: 0.4
     ground_candidate_max_range_m: 8.0
-    ground_candidate_min_down_m: 0.15
+    ground_candidate_min_down_m: 0.35
     ground_candidate_max_down_m: 2.5
-    min_plane_distance_from_origin_m: 0.15
-    max_plane_distance_from_origin_m: 2.5
+    # Camera-only measurement after the fixed-mount recalibration puts the
+    # visible floor plane at 0.96..1.36 m from panorama_optical_frame. Reject
+    # nearer shelves/vehicle surfaces that previously won the inlier count.
+    # This is a plane-distance gate, not a fixed Y cut, so tilted road planes
+    # can remain valid up to max_ground_tilt_deg when this distance gate is met.
+    min_plane_distance_from_origin_m: 0.80
+    max_plane_distance_from_origin_m: 1.40
 
     # Only points clearly above the fitted ground enter the costmap.
     obstacle_min_height_m: 0.10
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0
-    # The costmap resolution is 5 cm; one point per 5 cm 3D voxel preserves
-    # usable geometry without publishing redundant depth pixels.
-    obstacle_voxel_size_m: 0.05
+    # Reject isolated/small outdoor depth speckles before obstacle publication.
+    # A point needs five other obstacle returns within 15 cm to survive.
+    obstacle_radius_filter_radius_m: 0.15
+    obstacle_radius_filter_min_neighbors: 5
+    # Publish every obstacle point from the source depth cloud, just like the
+    # ground output after the radius filter above.
+    obstacle_voxel_size_m: 0.0
+    input_stride: 1
+    # RANSAC over tens of thousands of points is the bulk of this node's cost.
+    # Skip it while neither output cloud has a subscriber.
+    skip_when_unsubscribed: true
     diagnostics_period_sec: 2.0
     random_seed: 42

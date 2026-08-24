@@ -44,7 +44,7 @@ charuco_rig_calibrator:
 
     # Installation knowledge is used only as a rejection gate, not forced into
     # the optimizer. This is the native CameraInfo optical-frame convention.
-    nominal_native_relative_yaw_deg: 64.0
+    nominal_native_relative_yaw_deg: 60.93
     max_rotation_prior_error_deg: 15.0
     housing_center_distance_m: 0.11
     min_optical_baseline_m: 0.02
@@ -56,8 +56,8 @@ charuco_rig_calibrator:
     max_split_rotation_delta_deg: 2.0
     max_split_translation_delta_m: 0.03
 
-    front_serial: "239122073045"
-    camera_serial: "239122071306"
+    front_serial: "239122071306"
+    camera_serial: "239122073045"
     device_model: Intel RealSense D435if
 
     output_calibration_file: /home/ssc/SSC/src/perception/panorama_stitcher/config/rig_extrinsics.yaml
