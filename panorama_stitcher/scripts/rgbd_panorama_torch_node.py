@@ -2,9 +2,10 @@
 """Calibrated dual-RGB-D panorama implemented with rclpy and PyTorch.
 
 The ROS process owns synchronization and message contracts; PyTorch owns the
-projection, depth filtering, z-buffer and composition on CUDA.  The older C++
-node remains available as an explicit launch-time rollback backend.
+projection, depth filtering, z-buffer and composition on CUDA.
 """
+
+# flake8: noqa: E402 -- native thread limits must precede NumPy/PyTorch imports.
 
 from __future__ import annotations
 
@@ -12,13 +13,23 @@ import array
 from collections import deque
 from dataclasses import dataclass
 import math
+import os
 import threading
 import time
 from typing import Deque, Dict, Iterable, Optional, Tuple
 
+# Bound native math pools before NumPy/PyTorch load. One process otherwise
+# inherits this 24-core machine's defaults and oversubscribes ROS callbacks.
+_CPU_THREADS = max(1, int(os.environ.get("PANORAMA_CPU_THREADS", "2")))
+for _variable in (
+    "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    os.environ[_variable] = str(_CPU_THREADS)
+
 import numpy as np
 import rclpy
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import (
     DurabilityPolicy,
@@ -30,8 +41,6 @@ from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
 from std_msgs.msg import Header
 import torch
 import torch.nn.functional as torch_functional
-
-from panorama_triton_kernels import project_depth as project_depth_triton
 
 
 @dataclass
@@ -75,6 +84,8 @@ class ProjectionState:
     right_grid: torch.Tensor
     left_mask: torch.Tensor
     right_mask: torch.Tensor
+    overlap_mask: torch.Tensor
+    owner_left: torch.Tensor
     source_u: torch.Tensor
     source_v: torch.Tensor
     source_indices: torch.Tensor
@@ -91,19 +102,137 @@ class FrameOutputs:
     right_points: int
 
 
-def _rotation_from_yaw(yaw_rad: float) -> np.ndarray:
-    cosine = math.cos(yaw_rad)
-    sine = math.sin(yaw_rad)
-    return np.asarray(
-        [[cosine, 0.0, sine], [0.0, 1.0, 0.0], [-sine, 0.0, cosine]],
-        dtype=np.float64,
-    )
+class LatestOnlyPublisher:
+    """Publish from a dedicated thread without accumulating stale frames.
+
+    Large reliable Image and PointCloud2 publications can each spend tens of
+    milliseconds in rmw serialization.  Running them serially in the CUDA
+    processing thread unnecessarily stalls the next frame.  Each instance of
+    this helper owns exactly one ROS publisher and keeps at most one pending
+    message; a newer frame replaces a pending stale one while a publication is
+    in progress.
+    """
+
+    def __init__(self, name: str, publisher) -> None:
+        self.name = name
+        self.publisher = publisher
+        self.condition = threading.Condition()
+        self.pending = None
+        self.stopped = False
+        self.published = 0
+        self.dropped = 0
+        self.publish_ms = 0.0
+        self.last_error: Optional[str] = None
+        self.thread = threading.Thread(
+            target=self._run,
+            name=f"panorama_publish_{name}",
+            daemon=True,
+        )
+        self.thread.start()
+
+    def submit(self, message) -> bool:
+        with self.condition:
+            if self.stopped:
+                return False
+            if self.pending is not None:
+                self.dropped += 1
+            self.pending = message
+            self.condition.notify()
+        return True
+
+    def _run(self) -> None:
+        while True:
+            with self.condition:
+                self.condition.wait_for(
+                    lambda: self.stopped or self.pending is not None
+                )
+                if self.stopped:
+                    return
+                message = self.pending
+                self.pending = None
+            started = time.monotonic()
+            try:
+                self.publisher.publish(message)
+            except Exception as error:
+                # SIGINT can invalidate the rcl context before Node.destroy_node
+                # gets a chance to stop this thread. Record the failure instead
+                # of throwing from a daemon thread during normal shutdown.
+                with self.condition:
+                    self.last_error = str(error)
+            else:
+                elapsed_ms = (time.monotonic() - started) * 1000.0
+                with self.condition:
+                    self.published += 1
+                    self.publish_ms += elapsed_ms
+
+    def take_statistics(self) -> Tuple[int, int, float, Optional[str]]:
+        with self.condition:
+            published = self.published
+            dropped = self.dropped
+            average_ms = self.publish_ms / published if published else 0.0
+            last_error = self.last_error
+            self.published = 0
+            self.dropped = 0
+            self.publish_ms = 0.0
+            self.last_error = None
+        return published, dropped, average_ms, last_error
+
+    def request_stop(self) -> None:
+        with self.condition:
+            self.stopped = True
+            self.pending = None
+            self.condition.notify_all()
+
+    def join(self, timeout: float) -> None:
+        self.thread.join(timeout=timeout)
 
 
 def _stamp_ns(message: Image) -> int:
     return int(message.header.stamp.sec) * 1_000_000_000 + int(
         message.header.stamp.nanosec
     )
+
+
+def _edge_aware_spatial_filter(
+    depth: torch.Tensor,
+    minimum_depth: float,
+    maximum_depth: float,
+    absolute_delta: float,
+    relative_delta: float,
+) -> torch.Tensor:
+    """Apply the existing 3x3 edge-aware mean as a compilable tensor graph."""
+    valid = (
+        torch.isfinite(depth)
+        & (depth >= minimum_depth)
+        & (depth <= maximum_depth)
+    )
+    padded_depth = torch_functional.pad(depth[None, None], (1, 1, 1, 1))
+    padded_valid = torch_functional.pad(valid[None, None], (1, 1, 1, 1))
+    threshold = torch.maximum(
+        torch.full_like(depth, absolute_delta), depth * relative_delta
+    )
+    total = torch.zeros_like(depth)
+    count = torch.zeros_like(depth)
+    for offset_y in range(3):
+        for offset_x in range(3):
+            candidate = padded_depth[
+                0,
+                0,
+                offset_y:offset_y + depth.shape[0],
+                offset_x:offset_x + depth.shape[1],
+            ]
+            candidate_valid = padded_valid[
+                0,
+                0,
+                offset_y:offset_y + depth.shape[0],
+                offset_x:offset_x + depth.shape[1],
+            ]
+            accepted = candidate_valid & (
+                torch.abs(candidate - depth) <= threshold
+            )
+            total += torch.where(accepted, candidate, 0.0)
+            count += accepted
+    return torch.where(valid, total / torch.clamp_min(count, 1.0), 0.0)
 
 
 class TorchPanoramaBackend:
@@ -116,35 +245,59 @@ class TorchPanoramaBackend:
         self.previous_left_depth: Optional[torch.Tensor] = None
         self.previous_right_depth: Optional[torch.Tensor] = None
         self.smoothed_gain = torch.ones(3, dtype=torch.float32, device=device)
+        self.spatial_filter_compile_error: Optional[str] = None
+        self.spatial_filter_operator = _edge_aware_spatial_filter
+        if bool(parameters.get("torch_compile_filters", False)):
+            try:
+                self.spatial_filter_operator = torch.compile(
+                    _edge_aware_spatial_filter,
+                    mode="reduce-overhead",
+                    fullgraph=True,
+                )
+            except Exception as error:
+                self.spatial_filter_compile_error = str(error)
 
-        half_yaw = math.radians(float(parameters["camera_half_yaw_deg"]))
-        baseline = float(parameters["camera_baseline_m"])
-        self.left_model = self._camera_model(
-            "left", -half_yaw, -0.5 * baseline
+        self.left_model = self._camera_model("left")
+        self.right_model = self._camera_model("right")
+        # Extrinsics do not change with CameraInfo. Keep their device copies
+        # alive instead of allocating and transferring twelve scalar values
+        # for each camera on every frame.
+        self.left_rotation_device = torch.tensor(
+            self.left_model.rotation_camera_to_rig,
+            dtype=torch.float32,
+            device=device,
         )
-        self.right_model = self._camera_model(
-            "right", half_yaw, 0.5 * baseline
+        self.left_translation_device = torch.tensor(
+            self.left_model.translation_camera_in_rig,
+            dtype=torch.float32,
+            device=device,
+        )
+        self.right_rotation_device = torch.tensor(
+            self.right_model.rotation_camera_to_rig,
+            dtype=torch.float32,
+            device=device,
+        )
+        self.right_translation_device = torch.tensor(
+            self.right_model.translation_camera_in_rig,
+            dtype=torch.float32,
+            device=device,
         )
 
-    def _camera_model(
-        self, prefix: str, yaw: float, translation_x: float
-    ) -> CameraModel:
-        rotation_values = self.parameters.get(
-            f"{prefix}_rotation_camera_to_rig", []
-        )
-        translation_values = self.parameters.get(
-            f"{prefix}_translation_camera_in_rig_m", []
-        )
-        rotation = (
-            np.asarray(rotation_values, dtype=np.float64).reshape(3, 3)
-            if len(rotation_values) == 9
-            else _rotation_from_yaw(yaw)
-        )
-        translation = (
-            np.asarray(translation_values, dtype=np.float64)
-            if len(translation_values) == 3
-            else np.asarray([translation_x, 0.0, 0.0], dtype=np.float64)
-        )
+    def _camera_model(self, prefix: str) -> CameraModel:
+        rotation_values = self.parameters[f"{prefix}_rotation_camera_to_rig"]
+        translation_values = self.parameters[
+            f"{prefix}_translation_camera_in_rig_m"
+        ]
+        if len(rotation_values) != 9:
+            raise ValueError(
+                f"{prefix}_rotation_camera_to_rig must contain 9 values"
+            )
+        if len(translation_values) != 3:
+            raise ValueError(
+                f"{prefix}_translation_camera_in_rig_m must contain 3 values"
+            )
+        rotation = np.asarray(rotation_values, dtype=np.float64).reshape(3, 3)
+        translation = np.asarray(translation_values, dtype=np.float64)
         model = CameraModel(
             float(self.parameters[f"{prefix}_fx"]),
             float(self.parameters[f"{prefix}_fy"]),
@@ -363,9 +516,24 @@ class TorchPanoramaBackend:
             minimum_angle,
             minimum_vertical,
         )
+        depth_projection_stride = max(
+            1, int(self.parameters["depth_projection_stride"])
+        )
         source_rows, source_columns = torch.meshgrid(
-            torch.arange(source_height, device=self.device, dtype=torch.float32),
-            torch.arange(source_width, device=self.device, dtype=torch.float32),
+            torch.arange(
+                0,
+                source_height,
+                depth_projection_stride,
+                device=self.device,
+                dtype=torch.float32,
+            ),
+            torch.arange(
+                0,
+                source_width,
+                depth_projection_stride,
+                device=self.device,
+                dtype=torch.float32,
+            ),
             indexing="ij",
         )
         stride = int(self.parameters["pointcloud_stride"])
@@ -374,27 +542,35 @@ class TorchPanoramaBackend:
             torch.arange(0, panorama_width, stride, device=self.device),
             indexing="ij",
         )
+        panorama_columns = torch.arange(
+            panorama_width, device=self.device
+        )[None, :]
         self.projection = ProjectionState(
-            panorama_width,
-            panorama_height,
-            focal_px,
-            minimum_angle,
-            maximum_angle,
-            minimum_vertical,
-            overlap_minimum,
-            overlap_maximum,
-            seam_x,
-            depth_color_minimum_x,
-            depth_color_maximum_x,
-            left_grid,
-            right_grid,
-            left_mask,
-            right_mask,
-            source_columns.reshape(-1),
-            source_rows.reshape(-1),
-            torch.arange(source_width * source_height, device=self.device, dtype=torch.int64),
-            pointcloud_columns,
-            pointcloud_rows,
+            width=panorama_width,
+            height=panorama_height,
+            focal_px=focal_px,
+            minimum_angle=minimum_angle,
+            maximum_angle=maximum_angle,
+            minimum_vertical=minimum_vertical,
+            overlap_minimum_angle=overlap_minimum,
+            overlap_maximum_angle=overlap_maximum,
+            seam_x=seam_x,
+            depth_color_minimum_x=depth_color_minimum_x,
+            depth_color_maximum_x=depth_color_maximum_x,
+            left_grid=left_grid,
+            right_grid=right_grid,
+            left_mask=left_mask,
+            right_mask=right_mask,
+            overlap_mask=left_mask & right_mask,
+            owner_left=panorama_columns <= seam_x,
+            source_u=source_columns.reshape(-1),
+            source_v=source_rows.reshape(-1),
+            source_indices=(
+                source_rows.to(torch.int64) * source_width
+                + source_columns.to(torch.int64)
+            ).reshape(-1),
+            pointcloud_columns=pointcloud_columns,
+            pointcloud_rows=pointcloud_rows,
         )
         self.previous_left_depth = None
         self.previous_right_depth = None
@@ -412,32 +588,26 @@ class TorchPanoramaBackend:
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         valid = self._valid_depth(depth)
         if bool(self.parameters["cuda_depth_spatial_filter"]):
-            padded_depth = torch_functional.pad(depth[None, None], (1, 1, 1, 1))
-            padded_valid = torch_functional.pad(valid[None, None], (1, 1, 1, 1))
-            threshold = torch.maximum(
-                torch.full_like(depth, float(self.parameters["cuda_depth_spatial_delta_m"])),
-                depth * float(self.parameters["cuda_depth_spatial_delta_relative"]),
-            )
-            total = torch.zeros_like(depth)
-            count = torch.zeros_like(depth)
-            for offset_y in range(3):
-                for offset_x in range(3):
-                    candidate = padded_depth[
-                        0,
-                        0,
-                        offset_y:offset_y + depth.shape[0],
-                        offset_x:offset_x + depth.shape[1],
-                    ]
-                    candidate_valid = padded_valid[
-                        0,
-                        0,
-                        offset_y:offset_y + depth.shape[0],
-                        offset_x:offset_x + depth.shape[1],
-                    ]
-                    accepted = candidate_valid & (torch.abs(candidate - depth) <= threshold)
-                    total += torch.where(accepted, candidate, 0.0)
-                    count += accepted
-            depth = torch.where(valid, total / torch.clamp_min(count, 1.0), 0.0)
+            try:
+                depth = self.spatial_filter_operator(
+                    depth,
+                    float(self.parameters["min_depth_m"]),
+                    float(self.parameters["max_depth_m"]),
+                    float(self.parameters["cuda_depth_spatial_delta_m"]),
+                    float(self.parameters["cuda_depth_spatial_delta_relative"]),
+                )
+            except Exception as error:
+                # A compiler/runtime mismatch must never take the camera node
+                # down. Permanently fall back to the proven eager graph.
+                self.spatial_filter_compile_error = str(error)
+                self.spatial_filter_operator = _edge_aware_spatial_filter
+                depth = self.spatial_filter_operator(
+                    depth,
+                    float(self.parameters["min_depth_m"]),
+                    float(self.parameters["max_depth_m"]),
+                    float(self.parameters["cuda_depth_spatial_delta_m"]),
+                    float(self.parameters["cuda_depth_spatial_delta_relative"]),
+                )
             valid = self._valid_depth(depth)
         if bool(self.parameters["cuda_depth_temporal_filter"]):
             if previous is None or previous.shape != depth.shape:
@@ -454,7 +624,7 @@ class TorchPanoramaBackend:
             alpha = float(self.parameters["cuda_depth_temporal_alpha"])
             depth = torch.where(stable, (1.0 - alpha) * previous + alpha * depth, depth)
             depth = torch.where(valid, depth, 0.0)
-        return depth, depth.clone()
+        return depth, depth
 
     def _depth_edges(self, depth: torch.Tensor) -> torch.Tensor:
         valid = self._valid_depth(depth)
@@ -478,30 +648,70 @@ class TorchPanoramaBackend:
             )
         return edge & valid
 
+    def _fill_projection_holes(
+        self,
+        projection_keys: torch.Tensor,
+        source_edge: torch.Tensor,
+        radius: int,
+    ) -> torch.Tensor:
+        """Fill only empty output pixels from nearby non-edge projections.
+
+        The previous implementation splatted every 1080p source point into a
+        3x3 target neighbourhood and ran the two-pass z-buffer for all nine
+        offsets. For radius one that means eighteen large scatter reductions
+        per camera. A radius-zero z-buffer already chooses the same core
+        samples; pooling those selected non-edge samples into *empty* target
+        pixels reproduces the hole fill without rewriting valid pixels or
+        expanding depth discontinuities.
+        """
+        if radius <= 0:
+            return projection_keys
+        invalid_key = torch.iinfo(torch.int64).max
+        valid = projection_keys != invalid_key
+        source_indices = (projection_keys & 0xFFFFFFFF).clamp_max(
+            source_edge.numel() - 1
+        )
+        selected_source_edge = source_edge.reshape(-1)[source_indices]
+        fillable = valid & ~selected_source_edge
+        ranges = self._key_range(projection_keys)
+        score = torch.where(
+            fillable,
+            -ranges,
+            torch.full_like(ranges, -torch.inf),
+        )
+        pooled_score, pooled_indices = torch_functional.max_pool2d(
+            score[None, None],
+            kernel_size=2 * radius + 1,
+            stride=1,
+            padding=radius,
+            return_indices=True,
+        )
+        candidate_keys = projection_keys.reshape(-1)[
+            pooled_indices.reshape(-1)
+        ].reshape_as(projection_keys)
+        candidate_keys = torch.where(
+            torch.isfinite(pooled_score[0, 0]),
+            candidate_keys,
+            invalid_key,
+        )
+        return torch.where(valid, projection_keys, candidate_keys)
+
     def _project_depth(
         self, depth: torch.Tensor, model: CameraModel
     ) -> Tuple[torch.Tensor, int]:
-        if bool(self.parameters["use_triton_projection"]):
-            keys = project_depth_triton(
-                depth.contiguous(), model, self.projection, self.parameters
-            )
-            # The exact accepted source count is diagnostic-only. Avoid a
-            # full-frame GPU reduction/synchronization in the hot path.
-            return keys, int(depth.numel())
         projection = self.projection
         assert projection is not None
-        flat_depth = depth.reshape(-1)
+        source_stride = max(1, int(self.parameters["depth_projection_stride"]))
+        flat_depth = depth[::source_stride, ::source_stride].reshape(-1)
         valid = self._valid_depth(flat_depth)
         local_x = (projection.source_u - model.cx) / model.fx * flat_depth
         local_y = (projection.source_v - model.cy) / model.fy * flat_depth
-        rotation = torch.as_tensor(
-            model.rotation_camera_to_rig, dtype=torch.float32, device=self.device
-        )
-        translation = torch.as_tensor(
-            model.translation_camera_in_rig,
-            dtype=torch.float32,
-            device=self.device,
-        )
+        if model is self.left_model:
+            rotation = self.left_rotation_device
+            translation = self.left_translation_device
+        else:
+            rotation = self.right_rotation_device
+            translation = self.right_translation_device
         rig_x = (
             rotation[0, 0] * local_x
             + rotation[0, 1] * local_y
@@ -532,13 +742,20 @@ class TorchPanoramaBackend:
         projected_x = torch.round(projected_x_float).to(torch.int64)
         projected_y = torch.round(projected_y_float).to(torch.int64)
         valid &= rig_z > 0.0
-        edge = self._depth_edges(depth).reshape(-1)
+        source_edge = self._depth_edges(depth)
+        edge = source_edge[::source_stride, ::source_stride].reshape(-1)
         panorama_pixels = projection.width * projection.height
         minimum_range = torch.full(
             (panorama_pixels,), float("inf"), device=self.device
         )
-        splat_radius = int(self.parameters["depth_splat_radius_px"])
+        requested_splat_radius = int(self.parameters["depth_splat_radius_px"])
         edge_radius = int(self.parameters["depth_edge_splat_radius_px"])
+        output_space_splat = (
+            bool(self.parameters["pytorch_output_space_splat"])
+            and requested_splat_radius == 1
+            and edge_radius == 0
+        )
+        splat_radius = 0 if output_space_splat else requested_splat_radius
         offsets = range(-splat_radius, splat_radius + 1)
         for offset_y in offsets:
             for offset_x in offsets:
@@ -610,10 +827,18 @@ class TorchPanoramaBackend:
                 projection_keys.scatter_reduce_(
                     0, indices, keys, reduce="amin", include_self=True
                 )
-        return (
-            projection_keys.reshape(projection.height, projection.width),
-            int(valid.sum().item()),
+        projection_keys = projection_keys.reshape(
+            projection.height, projection.width
         )
+        if output_space_splat:
+            projection_keys = self._fill_projection_holes(
+                projection_keys,
+                source_edge,
+                requested_splat_radius,
+            )
+        # This count is diagnostic-only. Avoid valid.sum().item(), which forces
+        # a device-wide synchronization between the left and right projectors.
+        return projection_keys, int(flat_depth.numel())
 
     def _remap_color(
         self, color_hwc: torch.Tensor, grid: torch.Tensor
@@ -637,8 +862,6 @@ class TorchPanoramaBackend:
             return self.smoothed_gain
         stride = int(self.parameters["exposure_sample_stride"])
         sampled_mask = overlap[::stride, ::stride]
-        if not bool(sampled_mask.any()):
-            return self.smoothed_gain
         left_mean = left_base[::stride, ::stride][sampled_mask].mean(dim=0)
         right_mean = right_base[::stride, ::stride][sampled_mask].mean(dim=0)
         measured = torch.clamp(
@@ -646,6 +869,7 @@ class TorchPanoramaBackend:
             float(self.parameters["min_exposure_gain"]),
             float(self.parameters["max_exposure_gain"]),
         )
+        measured = torch.where(sampled_mask.any(), measured, self.smoothed_gain)
         alpha = float(self.parameters["exposure_smoothing"])
         self.smoothed_gain = (1.0 - alpha) * self.smoothed_gain + alpha * measured
         return self.smoothed_gain
@@ -680,16 +904,16 @@ class TorchPanoramaBackend:
         right_bgr = right_color
         left_base = self._remap_color(left_color, projection.left_grid)
         right_base = self._remap_color(right_color, projection.right_grid)
-        overlap = projection.left_mask & projection.right_mask
-        gain = self._estimate_gain(left_base, right_base, overlap)
+        gain = self._estimate_gain(
+            left_base, right_base, projection.overlap_mask
+        )
         right_base = torch.clamp(right_base * gain, 0.0, 255.0)
 
         left_valid = self._key_valid(left_keys)
         right_valid = self._key_valid(right_keys)
         left_range = self._key_range(left_keys)
         right_range = self._key_range(right_keys)
-        columns = torch.arange(projection.width, device=self.device)[None, :]
-        owner_left = columns <= projection.seam_x
+        owner_left = projection.owner_left
         use_left_range = left_valid & (~right_valid | owner_left)
         range_m = torch.where(
             use_left_range,
@@ -771,109 +995,35 @@ class TorchPanoramaBackend:
 
 class RgbdPanoramaTorchNode(Node):
     def __init__(self) -> None:
-        super().__init__("panorama_stitcher")
-        defaults: Dict[str, object] = {
-            "left_color_topic": "/front_left/front_left/color/image_raw",
-            "left_depth_topic": "/front_left/front_left/aligned_depth_to_color/image_raw",
-            "left_camera_info_topic": "/front_left/front_left/color/camera_info",
-            "right_color_topic": "/front_right/front_right/color/image_raw",
-            "right_depth_topic": "/front_right/front_right/aligned_depth_to_color/image_raw",
-            "right_camera_info_topic": "/front_right/front_right/color/camera_info",
-            "output_topic": "/panorama/image_raw",
-            "validity_topic": "/panorama/validity",
-            "range_topic": "/panorama/range",
-            "pointcloud_topic": "/panorama/points",
-            "output_frame_id": "panorama_optical_frame",
-            "publish_auxiliary_outputs": False,
-            "publish_validity_output": False,
-            "publish_range_output": False,
-            "publish_pointcloud": False,
-            "publish_only_when_subscribed": True,
-            "publisher_best_effort": False,
-            "auxiliary_publisher_best_effort": True,
-            "pointcloud_publisher_best_effort": True,
-            "pointcloud_stride": 4,
-            "max_output_rate_hz": 0.0,
-            "auxiliary_output_rate_hz": 0.0,
-            "input_best_effort": False,
-            "sync_queue_size": 4,
-            "sync_slop_ms": 35.0,
-            "camera_half_yaw_deg": 30.397,
-            "camera_baseline_m": 0.06339742196001438,
-            # Non-empty float defaults force rclpy to declare DOUBLE_ARRAY;
-            # an empty Python list is otherwise inferred as BYTE_ARRAY.
-            "left_rotation_camera_to_rig": [
-                1.0, 0.0, 0.0,
-                0.0, 1.0, 0.0,
-                0.0, 0.0, 1.0,
-            ],
-            "right_rotation_camera_to_rig": [
-                1.0, 0.0, 0.0,
-                0.0, 1.0, 0.0,
-                0.0, 0.0, 1.0,
-            ],
-            "left_translation_camera_in_rig_m": [0.0, 0.0, 0.0],
-            "right_translation_camera_in_rig_m": [0.0, 0.0, 0.0],
-            "left_input_image_rotated_180": True,
-            "right_input_image_rotated_180": True,
-            "left_fx": 1375.93896484375,
-            "left_fy": 1376.0078125,
-            "left_cx": 962.9755859375,
-            "left_cy": 539.9728393554688,
-            "left_width": 1920,
-            "left_height": 1080,
-            "right_fx": 1369.7860107421875,
-            "right_fy": 1369.6165771484375,
-            "right_cx": 967.3739013671875,
-            "right_cy": 566.1657104492188,
-            "right_width": 1920,
-            "right_height": 1080,
-            # Match the existing native node: use the active sensor profile's
-            # CameraInfo while keeping the calibrated rig extrinsics in YAML.
-            "use_runtime_camera_info": True,
-            "projection_scale": 1.0,
-            "color_reference_plane_z_m": 0.0,
-            "min_depth_m": 0.2,
-            "max_depth_m": 15.0,
-            "depth_scale_m": 0.001,
-            "depth_color_band_margin_deg": 0.0,
-            "auto_seam_center": True,
-            "seam_angle_deg": 0.0,
-            "depth_aware_color": True,
-            "enable_exposure_compensation": True,
-            "exposure_sample_stride": 4,
-            "exposure_smoothing": 0.15,
-            "min_exposure_gain": 0.75,
-            "max_exposure_gain": 1.33,
-            "cuda_depth_spatial_filter": True,
-            "cuda_depth_spatial_delta_m": 0.03,
-            "cuda_depth_spatial_delta_relative": 0.01,
-            "cuda_depth_temporal_filter": True,
-            "cuda_depth_temporal_alpha": 0.65,
-            "cuda_depth_temporal_reset_m": 0.08,
-            "depth_discontinuity_abs_m": 0.08,
-            "depth_discontinuity_relative": 0.04,
-            "depth_splat_radius_px": 1,
-            "depth_edge_splat_radius_px": 0,
-            "occlusion_switch_margin_m": 0.05,
-            "diagnostics_period_sec": 2.0,
-            "use_cuda": True,
-            "use_triton_projection": True,
+        super().__init__(
+            "panorama_stitcher",
+            automatically_declare_parameters_from_overrides=True,
+        )
+        self.parameters: Dict[str, object] = {
+            name: parameter.value
+            for name, parameter in self.get_parameters_by_prefix("").items()
+            if name != "use_sim_time"
         }
-        self.parameters: Dict[str, object] = {}
-        for name, default in defaults.items():
-            self.parameters[name] = self.declare_parameter(name, default).value
-        if not bool(self.parameters["use_cuda"]):
+        if not self.parameters:
             raise RuntimeError(
-                "The Python panorama backend requires use_cuda:=true; use "
-                "panorama_backend:=cpp use_cuda:=false for the CPU rollback path"
+                "No panorama parameters loaded; pass config/rgbd_panorama.yaml"
             )
+        if not bool(self.parameters["use_cuda"]):
+            raise RuntimeError("The panorama backend requires use_cuda:=true")
         if not torch.cuda.is_available():
             raise RuntimeError("PyTorch CUDA is unavailable")
         torch.set_grad_enabled(False)
         self.device = torch.device("cuda:0")
+        self.gpu_start_event = torch.cuda.Event(enable_timing=True)
+        self.gpu_stop_event = torch.cuda.Event(enable_timing=True)
+        self.d2h_start_event = torch.cuda.Event(enable_timing=True)
+        self.d2h_stop_event = torch.cuda.Event(enable_timing=True)
+        self.copy_complete_event = torch.cuda.Event(blocking=True)
         self.backend = TorchPanoramaBackend(self.parameters, self.device)
         self.projection_lock = threading.Lock()
+        self.host_input_buffers: Dict[str, torch.Tensor] = {}
+        self.device_input_buffers: Dict[str, torch.Tensor] = {}
+        self.host_output_buffers: Dict[str, torch.Tensor] = {}
         self.camera_info_received = {"left": False, "right": False}
         self.camera_info_changed = False
         self.backend_warmed = False
@@ -881,6 +1031,11 @@ class RgbdPanoramaTorchNode(Node):
         # advertised before the sensor actually emits it (for example while a
         # simulator is paused), so it must not gate panorama availability.
         self._warm_up_backend()
+        if self.backend.spatial_filter_compile_error is not None:
+            self.get_logger().warning(
+                "torch.compile spatial filter unavailable; using eager PyTorch: "
+                f"{self.backend.spatial_filter_compile_error}"
+            )
 
         self.image_publisher = self.create_publisher(
             Image,
@@ -908,6 +1063,19 @@ class RgbdPanoramaTorchNode(Node):
                 str(self.parameters["pointcloud_topic"]),
                 self._qos(bool(self.parameters["pointcloud_publisher_best_effort"])),
             )
+        self.publish_workers: Dict[str, LatestOnlyPublisher] = {}
+        if bool(self.parameters["asynchronous_publish"]):
+            publishers = {
+                "image": self.image_publisher,
+                "validity": self.validity_publisher,
+                "range": self.range_publisher,
+                "cloud": self.pointcloud_publisher,
+            }
+            self.publish_workers = {
+                name: LatestOnlyPublisher(name, publisher)
+                for name, publisher in publishers.items()
+                if publisher is not None
+            }
 
         input_qos = self._qos(bool(self.parameters["input_best_effort"]))
         self.queues: Dict[str, Deque[Image]] = {
@@ -919,6 +1087,13 @@ class RgbdPanoramaTorchNode(Node):
         self.pending_sequence = 0
         self.stop_worker = False
         self.input_counts = {key: 0 for key in self.queues}
+        self.sync_successes = 0
+        self.sync_queue_drops = {key: 0 for key in self.queues}
+        self.sync_stale_drops = {key: 0 for key in self.queues}
+        self.sync_pending_drops = 0
+        self.sync_span_sum_ms = 0.0
+        self.sync_span_max_ms = 0.0
+        self.pending_ready = False
         self.image_subscriptions = []
         topics = {
             "left_color": self.parameters["left_color_topic"],
@@ -951,7 +1126,11 @@ class RgbdPanoramaTorchNode(Node):
         self.frame_count = 0
         self.diagnostic_frames = 0
         self.diagnostic_processing_ms = 0.0
+        self.diagnostic_process_cpu_ms = 0.0
         self.diagnostic_gpu_ms = 0.0
+        self.diagnostic_input_stage_ms = 0.0
+        self.diagnostic_d2h_ms = 0.0
+        self.diagnostic_message_ms = 0.0
         self.last_diagnostic = time.monotonic()
         self.last_processing_start = 0.0
         self.last_depth_age = (0.0, 0.0)
@@ -962,32 +1141,30 @@ class RgbdPanoramaTorchNode(Node):
         self.get_logger().info(
             "Python/PyTorch CUDA panorama ready: "
             f"{torch.cuda.get_device_name(0)}, torch={torch.__version__} "
-            f"CUDA={torch.version.cuda}"
+            f"CUDA={torch.version.cuda}, depth_projection=PyTorch scatter_reduce"
         )
 
     def _warm_up_backend(self) -> None:
-        """Compile Triton and initialize PyTorch kernels before live frames."""
+        """Initialize the selected PyTorch CUDA operators before live frames."""
         if self.backend_warmed:
             return
-        height = int(self.parameters["left_height"])
-        width = int(self.parameters["left_width"])
-        color = torch.zeros((height, width, 3), dtype=torch.uint8, device=self.device)
-        depth = torch.zeros((height, width), dtype=torch.float32, device=self.device)
+        left = self.backend.left_model
+        right = self.backend.right_model
+        left_color = torch.zeros(
+            (left.height, left.width, 3), dtype=torch.uint8, device=self.device)
+        left_depth = torch.zeros(
+            (left.height, left.width), dtype=torch.float32, device=self.device)
+        right_color = torch.zeros(
+            (right.height, right.width, 3), dtype=torch.uint8, device=self.device)
+        right_depth = torch.zeros(
+            (right.height, right.width), dtype=torch.float32, device=self.device)
         started = time.monotonic()
-        try:
-            with torch.inference_mode():
-                self.backend.process(color, depth, color, depth)
-        except Exception as error:
-            if not bool(self.parameters["use_triton_projection"]):
-                raise
-            self.parameters["use_triton_projection"] = False
-            self.get_logger().error(
-                f"Triton warm-up failed ({error}); using the slower PyTorch "
-                "projection path"
-            )
-            with torch.inference_mode():
-                self.backend.process(color, depth, color, depth)
-        torch.cuda.synchronize()
+        with torch.inference_mode():
+            self.backend.process(
+                left_color, left_depth, right_color, right_depth)
+        complete = torch.cuda.Event(blocking=True)
+        complete.record()
+        complete.synchronize()
         self.backend.previous_left_depth = None
         self.backend.previous_right_depth = None
         with torch.inference_mode():
@@ -1020,13 +1197,22 @@ class RgbdPanoramaTorchNode(Node):
                 message,
                 bool(self.parameters[f"{prefix}_input_image_rotated_180"]),
             )
-            self.camera_info_received[prefix] = True
-            self.camera_info_changed |= changed
-            if all(self.camera_info_received.values()) and self.camera_info_changed:
+            if changed:
+                if not self.camera_info_changed:
+                    self.camera_info_received = {"left": False, "right": False}
+                self.camera_info_changed = True
                 self.backend_warmed = False
+            self.camera_info_received[prefix] = True
+            if all(self.camera_info_received.values()) and self.camera_info_changed:
                 self._warm_up_backend()
                 self.camera_info_changed = False
         if changed:
+            # Never pair frames queued under the old profile with new intrinsics.
+            with self.condition:
+                for queue in self.queues.values():
+                    queue.clear()
+                self.pending = None
+                self.pending_ready = False
             self.get_logger().info(
                 f"{prefix} CameraInfo: {message.width}x{message.height} "
                 f"fx/fy={message.k[0]:.3f}/{message.k[4]:.3f} "
@@ -1036,18 +1222,28 @@ class RgbdPanoramaTorchNode(Node):
     def _receive(self, key: str, message: Image) -> None:
         with self.condition:
             self.input_counts[key] += 1
-            self.queues[key].append(message)
+            queue = self.queues[key]
+            if len(queue) == queue.maxlen:
+                self.sync_queue_drops[key] += 1
+            queue.append(message)
             synchronized = self._try_synchronize()
             if synchronized is not None:
+                if self.pending_ready:
+                    self.sync_pending_drops += 1
                 self.pending = synchronized
+                self.pending_ready = True
                 self.pending_sequence += 1
                 self.condition.notify()
 
     @staticmethod
     def _nearest(queue: Iterable[Image], stamp: int) -> Tuple[int, int]:
         return min(
-            enumerate(queue), key=lambda item: abs(_stamp_ns(item[1]) - stamp)
-        )[0], min(abs(_stamp_ns(message) - stamp) for message in queue)
+            (
+                (index, abs(_stamp_ns(message) - stamp))
+                for index, message in enumerate(queue)
+            ),
+            key=lambda item: item[1],
+        )
 
     def _try_synchronize(
         self,
@@ -1084,12 +1280,26 @@ class RgbdPanoramaTorchNode(Node):
             return None
         left_depth = self.queues["left_depth"][left_depth_index]
         right_depth = self.queues["right_depth"][right_depth_index]
-        for queue, index in (
-            (left_colors, left_index),
-            (right_colors, right_index),
-            (self.queues["left_depth"], left_depth_index),
-            (self.queues["right_depth"], right_depth_index),
+        synchronized_messages = (
+            left_color,
+            right_color,
+            left_depth,
+            right_depth,
+        )
+        sync_span_ms = (
+            max(_stamp_ns(message) for message in synchronized_messages)
+            - min(_stamp_ns(message) for message in synchronized_messages)
+        ) / 1.0e6
+        self.sync_successes += 1
+        self.sync_span_sum_ms += sync_span_ms
+        self.sync_span_max_ms = max(self.sync_span_max_ms, sync_span_ms)
+        for key, queue, index in (
+            ("left_color", left_colors, left_index),
+            ("right_color", right_colors, right_index),
+            ("left_depth", self.queues["left_depth"], left_depth_index),
+            ("right_depth", self.queues["right_depth"], right_depth_index),
         ):
+            self.sync_stale_drops[key] += index
             for _ in range(index + 1):
                 queue.popleft()
         return (
@@ -1132,6 +1342,54 @@ class RgbdPanoramaTorchNode(Node):
             )
         )
 
+    def _publish_output(self, name: str, publisher, message) -> None:
+        worker = self.publish_workers.get(name)
+        if worker is not None:
+            worker.submit(message)
+            return
+        publisher.publish(message)
+
+    def _stage_input(self, name: str, image: np.ndarray) -> torch.Tensor:
+        source = torch.from_numpy(image)
+        if not bool(self.parameters["pinned_memory_io"]):
+            return source.to(self.device, non_blocking=True)
+        host = self.host_input_buffers.get(name)
+        if host is None or host.shape != source.shape or host.dtype != source.dtype:
+            host = torch.empty(source.shape, dtype=source.dtype, pin_memory=True)
+            self.host_input_buffers[name] = host
+        host.copy_(source)
+        device = self.device_input_buffers.get(name)
+        if device is None or device.shape != source.shape or device.dtype != source.dtype:
+            device = torch.empty(source.shape, dtype=source.dtype, device=self.device)
+            self.device_input_buffers[name] = device
+        device.copy_(host, non_blocking=True)
+        return device
+
+    def _stage_output(self, name: str, tensor: torch.Tensor) -> torch.Tensor:
+        """Queue a D2H copy into a reusable pinned buffer."""
+        if not bool(self.parameters["pinned_memory_io"]):
+            return tensor.cpu()
+        allocation_shape = tuple(tensor.shape)
+        host = self.host_output_buffers.get(name)
+        if (
+            host is None
+            or host.dtype != tensor.dtype
+            or host.ndim != tensor.ndim
+            or any(
+                host.shape[index] < allocation_shape[index]
+                for index in range(host.ndim)
+            )
+        ):
+            host = torch.empty(
+                allocation_shape,
+                dtype=tensor.dtype,
+                pin_memory=True,
+            )
+            self.host_output_buffers[name] = host
+        view = host[tuple(slice(0, size) for size in tensor.shape)]
+        view.copy_(tensor, non_blocking=True)
+        return view
+
     def _processing_loop(self) -> None:
         processed_sequence = 0
         while rclpy.ok():
@@ -1149,6 +1407,7 @@ class RgbdPanoramaTorchNode(Node):
                         if self.stop_worker:
                             return
                 pending = self.pending
+                self.pending_ready = False
                 processed_sequence = self.pending_sequence
                 self.last_processing_start = time.monotonic()
             if pending is None:
@@ -1172,14 +1431,7 @@ class RgbdPanoramaTorchNode(Node):
                     cloud_demand=cloud_demand,
                 )
             except Exception as error:  # keep camera callbacks alive on GPU failure
-                if bool(self.parameters["use_triton_projection"]):
-                    self.parameters["use_triton_projection"] = False
-                    self.get_logger().error(
-                        f"Triton projection failed ({error}); falling back to "
-                        "the slower PyTorch reference path"
-                    )
-                else:
-                    self.get_logger().error(f"Python panorama frame failed: {error}")
+                self.get_logger().error(f"Python panorama frame failed: {error}")
                 time.sleep(0.05)
 
     def _process_frame(
@@ -1197,37 +1449,36 @@ class RgbdPanoramaTorchNode(Node):
         cloud_demand: bool,
     ) -> None:
         start = time.monotonic()
+        process_cpu_start = time.process_time()
         left_color_np = self._image_numpy(left_color_message, np.uint8, 3)
         right_color_np = self._image_numpy(right_color_message, np.uint8, 3)
         left_depth_np = self._image_numpy(left_depth_message, np.uint16, 1)
         right_depth_np = self._image_numpy(right_depth_message, np.uint16, 1)
         left_color = self._color_to_bgr(
-            left_color_message, torch.from_numpy(left_color_np).to(self.device)
+            left_color_message, self._stage_input("left_color", left_color_np)
         )
         right_color = self._color_to_bgr(
-            right_color_message, torch.from_numpy(right_color_np).to(self.device)
+            right_color_message, self._stage_input("right_color", right_color_np)
         )
         depth_scale = float(self.parameters["depth_scale_m"])
         left_depth = (
-            torch.from_numpy(left_depth_np).to(self.device, dtype=torch.float32)
+            self._stage_input("left_depth", left_depth_np).to(torch.float32)
             * depth_scale
         )
         right_depth = (
-            torch.from_numpy(right_depth_np).to(self.device, dtype=torch.float32)
+            self._stage_input("right_depth", right_depth_np).to(torch.float32)
             * depth_scale
         )
+        input_staged = time.monotonic()
 
-        gpu_start = torch.cuda.Event(enable_timing=True)
-        gpu_stop = torch.cuda.Event(enable_timing=True)
-        gpu_start.record()
+        self.gpu_start_event.record()
         with self.projection_lock, torch.inference_mode():
             outputs = self.backend.process(
                 left_color, left_depth, right_color, right_depth
             )
             cloud_tensors = self.backend.pointcloud_tensors(outputs) if cloud_demand else None
-        gpu_stop.record()
-        gpu_stop.synchronize()
-        gpu_ms = float(gpu_start.elapsed_time(gpu_stop))
+        self.gpu_stop_event.record()
+        self.d2h_start_event.record()
 
         messages = [
             left_color_message,
@@ -1242,26 +1493,70 @@ class RgbdPanoramaTorchNode(Node):
         header.stamp.sec = newest.header.stamp.sec
         header.stamp.nanosec = newest.header.stamp.nanosec
         header.frame_id = str(self.parameters["output_frame_id"])
+
+        # Queue every demanded D2H transfer first, then synchronize once. The
+        # pinned buffers remain alive and are reused only after this frame has
+        # been copied into its ROS message, so the next H2D cannot race them.
+        host_cloud = (
+            self._stage_output("cloud", cloud_tensors)
+            if cloud_demand and cloud_tensors is not None
+            else None
+        )
+        host_range = (
+            self._stage_output("range", outputs.range_m) if range_demand else None
+        )
+        host_validity = (
+            self._stage_output("validity", outputs.validity)
+            if validity_demand
+            else None
+        )
+        host_image = (
+            self._stage_output("image", outputs.panorama_bgr)
+            if image_demand
+            else None
+        )
+        self.d2h_stop_event.record()
+        self.copy_complete_event.record()
+        self.copy_complete_event.synchronize()
+        outputs_copied = time.monotonic()
+
         if cloud_demand and cloud_tensors is not None:
-            self.pointcloud_publisher.publish(
-                self._pointcloud_message(header, cloud_tensors)
+            self._publish_output(
+                "cloud",
+                self.pointcloud_publisher,
+                self._pointcloud_message(header, host_cloud.numpy())
             )
         if range_demand:
-            self.range_publisher.publish(
+            self._publish_output(
+                "range",
+                self.range_publisher,
                 self._image_message(
                     header,
-                    outputs.range_m.cpu().numpy().astype(np.float32),
+                    host_range.numpy(),
                     "32FC1",
                 )
             )
         if validity_demand:
-            self.validity_publisher.publish(
-                self._image_message(header, outputs.validity.cpu().numpy(), "mono8")
+            self._publish_output(
+                "validity",
+                self.validity_publisher,
+                self._image_message(header, host_validity.numpy(), "mono8")
             )
         if image_demand:
-            self.image_publisher.publish(
-                self._image_message(header, outputs.panorama_bgr.cpu().numpy(), "bgr8")
+            self._publish_output(
+                "image",
+                self.image_publisher,
+                self._image_message(header, host_image.numpy(), "bgr8")
             )
+        messages_dispatched = time.monotonic()
+        # Every demanded output above performs a device-to-host copy, so the
+        # stop event has completed without an extra pre-copy synchronization.
+        gpu_ms = float(
+            self.gpu_start_event.elapsed_time(self.gpu_stop_event)
+        )
+        d2h_ms = float(
+            self.d2h_start_event.elapsed_time(self.d2h_stop_event)
+        )
         cloud_points = (
             int(cloud_tensors.shape[0]) if cloud_tensors is not None else 0
         )
@@ -1272,7 +1567,15 @@ class RgbdPanoramaTorchNode(Node):
         self.frame_count += 1
         self.diagnostic_frames += 1
         self.diagnostic_processing_ms += elapsed_ms
+        self.diagnostic_process_cpu_ms += (
+            time.process_time() - process_cpu_start
+        ) * 1000.0
         self.diagnostic_gpu_ms += gpu_ms
+        self.diagnostic_input_stage_ms += (input_staged - start) * 1000.0
+        self.diagnostic_d2h_ms += d2h_ms
+        self.diagnostic_message_ms += (
+            messages_dispatched - outputs_copied
+        ) * 1000.0
         self._maybe_log_diagnostics()
 
     @staticmethod
@@ -1291,8 +1594,12 @@ class RgbdPanoramaTorchNode(Node):
         return message
 
     @staticmethod
-    def _pointcloud_message(header, packed_cloud: torch.Tensor) -> PointCloud2:
-        storage = packed_cloud.cpu().numpy()
+    def _pointcloud_message(header, packed_cloud) -> PointCloud2:
+        storage = (
+            packed_cloud.cpu().numpy()
+            if isinstance(packed_cloud, torch.Tensor)
+            else np.ascontiguousarray(packed_cloud)
+        )
         message = PointCloud2()
         message.header = header
         message.height = 1
@@ -1318,32 +1625,78 @@ class RgbdPanoramaTorchNode(Node):
         if elapsed < float(self.parameters["diagnostics_period_sec"]):
             return
         projection = self.backend.projection
-        if self.diagnostic_frames == 0 or projection is None:
+        if projection is None:
             self.last_diagnostic = now
-            self.input_counts = {key: 0 for key in self.input_counts}
             return
         count = float(self.diagnostic_frames)
-        input_hz = [self.input_counts[key] / elapsed for key in self.queues]
+        with self.condition:
+            input_hz = [self.input_counts[key] / elapsed for key in self.queues]
+            sync_successes = self.sync_successes
+            sync_queue_drops = sum(self.sync_queue_drops.values())
+            sync_stale_drops = sum(self.sync_stale_drops.values())
+            sync_pending_drops = self.sync_pending_drops
+            sync_span_average_ms = (
+                self.sync_span_sum_ms / sync_successes if sync_successes else 0.0
+            )
+            sync_span_max_ms = self.sync_span_max_ms
+            self.input_counts = {key: 0 for key in self.input_counts}
+            self.sync_successes = 0
+            self.sync_queue_drops = {key: 0 for key in self.sync_queue_drops}
+            self.sync_stale_drops = {key: 0 for key in self.sync_stale_drops}
+            self.sync_pending_drops = 0
+            self.sync_span_sum_ms = 0.0
+            self.sync_span_max_ms = 0.0
+        publish_statistics = []
+        for name in ("image", "range", "validity", "cloud"):
+            worker = self.publish_workers.get(name)
+            if worker is None:
+                continue
+            published, dropped, average_ms, last_error = worker.take_statistics()
+            publish_statistics.append(
+                f"{name}:{published / elapsed:.1f}Hz/"
+                f"dds={average_ms:.1f}ms/drop={dropped}"
+            )
+            if last_error is not None and rclpy.ok():
+                self.get_logger().error(
+                    f"asynchronous {name} publication failed: {last_error}"
+                )
+        publish_summary = (
+            " publish(image/range/validity/cloud)=" + ",".join(publish_statistics)
+            if publish_statistics
+            else ""
+        )
         self.get_logger().info(
             f"output={projection.width}x{projection.height} "
             f"fps={count / elapsed:.1f} "
-            f"processing={self.diagnostic_processing_ms / count:.1f} ms "
-            f"backend=PYTORCH_CUDA gpu={self.diagnostic_gpu_ms / count:.1f} ms "
+            f"backend=PYTORCH_CUDA "
+            f"timing(total/cpu/input/gpu/d2h/message)="
+            f"{self.diagnostic_processing_ms / count if count else 0.0:.1f}/"
+            f"{self.diagnostic_process_cpu_ms / count if count else 0.0:.1f}/"
+            f"{self.diagnostic_input_stage_ms / count if count else 0.0:.1f}/"
+            f"{self.diagnostic_gpu_ms / count if count else 0.0:.1f}/"
+            f"{self.diagnostic_d2h_ms / count if count else 0.0:.1f}/"
+            f"{self.diagnostic_message_ms / count if count else 0.0:.1f} ms "
             f"input_hz(Lc/Ld/Rc/Rd)={input_hz[0]:.1f}/{input_hz[1]:.1f}/"
             f"{input_hz[2]:.1f}/{input_hz[3]:.1f} "
+            f"sync_hz={sync_successes / elapsed:.1f} "
+            f"sync(ok/queue/stale/pending)={sync_successes}/"
+            f"{sync_queue_drops}/{sync_stale_drops}/{sync_pending_drops} "
             f"depth_age(L/R)={self.last_depth_age[0]:.1f}/"
             f"{self.last_depth_age[1]:.1f} ms "
-            f"sync_span(avg/max)={self.last_sync_span:.1f}/"
-            f"{self.last_sync_span:.1f} ms "
+            f"sync_span(avg/max)={sync_span_average_ms:.1f}/"
+            f"{sync_span_max_ms:.1f} ms "
             f"depth_points(left/right)={self.last_points[0]}/"
             f"{self.last_points[1]} panorama_points={self.last_points[2]} "
-            f"total={self.frame_count}"
+            f"total={self.frame_count}{publish_summary}"
         )
         self.last_diagnostic = now
         self.diagnostic_frames = 0
         self.diagnostic_processing_ms = 0.0
+        self.diagnostic_process_cpu_ms = 0.0
         self.diagnostic_gpu_ms = 0.0
-        self.input_counts = {key: 0 for key in self.input_counts}
+        self.diagnostic_input_stage_ms = 0.0
+        self.diagnostic_d2h_ms = 0.0
+        self.diagnostic_message_ms = 0.0
 
     def destroy_node(self) -> bool:
         with self.condition:
@@ -1351,23 +1704,25 @@ class RgbdPanoramaTorchNode(Node):
             self.condition.notify_all()
         if self.worker.is_alive():
             self.worker.join(timeout=3.0)
+        for worker in self.publish_workers.values():
+            worker.request_stop()
+        deadline = time.monotonic() + 3.0
+        for worker in self.publish_workers.values():
+            worker.join(timeout=max(0.0, deadline - time.monotonic()))
         return super().destroy_node()
 
 
 def main(args=None) -> None:
+    torch.set_num_threads(_CPU_THREADS)
+    torch.set_num_interop_threads(1)
     rclpy.init(args=args)
     node: Optional[RgbdPanoramaTorchNode] = None
-    executor: Optional[MultiThreadedExecutor] = None
     try:
         node = RgbdPanoramaTorchNode()
-        executor = MultiThreadedExecutor(num_threads=4)
-        executor.add_node(node)
-        executor.spin()
-    except KeyboardInterrupt:
+        rclpy.spin(node)
+    except (KeyboardInterrupt, ExternalShutdownException):
         pass
     finally:
-        if executor is not None:
-            executor.shutdown(timeout_sec=2.0)
         if node is not None:
             node.destroy_node()
         if rclpy.ok():

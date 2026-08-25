@@ -11,36 +11,46 @@ panorama_stitcher:
     range_topic: /panorama/range
     pointcloud_topic: /panorama/points
     output_frame_id: panorama_optical_frame
-    # Range/validity are large debug images (about 15 MB per frame together).
+    # Range/validity are debug images (about 2.3 MB per frame together at the
+    # current 1254x370 output).
     # Restore the requested depth panorama at a bounded visualization rate,
     # while leaving the redundant validity image disabled. The driving path
     # continues to consume the full-rate /panorama/points cloud.
-    publish_auxiliary_outputs: false
     publish_range_output: true
     publish_validity_output: false
-    # Do not rate-limit the metric depth panorama separately. Publication is
-    # still subscriber-gated below, and the native RGB-D inputs are 30 Hz.
-    auxiliary_output_rate_hz: 0.0
     publish_pointcloud: true
     # Stride 4 samples 2.25x as many panorama pixels as stride 6. The ground
-    # node's ROI/cap and voxel filter keep RANSAC and costmap traffic bounded.
+    # node's ROI and bounded RANSAC scoring keep processing cost bounded.
     pointcloud_stride: 4
+    # Sample spacing for 3D depth reprojection. One keeps every aligned 720p
+    # depth pixel; two is the real-time mode evaluated below and leaves the
+    # full-resolution RGB cylindrical warp unchanged.
+    depth_projection_stride: 2
     publisher_best_effort: false
     auxiliary_publisher_best_effort: false
     pointcloud_publisher_best_effort: true
+    # DDS serialization of the ~1.4 MB color image, ~1.9 MB float range image,
+    # and ~0.9 MB point cloud used to run serially in the CUDA worker. Give
+    # each topic one independent publisher thread with a single latest-frame
+    # slot, so no stale backlog can accumulate and reliable QoS is preserved.
+    asynchronous_publish: true
+    # Reuse page-locked CPU staging buffers for the four 720p inputs and the
+    # three panorama outputs. This makes H2D/D2H copies genuinely asynchronous
+    # and avoids allocating pageable staging memory every frame.
+    pinned_memory_io: true
     # Process the newest synchronized RGB-D set as soon as the CUDA worker is
     # free. Zero disables the former 20 Hz cap; the 30 Hz camera inputs become
     # the effective upper bound.
     max_output_rate_hz: 0.0
 
     # Produce each output only while something subscribes to it. The panorama is
-    # about 9 MB per frame and the range image about 12 MB, so an unobserved
+    # about 1.4 MB per frame and the range image about 1.9 MB, so an unobserved
     # output would otherwise cost GPU time, PCIe bandwidth and DDS traffic for
     # nobody. This also makes publish_range_output above free when RViz is not
     # showing it. Set false to restore unconditional publishing.
     publish_only_when_subscribed: true
     # Exposure gain is a slowly varying mean ratio, so it is measured on every
-    # 4th pixel of the 1080p sources instead of on full-resolution masks.
+    # 4th pixel of the 720p sources instead of on full-resolution masks.
     exposure_sample_stride: 4
     # Reliable input readers. A best-effort reader was measured to be much
     # worse here: the middleware discarded most 6 MB colour samples before the
@@ -81,28 +91,29 @@ panorama_stitcher:
     # The 2026-08-06 mount has asymmetric physical camera orientation.
     # front_left is rotated by the wrapper; front_right is physically upright.
     # CameraInfo stays native, so principal-point adjustment is per camera.
-    input_images_rotated_180: true
     left_input_image_rotated_180: true
     right_input_image_rotated_180: false
-    rotate_color_180: false
-    rotate_aligned_depth_180: false
 
-    left_fx: 1375.93896484375
-    left_fy: 1376.0078125
+    # 720p fallback used only until live CameraInfo arrives. Runtime intrinsics
+    # from each active sensor profile replace these values immediately.
+    left_fx: 917.2926432291666
+    left_fy: 917.3385416666666
     # Keep native CameraInfo values here; the node applies the 180-degree
     # principal-point transform exactly once for the wrapper-rotated image.
-    left_cx: 962.9755859375
-    left_cy: 539.9728393554688
-    left_width: 1920
-    left_height: 1080
-    right_fx: 1369.7860107421875
-    right_fy: 1369.6165771484375
-    right_cx: 967.3739013671875
-    right_cy: 566.1657104492188
-    right_width: 1920
-    right_height: 1080
+    left_cx: 641.9837239583333
+    left_cy: 359.9818929036458
+    left_width: 1280
+    left_height: 720
+    right_fx: 913.190673828125
+    right_fy: 913.0777180989583
+    right_cx: 644.9159342447916
+    right_cy: 377.4438069661458
+    right_width: 1280
+    right_height: 720
+    # Replace the fallback intrinsics above with each live 720p sensor profile.
+    use_runtime_camera_info: true
 
-    # Keep only a bounded recent history of four 1080p RGB-D streams. Processing
+    # Keep only a bounded recent history of four 720p RGB-D streams. Processing
     # always takes the newest synchronized set instead of accumulating latency.
     sync_queue_size: 4
     # Reject the worst ~39-40 ms pairs that visibly duplicate moving objects,
@@ -110,52 +121,34 @@ panorama_stitcher:
     # above 20 FPS without hardware synchronization.
     sync_slop_ms: 35.0
 
-    # Keep roughly the native angular sampling for downstream perception.
-    projection_scale: 1.0
-    projection_model: cylindrical
-    # Board 5 center in the remounted rig is 2.974 m forward. Depth-aware color is
-    # still used in the overlap; this plane is the stable fallback projection.
-    color_reference_plane_z_m: 2.97374063
+    # Real-time PyTorch/CUDA profile validated on the vehicle RTX 4060. This
+    # keeps the complete angular field of view while reducing only the angular
+    # pixel density to the current 1254x370 output. Together with
+    # depth_projection_stride=2 it sustained about 20-24 Hz with color, range,
+    # and point-cloud subscribers active. Set 1.0 (and stride 1 above) for the
+    # original full-resolution diagnostic profile.
+    projection_scale: 0.60
+    # Trust measured depth through 10 m, then keep distant RGB stable on a
+    # 20 m reference plane instead of the former 2.974 m indoor-board plane.
+    color_reference_plane_z_m: 20.0
     depth_scale_m: 0.001
     min_depth_m: 0.20
-    max_depth_m: 15.0
-    # Board 2 spans beyond the pure rotation-overlap boundary because of the
-    # 0.06340 m baseline. Five degrees retains its outer columns while keeping
-    # depth reprojection limited to the central band.
-    depth_overlap_margin_deg: 5.0
-    # The RGB renderer remains smooth, but metric range/validity are built by
-    # deprojecting the complete aligned-depth images into the rig frame.
-    full_depth_reprojection: true
+    max_depth_m: 10.0
     use_cuda: true
-    # CUDA safety circuit breaker. Normal frames are about 10 ms; three
-    # consecutive frames above 150 ms or one 500 ms timeout permanently move
-    # this process to the CPU backend without attempting risky CUDA cleanup.
-    cuda_timeout_ms: 500
-    cuda_slow_frame_ms: 150.0
-    cuda_slow_frame_limit: 3
 
     # Always put the cut inside the actual calibrated overlap. Color is kept
     # independent of sparse depth reprojection; fused depth is the next stage.
     auto_seam_center: true
     seam_angle_deg: 0.0
-    # Hard ownership boundary: never average pixels from the two viewpoints.
-    # This preserves close moving objects as two clean camera halves instead
-    # of ghosting or smearing them inside the overlap.
-    seam_feather_px: 0
     # Outside the true binocular overlap, keep the smooth calibrated reference
     # projection. Inside it, reconstruct RGB from aligned depth so objects at
     # different ranges retain their physical width in the common rig frame.
     depth_aware_color: true
-    render_depth_reprojected_color: true
-    depth_color_overlap_only: true
     # A hard switch between depth-reprojected RGB and the reference-plane RGB
     # must not run through the forward obstacle-detection area. Extend the
     # depth-color band eight degrees beyond the binocular overlap on both
     # sides, while still leaving the peripheral view on the stable 2D warp.
     depth_color_band_margin_deg: 8.0
-    # Keep the proven four-stream timestamp queue for stable camera pairing
-    # even though the color renderer does not consume depth geometrically.
-    use_rgbd_synchronization: true
     # The CUDA filters operate before 3D reprojection. Spatial filtering is
     # edge-aware; temporal history is cleared on invalid depth and changes
     # larger than 8 cm are accepted immediately, avoiding stale silhouettes.
@@ -165,33 +158,22 @@ panorama_stitcher:
     cuda_depth_temporal_filter: true
     cuda_depth_temporal_alpha: 0.65
     cuda_depth_temporal_reset_m: 0.08
+    depth_discontinuity_abs_m: 0.08
+    depth_discontinuity_relative: 0.04
     # Do not copy a neighbouring projected RGB sample into a depth hole. Flat
     # surfaces are already covered by the 1 px splat; depth edges use radius 0.
     depth_splat_radius_px: 1
     depth_edge_splat_radius_px: 0
-    projected_hole_radius_px: 0
-    allow_color_fallback: true
-    # Disable the older CPU median/EMA path.
-    depth_temporal_stabilization: false
-    depth_temporal_alpha: 0.35
-    depth_temporal_reset_m: 0.05
-    depth_median_kernel: 3
+    # PyTorch fast path: run the exact radius-zero z-buffer once, then fill
+    # only empty panorama pixels from a 3x3 neighbourhood of non-edge output
+    # samples. This replaces eighteen full-frame scatter passes per camera.
+    # Set false to restore the previous source-space 3x3 splat for comparison.
+    pytorch_output_space_splat: true
+    # Fuse the unchanged 3x3 edge-aware depth-filter tensor graph through the
+    # public PyTorch compiler. Any compilation/runtime failure permanently
+    # falls back to the eager PyTorch implementation inside the same process.
+    torch_compile_filters: true
     occlusion_switch_margin_m: 0.05
-    # Keep camera ownership spatially coherent in the overlap. Picking the
-    # nearest depth independently for every pixel fragments people and other
-    # close objects when the two depth maps disagree at their silhouettes.
-    prefer_seam_camera_when_both_depth_valid: true
-    # Keep one calibration-derived ownership boundary for every frame.
-    # A content-aware boundary was visually smoother than a per-row seam, but
-    # depth/color noise still made the whole boundary wander across a static
-    # object and change its apparent width. A fixed seam is deterministic.
-    content_aware_seam: false
-    seam_color_weight: 1.0
-    seam_depth_weight: 2.0
-    seam_foreground_weight: 0.35
-    seam_center_weight: 0.10
-    seam_temporal_weight: 2.0
-    seam_max_step_px: 6
 
     enable_exposure_compensation: true
     exposure_smoothing: 0.15

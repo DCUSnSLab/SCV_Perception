@@ -123,6 +123,11 @@ endif()
 
 if(BUILD_TESTING)
   ament_add_pytest_test(
+    rgbd_panorama_torch_test
+    test/test_rgbd_panorama_torch.py
+    TIMEOUT 30
+  )
+  ament_add_pytest_test(
     panorama_ground_segmentation_python_test
     test/test_ground_segmentation_python.py
     TIMEOUT 30
