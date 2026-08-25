@@ -14,9 +14,10 @@ rear_ground_segmentation:
     max_ground_tilt_deg: 35.0
 
     # Keep the same geometry policy as the calibrated front panorama. The rear
-    # camera is mounted at the same physical height as the front rig.
+    # camera is mounted at the same physical height as the front rig. Score
+    # hypotheses on 4,000 samples, then validate the winner on all candidates.
     ransac_iterations: 240
-    max_ransac_points: 30000
+    max_ransac_points: 4000
     ransac_distance_threshold_m: 0.05
     min_ground_inliers: 300
     min_ground_inlier_ratio: 0.03
@@ -37,9 +38,16 @@ rear_ground_segmentation:
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0
+    # Keep rear behavior unchanged until the front outdoor filter is validated.
+    obstacle_radius_filter_radius_m: 0.0
+    obstacle_radius_filter_min_neighbors: 0
     # Publish every obstacle point from the source depth cloud, matching the
     # front and ground-cloud output policy.
     obstacle_voxel_size_m: 0.0
+    # Sample the organized 1280x720 cloud on a 4x4 grid before finite-point
+    # filtering/RANSAC. This keeps centimetre-scale spacing at 8 m while
+    # reducing the rear callback from 921,600 to at most 57,600 points.
+    input_stride: 4
     skip_when_unsubscribed: true
     diagnostics_period_sec: 2.0
     random_seed: 84

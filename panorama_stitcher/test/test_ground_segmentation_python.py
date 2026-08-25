@@ -7,9 +7,12 @@ from std_msgs.msg import Header
 
 from panorama_stitcher_py.ground_segmentation import (
     GroundSegmentationConfig,
+    PlaneModel,
     classify_points,
     fit_ground_plane,
     fit_ground_planes,
+    radius_outlier_indices,
+    range_residual_summary,
     voxel_first_indices,
 )
 from panorama_stitcher_py.ground_segmentation_node import (
@@ -22,10 +25,28 @@ def _config() -> GroundSegmentationConfig:
     return GroundSegmentationConfig(
         expected_up=np.array([0.0, -1.0, 0.0]),
         ransac_iterations=80,
+        max_ransac_points=30000,
+        ransac_distance_threshold_m=0.05,
+        max_ground_tilt_deg=25.0,
         min_ground_inliers=40,
         min_ground_inlier_ratio=0.2,
+        secondary_ransac_iterations=60,
+        secondary_min_ground_inlier_ratio=0.20,
+        secondary_min_normal_delta_deg=4.0,
+        secondary_max_plane_distance_from_origin_m=2.5,
+        ground_candidate_min_range_m=0.4,
+        ground_candidate_max_range_m=8.0,
+        ground_candidate_min_down_m=0.15,
+        ground_candidate_max_down_m=2.5,
         min_plane_distance_from_origin_m=0.8,
         max_plane_distance_from_origin_m=1.2,
+        obstacle_min_height_m=0.10,
+        obstacle_max_height_m=2.0,
+        obstacle_min_range_m=0.25,
+        obstacle_max_range_m=8.0,
+        obstacle_radius_filter_radius_m=0.0,
+        obstacle_radius_filter_min_neighbors=0,
+        obstacle_voxel_size_m=0.0,
     ).normalized()
 
 
@@ -144,6 +165,41 @@ def test_voxel_filter_preserves_first_source_point() -> None:
     assert voxel_first_indices(points, 0.1).tolist() == [0, 2]
 
 
+def test_radius_filter_removes_isolated_points() -> None:
+    cluster = np.array([
+        [0.00, 0.00, 2.00],
+        [0.02, 0.00, 2.00],
+        [-0.02, 0.00, 2.00],
+        [0.00, 0.02, 2.00],
+        [0.00, -0.02, 2.00],
+        [0.00, 0.00, 2.02],
+    ])
+    noise = np.array([[1.0, 0.0, 2.0], [1.02, 0.0, 2.0]])
+    points = np.vstack((cluster, noise))
+
+    assert radius_outlier_indices(points, 0.15, 5).tolist() == list(range(6))
+
+
+def test_range_residual_summary_reports_distance_bins() -> None:
+    plane = PlaneModel(
+        normal=np.array([0.0, -1.0, 0.0]),
+        offset=1.0,
+        inliers=4,
+        squared_error=0.0,
+    )
+    points = np.array([
+        [0.0, 1.01, 1.0],
+        [0.0, 0.97, 1.5],
+        [0.0, 1.10, 3.0],
+        [0.0, 0.80, 3.5],
+    ])
+
+    summary = range_residual_summary(points, (plane,), 4.0)
+
+    assert '0-2m:n=2,p50=2.0cm' in summary
+    assert '2-4m:n=2,p50=15.0cm' in summary
+
+
 def test_pointcloud2_xyz_rgb_round_trip() -> None:
     xyz = np.array([
         [1.0, 2.0, 3.0],
@@ -157,3 +213,21 @@ def test_pointcloud2_xyz_rgb_round_trip() -> None:
     assert message.header.frame_id == 'camera'
     assert np.array_equal(actual_xyz, xyz)
     assert np.array_equal(actual_rgb, rgb)
+
+
+def test_organized_cloud_stride_samples_rows_and_columns() -> None:
+    xyz = np.column_stack((
+        np.arange(16, dtype=np.float32),
+        np.zeros(16, dtype=np.float32),
+        np.ones(16, dtype=np.float32),
+    ))
+    rgb = np.arange(16, dtype=np.uint32)
+    message = arrays_to_cloud(Header(frame_id='camera'), xyz, rgb)
+    message.height = 4
+    message.width = 4
+    message.row_step = message.point_step * message.width
+
+    actual_xyz, actual_rgb = cloud_to_arrays(message, input_stride=2)
+
+    assert np.array_equal(actual_xyz[:, 0], [0.0, 2.0, 8.0, 10.0])
+    assert np.array_equal(actual_rgb, [0, 2, 8, 10])

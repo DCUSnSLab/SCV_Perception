@@ -15,11 +15,11 @@ panorama_ground_segmentation:
 
     # Fit only plausible road points and reject vertical walls by normal.
     # With the remounted cameras, this lower ROI raises the observed ground
-    # share of the RANSAC candidates from about 19% to 30%. 240 iterations then
-    # keep robust sampling probability high without increasing the old total
-    # point-plane comparisons (the candidate set is smaller).
+    # share of the RANSAC candidates from about 19% to 30%. 240 hypotheses are
+    # scored against a deterministic 4,000-point sample, then the winner is
+    # validated/refined against every candidate.
     ransac_iterations: 240
-    max_ransac_points: 30000
+    max_ransac_points: 4000
     ransac_distance_threshold_m: 0.05
     min_ground_inliers: 300
     min_ground_inlier_ratio: 0.03
@@ -51,9 +51,14 @@ panorama_ground_segmentation:
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0
+    # Reject isolated/small outdoor depth speckles before obstacle publication.
+    # A point needs five other obstacle returns within 15 cm to survive.
+    obstacle_radius_filter_radius_m: 0.15
+    obstacle_radius_filter_min_neighbors: 5
     # Publish every obstacle point from the source depth cloud, just like the
-    # ground output. The costmap keeps its own 12 cm / 3-neighbour noise filter.
+    # ground output after the radius filter above.
     obstacle_voxel_size_m: 0.0
+    input_stride: 1
     # RANSAC over tens of thousands of points is the bulk of this node's cost.
     # Skip it while neither output cloud has a subscriber.
     skip_when_unsubscribed: true

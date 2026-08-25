@@ -23,6 +23,8 @@ from panorama_stitcher_py.ground_segmentation import (
     GroundSegmentationConfig,
     classify_points,
     fit_ground_planes,
+    radius_outlier_indices,
+    range_residual_summary,
     select_ground_candidates,
     voxel_first_indices,
 )
@@ -38,24 +40,41 @@ XYZRGB_DTYPE = np.dtype([
     ('x', '<f4'), ('y', '<f4'), ('z', '<f4'), ('rgb', '<f4')])
 
 
-def cloud_to_arrays(message: PointCloud2) -> Tuple[np.ndarray, np.ndarray]:
+def cloud_to_arrays(
+    message: PointCloud2,
+    input_stride: int = 1,
+) -> Tuple[np.ndarray, np.ndarray]:
     """Extract finite XYZ and packed RGB arrays without Python point loops."""
     names = {field.name for field in message.fields}
     color_name = 'rgb' if 'rgb' in names else 'rgba' if 'rgba' in names else ''
     requested = ['x', 'y', 'z'] + ([color_name] if color_name else [])
     cloud = point_cloud2.read_points(
-        message, field_names=requested, skip_nans=True)
+        message, field_names=requested, skip_nans=False)
+    stride = max(1, int(input_stride))
+    if stride > 1:
+        if message.height > 1 and len(cloud) == message.width * message.height:
+            cloud = cloud.reshape(message.height, message.width)[
+                ::stride, ::stride].reshape(-1)
+        else:
+            cloud = cloud[::stride]
+    finite = np.isfinite(cloud['x'])
+    finite &= np.isfinite(cloud['y'])
+    finite &= np.isfinite(cloud['z'])
+    if not finite.all():
+        cloud = cloud[finite]
     if len(cloud) == 0:
         return (
-            np.empty((0, 3), dtype=np.float64),
+            np.empty((0, 3), dtype=np.float32),
             np.empty(0, dtype=np.uint32),
         )
-    xyz = np.column_stack((cloud['x'], cloud['y'], cloud['z'])).astype(
-        np.float64, copy=False)
+    xyz = np.empty((len(cloud), 3), dtype=np.float32)
+    xyz[:, 0] = cloud['x']
+    xyz[:, 1] = cloud['y']
+    xyz[:, 2] = cloud['z']
     if color_name:
         color = np.asarray(cloud[color_name])
         if color.dtype.itemsize == 4:
-            rgb = color.view(np.uint32).reshape(-1).copy()
+            rgb = color.view(np.uint32).reshape(-1)
         else:
             rgb = color.astype(np.uint32, copy=False).reshape(-1)
     else:
@@ -79,8 +98,14 @@ class PanoramaGroundSegmentationNode(Node):
     """Fit road surfaces and publish ground-relative obstacle returns."""
 
     def __init__(self) -> None:
-        super().__init__('panorama_ground_segmentation')
-        self._declare_parameters()
+        super().__init__(
+            'panorama_ground_segmentation',
+            automatically_declare_parameters_from_overrides=True,
+        )
+        if not self.has_parameter('input_topic'):
+            raise RuntimeError(
+                'No ground-segmentation parameters loaded; pass the matching '
+                'config/*_ground_segmentation.yaml file')
         self.input_topic = str(self.get_parameter('input_topic').value)
         self.obstacle_topic = str(self.get_parameter('obstacle_topic').value)
         self.ground_topic = str(self.get_parameter('ground_topic').value)
@@ -88,6 +113,8 @@ class PanoramaGroundSegmentationNode(Node):
             self.get_parameter('publish_ground_cloud').value)
         self.skip_when_unsubscribed = bool(
             self.get_parameter('skip_when_unsubscribed').value)
+        self.input_stride = max(
+            1, int(self.get_parameter('input_stride').value))
         self.diagnostics_period_sec = max(
             0.2, float(self.get_parameter('diagnostics_period_sec').value))
         self.config = self._load_config()
@@ -118,43 +145,12 @@ class PanoramaGroundSegmentationNode(Node):
         self.get_logger().info(
             'Python ground segmentation: '
             f'{self.input_topic} -> {self.obstacle_topic}, '
+            f'input_stride={self.input_stride}, '
+            f'obstacle_radius_filter='
+            f'{self.config.obstacle_radius_filter_radius_m:.2f}m/'
+            f'{self.config.obstacle_radius_filter_min_neighbors}, '
             f'expected_up=[{up[0]:.2f} {up[1]:.2f} {up[2]:.2f}], '
             f'tilt<={self.config.max_ground_tilt_deg:.1f} deg')
-
-    def _declare_parameters(self) -> None:
-        defaults = {
-            'input_topic': '/panorama/points',
-            'obstacle_topic': '/panorama/obstacle_points',
-            'ground_topic': '/panorama/ground_points',
-            'publish_ground_cloud': True,
-            'expected_up_vector': [0.0, -1.0, 0.0],
-            'ransac_iterations': 160,
-            'max_ransac_points': 30000,
-            'ransac_distance_threshold_m': 0.05,
-            'max_ground_tilt_deg': 25.0,
-            'min_ground_inliers': 300,
-            'min_ground_inlier_ratio': 0.03,
-            'secondary_ransac_iterations': 60,
-            'secondary_min_ground_inlier_ratio': 0.20,
-            'secondary_min_normal_delta_deg': 4.0,
-            'secondary_max_plane_distance_from_origin_m': 2.5,
-            'ground_candidate_min_range_m': 0.4,
-            'ground_candidate_max_range_m': 8.0,
-            'ground_candidate_min_down_m': 0.15,
-            'ground_candidate_max_down_m': 2.5,
-            'min_plane_distance_from_origin_m': 0.15,
-            'max_plane_distance_from_origin_m': 2.5,
-            'obstacle_min_height_m': 0.10,
-            'obstacle_max_height_m': 2.0,
-            'obstacle_min_range_m': 0.25,
-            'obstacle_max_range_m': 8.0,
-            'obstacle_voxel_size_m': 0.0,
-            'skip_when_unsubscribed': True,
-            'diagnostics_period_sec': 2.0,
-            'random_seed': 42,
-        }
-        for name, value in defaults.items():
-            self.declare_parameter(name, value)
 
     def _load_config(self) -> GroundSegmentationConfig:
         def value(name):
@@ -162,7 +158,7 @@ class PanoramaGroundSegmentationNode(Node):
 
         return GroundSegmentationConfig(
             expected_up=np.asarray(
-                value('expected_up_vector'), dtype=np.float64),
+                value('expected_up_vector'), dtype=np.float32),
             ransac_iterations=int(value('ransac_iterations')),
             max_ransac_points=int(value('max_ransac_points')),
             ransac_distance_threshold_m=float(
@@ -194,6 +190,10 @@ class PanoramaGroundSegmentationNode(Node):
             obstacle_max_height_m=float(value('obstacle_max_height_m')),
             obstacle_min_range_m=float(value('obstacle_min_range_m')),
             obstacle_max_range_m=float(value('obstacle_max_range_m')),
+            obstacle_radius_filter_radius_m=float(
+                value('obstacle_radius_filter_radius_m')),
+            obstacle_radius_filter_min_neighbors=int(
+                value('obstacle_radius_filter_min_neighbors')),
             obstacle_voxel_size_m=float(value('obstacle_voxel_size_m')),
         ).normalized()
 
@@ -214,7 +214,7 @@ class PanoramaGroundSegmentationNode(Node):
         )
 
     def _publish_empty(self, header) -> None:
-        empty_xyz = np.empty((0, 3), dtype=np.float64)
+        empty_xyz = np.empty((0, 3), dtype=np.float32)
         empty_rgb = np.empty(0, dtype=np.uint32)
         self.obstacle_publisher.publish(
             arrays_to_cloud(header, empty_xyz, empty_rgb))
@@ -224,6 +224,7 @@ class PanoramaGroundSegmentationNode(Node):
 
     def _pointcloud_callback(self, message: PointCloud2) -> None:
         started = time.perf_counter()
+        process_cpu_started = time.process_time()
         if self.skip_when_unsubscribed and not self._has_output_subscriber():
             self._idle_frames += 1
             self._diagnostic(
@@ -233,9 +234,14 @@ class PanoramaGroundSegmentationNode(Node):
             )
             return
         try:
-            xyz, rgb = cloud_to_arrays(message)
-            candidate_count = len(select_ground_candidates(xyz, self.config))
-            planes = fit_ground_planes(xyz, self.config, self.rng)
+            xyz, rgb = cloud_to_arrays(message, self.input_stride)
+            converted = time.perf_counter()
+            candidate_indices = select_ground_candidates(xyz, self.config)
+            candidates_selected = time.perf_counter()
+            candidate_count = len(candidate_indices)
+            planes = fit_ground_planes(
+                xyz, self.config, self.rng, candidate_indices)
+            planes_fitted = time.perf_counter()
             if not planes:
                 self._publish_empty(message.header)
                 self._diagnostic(
@@ -247,15 +253,30 @@ class PanoramaGroundSegmentationNode(Node):
 
             obstacle_mask, ground_mask = classify_points(
                 xyz, planes, self.config)
+            classified = time.perf_counter()
             obstacle_xyz = xyz[obstacle_mask]
             obstacle_rgb = rgb[obstacle_mask]
             raw_obstacle_count = len(obstacle_xyz)
-            selected = voxel_first_indices(
-                obstacle_xyz, self.config.obstacle_voxel_size_m)
+            radius_selected = radius_outlier_indices(
+                obstacle_xyz,
+                self.config.obstacle_radius_filter_radius_m,
+                self.config.obstacle_radius_filter_min_neighbors,
+            )
+            obstacle_xyz = obstacle_xyz[radius_selected]
+            obstacle_rgb = obstacle_rgb[radius_selected]
+            radius_filtered_count = len(obstacle_xyz)
+            if self.config.obstacle_voxel_size_m > 0.0:
+                selected = voxel_first_indices(
+                    obstacle_xyz, self.config.obstacle_voxel_size_m)
+                published_obstacle_xyz = obstacle_xyz[selected]
+                published_obstacle_rgb = obstacle_rgb[selected]
+            else:
+                published_obstacle_xyz = obstacle_xyz
+                published_obstacle_rgb = obstacle_rgb
             self.obstacle_publisher.publish(arrays_to_cloud(
                 message.header,
-                obstacle_xyz[selected],
-                obstacle_rgb[selected],
+                published_obstacle_xyz,
+                published_obstacle_rgb,
             ))
             if (
                 self.ground_publisher is not None
@@ -264,9 +285,23 @@ class PanoramaGroundSegmentationNode(Node):
                 self.ground_publisher.publish(arrays_to_cloud(
                     message.header, xyz[ground_mask], rgb[ground_mask]))
 
-            processing_ms = (time.perf_counter() - started) * 1000.0
+            published_obstacle_count = len(published_obstacle_xyz)
             primary = planes[0]
-            ratio = primary.inliers / candidate_count if candidate_count else 0.0
+            ratio = (
+                primary.inliers / candidate_count if candidate_count else 0.0)
+            residual_text = ''
+            if (
+                time.monotonic() - self._last_diagnostic_time
+                >= self.diagnostics_period_sec
+            ):
+                residual_text = range_residual_summary(
+                    xyz[candidate_indices],
+                    planes,
+                    self.config.ground_candidate_max_range_m,
+                )
+            processing_ms = (time.perf_counter() - started) * 1000.0
+            process_cpu_ms = (
+                time.process_time() - process_cpu_started) * 1000.0
             plane_text = '; '.join(
                 f'{model.normal[0]:.4f} {model.normal[1]:.4f} '
                 f'{model.normal[2]:.4f} {model.offset:.4f} '
@@ -277,8 +312,16 @@ class PanoramaGroundSegmentationNode(Node):
                 'info',
                 f'ground_planes={len(planes)} [{plane_text}] input={len(xyz)} '
                 f'candidates={candidate_count} inliers={primary.inliers}'
-                f'({ratio * 100.0:.1f}%) obstacles={raw_obstacle_count}'
-                f'->{len(selected)} processing={processing_ms:.1f} ms',
+                f'({ratio * 100.0:.1f}%) obstacles='
+                f'{raw_obstacle_count}->{radius_filtered_count}'
+                f'->{published_obstacle_count} '
+                f'ground_residual_by_range={residual_text} '
+                f'timing(total/cpu/read/candidate/ransac/classify+publish)='
+                f'{processing_ms:.1f}/{process_cpu_ms:.1f}/'
+                f'{(converted - started) * 1000.0:.1f}/'
+                f'{(candidates_selected - converted) * 1000.0:.1f}/'
+                f'{(planes_fitted - candidates_selected) * 1000.0:.1f}/'
+                f'{(time.perf_counter() - classified) * 1000.0:.1f} ms',
             )
         except Exception as error:  # Keep the sensor pipeline alive per frame.
             self._publish_empty(message.header)
