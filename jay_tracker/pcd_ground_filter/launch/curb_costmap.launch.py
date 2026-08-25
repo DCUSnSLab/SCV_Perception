@@ -1,5 +1,7 @@
 import os
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
@@ -12,6 +14,8 @@ def generate_launch_description():
     costmap_cfg = os.path.join(costmap_pkg, 'config', 'costmap_params.yaml')
 
     return LaunchDescription([
+        # curb_method: 'below_grade'(검증 기본) | 'ring'(링 미분, 2026-08 램프 대응)
+        DeclareLaunchArgument('curb_method', default_value='below_grade'),
         # 1) curb detector: /velodyne_points -> /velodyne_points_curb (+curbs)
         Node(
             package='pcd_ground_filter',
@@ -20,7 +24,8 @@ def generate_launch_description():
             output='screen',
             respawn=True,
             respawn_delay=1.0,
-            parameters=[curb_cfg],
+            parameters=[curb_cfg,
+                        {'method': LaunchConfiguration('curb_method')}],
         ),
         # 2) local costmap consuming the curb-augmented cloud
         Node(

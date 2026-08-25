@@ -323,6 +323,91 @@ def fit_ahead_plane(x, y, z, c_min=-2.0, c_max=-0.3):
     return a, c, True
 
 
+def detect_ring_diff(x, y, z, ring,
+                     jump_min=0.06, jump_max=0.45, slope_min=0.8,
+                     dh_max=0.6, xr_dz=0.08, az_bin_rad=0.02618,
+                     max_range=12.0):
+    """링 미분 연석/낙차 검출 (2026-08-21, 램프 오판 해소).
+
+    기준 평면 없이 국소 미분만 사용 — 경사(램프) 불변:
+      A) 링 내: 방위각-인접 포인트의 |dz| 급변 (연석 단차 시그니처)
+      B) 링 간: 같은 방위각 빈에서 이웃 링의 z 불연속 (링-평행 연석 보완)
+    반환 (ex, ey, eb): 엣지 밑점 좌표 — 기존 벽 합성/기억 계층에 그대로 공급.
+    검증: 8/20 램프 bag 2본에서 전방 오판 중위 0 (below_grade 는 최대 233셀),
+    연석 양성 구간 실선 검출 확인. 세부는 세션 기록 참조."""
+    edges_x, edges_y, edges_z = [], [], []
+    rr = np.sqrt(x * x + y * y)
+    az = np.arctan2(y, x)
+    inr = rr < max_range
+    x, y, z, ring, rr, az = x[inr], y[inr], z[inr], ring[inr], rr[inr], az[inr]
+    # A) 링 내
+    for rg in np.unique(ring):
+        m = ring == rg
+        if m.sum() < 20:
+            continue
+        o = np.argsort(az[m])
+        xs, ys, zs = x[m][o], y[m][o], z[m][o]
+        dz = np.diff(zs)
+        dh = np.hypot(np.diff(xs), np.diff(ys))
+        adz = np.abs(dz)
+        j = np.flatnonzero((adz >= jump_min) & (adz <= jump_max) & (dh < dh_max)
+                           & (adz / np.maximum(dh, 1e-3) >= slope_min))
+        for i in j:
+            k = i if zs[i] < zs[i + 1] else i + 1
+            edges_x.append(xs[k]); edges_y.append(ys[k]); edges_z.append(zs[k])
+    # B) 링 간 (지면 후보 z<0.2 만 — 벽 상부 배제)
+    gm = z < 0.2
+    if gm.sum() > 50:
+        bins = np.floor(az[gm] / az_bin_rad).astype(np.int64)
+        order = np.lexsort((rr[gm], ring[gm], bins))
+        bb = bins[order]; rg2 = ring[gm][order]
+        xx, yy, zz, r2 = x[gm][order], y[gm][order], z[gm][order], rr[gm][order]
+        n = len(bb)
+        i = 0
+        while i < n - 1:
+            j = i + 1
+            while j < n and bb[j] == bb[i]:
+                if rg2[j] != rg2[j - 1]:
+                    dr = r2[j] - r2[j - 1]
+                    dz2 = zz[j] - zz[j - 1]
+                    if 0.0 < dr < 6.0 and (jump_min + 0.02) <= abs(dz2) <= jump_max \
+                            and abs(dz2) / max(dr, 0.3) >= 0.25:
+                        k = j if zz[j] < zz[j - 1] else j - 1
+                        edges_x.append(xx[k]); edges_y.append(yy[k]); edges_z.append(zz[k])
+                j += 1
+            i = j
+    if not edges_x:
+        e = np.zeros(0, dtype=np.float32)
+        return e, e.copy(), e.copy()
+    return (np.asarray(edges_x, np.float32), np.asarray(edges_y, np.float32),
+            np.asarray(edges_z, np.float32))
+
+
+def ring_from_elevation(xyz, bin_deg=0.25):
+    """ring 필드가 없는 클라우드(챔버 ray 플러그인, RTX 라이다)에서 고도각
+    양자화로 링 id 를 복원한다. 레이 센서는 고도각이 이산값이라 정확히 갈린다."""
+    elev = np.degrees(np.arctan2(xyz[:, 2], np.hypot(xyz[:, 0], xyz[:, 1])))
+    q = np.round(elev / bin_deg).astype(np.int32)
+    _, ring = np.unique(q, return_inverse=True)
+    return ring.astype(np.int32)
+
+
+def pointcloud2_to_xyzr(msg: PointCloud2):
+    """x,y,z,ring — ring 필드 부재 시 고도각 역산 폴백."""
+    names = [f.name for f in msg.fields]
+    if 'ring' not in names:
+        xyz = pointcloud2_to_xyz(msg)
+        if xyz.shape[0] == 0:
+            return xyz, np.zeros(0, dtype=np.int32)
+        return xyz, ring_from_elevation(xyz)
+    s = point_cloud2.read_points(msg, field_names=('x', 'y', 'z', 'ring'), skip_nans=True)
+    if s.size == 0:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.int32)
+    out = np.empty((s.shape[0], 3), dtype=np.float32)
+    out[:, 0] = s['x']; out[:, 1] = s['y']; out[:, 2] = s['z']
+    return out, s['ring'].astype(np.int32)
+
+
 def pointcloud2_to_xyz(msg: PointCloud2):
     s = point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)
     if s.size == 0:
@@ -391,7 +476,12 @@ class CurbDetectionNode(Node):
         # detector: 'below_grade' (validated default: masks the whole road
         # region below the sidewalk plane), 'grid' (2.5D height-gradient
         # edges) or 'radial' (per-ray walk)
+        # 'ring': 링 미분 (2026-08-21 — 램프/경사 불변, 챔버·필드 검증 중)
         self.declare_parameter('method', 'below_grade')
+        self.declare_parameter('ring_jump_min', 0.06)
+        self.declare_parameter('ring_jump_max', 0.45)
+        self.declare_parameter('ring_slope_min', 0.8)
+        self.declare_parameter('ring_dh_max', 0.6)
         self.declare_parameter('grid_cell', 0.30)         # grid cell size (m)
         self.declare_parameter('grid_min_pts', 1)         # min returns per cell
 
@@ -417,6 +507,11 @@ class CurbDetectionNode(Node):
         self.declare_parameter('max_gap', 1.0)            # occlusion gap for drop-offs
 
         self.declare_parameter('num_angular_bins', 720)
+        # 차체 셀프 포인트 제외 박스 (센서 프레임; 후방 구조물이 costmap
+        # lethal 로 들어가 TURNAROUND 판정을 상시 오염시키는 문제의 수정 — 8/25)
+        self.declare_parameter('self_box_x_min', -1.1)
+        self.declare_parameter('self_box_x_max', 0.35)
+        self.declare_parameter('self_box_y_half', 0.55)
         self.declare_parameter('min_range', 1.0)
         self.declare_parameter('max_range', 15.0)
 
@@ -441,6 +536,10 @@ class CurbDetectionNode(Node):
 
         gp = self.get_parameter
         self.method = str(gp('method').value)
+        self.ring_jump_min = float(gp('ring_jump_min').value)
+        self.ring_jump_max = float(gp('ring_jump_max').value)
+        self.ring_slope_min = float(gp('ring_slope_min').value)
+        self.ring_dh_max = float(gp('ring_dh_max').value)
         self.grid_cell = float(gp('grid_cell').value)
         self.grid_min_pts = int(gp('grid_min_pts').value)
         self.drop_min = float(gp('drop_min').value)
@@ -465,6 +564,9 @@ class CurbDetectionNode(Node):
         self.min_dr = float(gp('min_dr').value)
         self.max_gap = float(gp('max_gap').value)
         self.num_bins = int(gp('num_angular_bins').value)
+        self.self_box_x_min = float(gp('self_box_x_min').value)
+        self.self_box_x_max = float(gp('self_box_x_max').value)
+        self.self_box_y_half = float(gp('self_box_y_half').value)
         self.min_range = float(gp('min_range').value)
         self.max_range = float(gp('max_range').value)
         self.wall_offsets = [float(v) for v in gp('wall_offsets').value]
@@ -564,14 +666,32 @@ class CurbDetectionNode(Node):
 
     def cb(self, msg: PointCloud2):
         t0 = time.perf_counter()
-        xyz = pointcloud2_to_xyz(msg)
+        ringf = None
+        if self.method == 'ring':
+            xyz, ring_arr = pointcloud2_to_xyzr(msg)
+        else:
+            xyz = pointcloud2_to_xyz(msg)
+            ring_arr = None
         if xyz.shape[0] == 0:
             return
+
+        # 차체 셀프 포인트 제거 — 이후 모든 경로(검출/통과/증강 출력)에 적용
+        keep = ~((xyz[:, 0] > self.self_box_x_min) &
+                 (xyz[:, 0] < self.self_box_x_max) &
+                 (np.abs(xyz[:, 1]) < self.self_box_y_half))
+        if not keep.all():
+            xyz = xyz[keep]
+            if ring_arr is not None:
+                ring_arr = ring_arr[keep]
+            if xyz.shape[0] == 0:
+                return
 
         x = xyz[:, 0]; y = xyz[:, 1]; z = xyz[:, 2]
         r = np.sqrt(x * x + y * y)
         m = (r > self.min_range) & (r < self.max_range)
         xf, yf, zf, rf = x[m], y[m], z[m], r[m]
+        if ring_arr is not None:
+            ringf = ring_arr[m]
         if xf.shape[0] == 0:
             self._publish_passthrough(xyz, msg)
             return
@@ -617,6 +737,12 @@ class CurbDetectionNode(Node):
             # anchor walls on the SIDEWALK plane (not the lower road ground)
             # so they stay inside the costmap's odom-frame [0.15, 2.0] band
             eb = self.plane_a * ex + self.plane_c
+        elif self.method == 'ring':
+            ex, ey, eb = detect_ring_diff(
+                xf, yf, zf, ringf,
+                self.ring_jump_min, self.ring_jump_max,
+                self.ring_slope_min, self.ring_dh_max,
+                max_range=self.max_mark_range)
         elif self.method == 'grid':
             ex, ey, eb = detect_curb_grid(
                 xf, yf, zf, self.max_range, self.grid_cell,
