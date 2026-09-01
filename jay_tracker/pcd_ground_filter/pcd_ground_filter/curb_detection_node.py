@@ -1,0 +1,805 @@
+#!/usr/bin/env python3
+"""Curb / negative-obstacle detection for sidewalk autonomy.
+
+Motivation
+----------
+The existing ``ground_removal_node`` (and ``local_costmap``) intentionally treat
+low curbs as ground and drop everything below ~0.15 m, so the boundary between a
+sidewalk and the lower asphalt road never appears in the costmap.  When a planner
+avoids an obstacle it can therefore steer across the curb onto the road, where the
+15-25 cm drop can high-center or roll the vehicle and traps it off the sidewalk.
+
+This node reconstructs that boundary.  For every angular bin of the LiDAR it walks
+outward along the ground and flags radial locations where the ground elevation
+steps up or down by a *curb-sized* amount ([curb_min_h, curb_max_h]) over a short
+radial span -- i.e. a curb edge or a drop-off (negative obstacle).  At each flagged
+edge it synthesises a short vertical "wall" of points, raised into the obstacle
+height band, and republishes them merged with the original cloud.  Point
+``local_costmap``'s ``point_cloud_topic`` at the output topic and the curb becomes a
+lethal obstacle -- no C++ change required.
+
+Only geometry is used, so it works at night (unlike the camera).
+"""
+
+import array
+import math
+import time
+
+import numpy as np
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs_py import point_cloud2
+from std_msgs.msg import Header
+
+from numba import njit
+
+
+# ==============================================================================
+# Core detector (Numba-accelerated).  Runs in the sensor frame.
+# ==============================================================================
+@njit(cache=True, fastmath=True)
+def detect_curb_edges(x, y, z, r, bin_indices, num_bins,
+                      ground_ref_z, z_band,
+                      curb_min_h, curb_max_h,
+                      max_step_dr, min_dr, max_gap):
+    """Return (ex, ey, ebase_z): x/y of curb edges and the ground z to base a
+    wall on.  Within each angular bin the near-ground returns are walked
+    outward; an edge is a step in ground elevation of magnitude in
+    [curb_min_h, curb_max_h] over a short radial span (or a comparable drop
+    across an occlusion gap = drop-off).
+
+    A single-ring elevation blip (up then immediately back down) is NOT a curb,
+    so a candidate step is confirmed only if the new ground level *persists*
+    into the next return.  This rejects the concentric ring artifacts that a
+    naive radial walk produces on slightly uneven ground.  Points far from
+    ground level are ignored so canopy / signboards do not create phantoms."""
+    n = len(x)
+    ex = np.empty(n, np.float32)
+    ey = np.empty(n, np.float32)
+    ebase = np.empty(n, np.float32)
+    cnt = 0
+
+    lo = ground_ref_z - z_band
+    hi = ground_ref_z + z_band
+
+    for b in range(num_bins):
+        idxs = np.where(bin_indices == b)[0]
+        if len(idxs) < 3:
+            continue
+        ray = idxs[np.argsort(r[idxs])]
+
+        # compact the in-band (near-ground) returns, already sorted by range
+        mb = 0
+        for k in range(len(ray)):
+            zc = z[ray[k]]
+            if zc >= lo and zc <= hi:
+                mb += 1
+        if mb < 3:
+            continue
+        rr = np.empty(mb, np.float32)
+        zz = np.empty(mb, np.float32)
+        xx = np.empty(mb, np.float32)
+        yy = np.empty(mb, np.float32)
+        j = 0
+        for k in range(len(ray)):
+            ii = ray[k]
+            zc = z[ii]
+            if zc >= lo and zc <= hi:
+                rr[j] = r[ii]; zz[j] = zc; xx[j] = x[ii]; yy[j] = y[ii]; j += 1
+
+        for k in range(1, mb):
+            dr = rr[k] - rr[k - 1]
+            if dr < min_dr:
+                continue
+            dz = zz[k] - zz[k - 1]
+            adz = dz if dz >= 0.0 else -dz
+
+            if dr > max_gap:
+                # occlusion gap; a lower continuation implies a drop-off edge
+                if dz <= -curb_min_h and dz >= -curb_max_h:
+                    ex[cnt] = 0.5 * (xx[k - 1] + xx[k])
+                    ey[cnt] = 0.5 * (yy[k - 1] + yy[k])
+                    ebase[cnt] = zz[k - 1]
+                    cnt += 1
+                continue
+
+            is_curb = (adz >= curb_min_h and adz <= curb_max_h and dr <= max_step_dr)
+            is_cliff = (dz < 0.0 and -dz > curb_max_h and dr <= max_step_dr)
+            if not (is_curb or is_cliff):
+                continue
+
+            # persistence: the new level must not immediately revert (ring blip)
+            persist = True
+            if k + 1 < mb:
+                dz2 = zz[k + 1] - zz[k]
+                # opposite-sign curb-sized step back = blip -> reject
+                if (dz2 * dz) < 0.0 and (dz2 if dz2 >= 0.0 else -dz2) >= curb_min_h:
+                    persist = False
+            if not persist:
+                continue
+
+            ex[cnt] = 0.5 * (xx[k - 1] + xx[k])
+            ey[cnt] = 0.5 * (yy[k - 1] + yy[k])
+            ebase[cnt] = zz[k - 1] if zz[k - 1] > zz[k] else zz[k]
+            cnt += 1
+
+    return ex[:cnt], ey[:cnt], ebase[:cnt]
+
+
+@njit(cache=True, fastmath=True)
+def detect_curb_grid(x, y, z, half_size, cell,
+                     ground_ref_z, z_band,
+                     curb_min_h, curb_max_h, min_pts_cell):
+    """2.5D grid height-gradient curb detector (Cartesian, sensor frame).
+
+    Builds a ground-height grid (low-z per cell) over a square window, then
+    flags a cell as a curb where the horizontal height step to a neighbour is
+    curb-sized ([curb_min_h, curb_max_h]).  Because it operates on the
+    reconstructed ground surface rather than a per-ray radial walk, it does not
+    produce the ego-centred ring arcs the radial method suffers from, and real
+    curbs come out as continuous lines.  Returns (ex, ey, ebase_z)."""
+    n = len(x)
+    ncell = int((2.0 * half_size) / cell) + 1
+    INF = np.float32(1e9)
+    gmin = np.full((ncell, ncell), INF, np.float32)
+    cnt = np.zeros((ncell, ncell), np.int32)
+
+    lo = ground_ref_z - z_band
+    hi = ground_ref_z + z_band
+
+    for i in range(n):
+        zc = z[i]
+        if zc < lo or zc > hi:
+            continue
+        gx = int((x[i] + half_size) / cell)
+        gy = int((y[i] + half_size) / cell)
+        if gx < 0 or gx >= ncell or gy < 0 or gy >= ncell:
+            continue
+        cnt[gx, gy] += 1
+        if zc < gmin[gx, gy]:
+            gmin[gx, gy] = zc
+
+    # 4-neighbour height gradient
+    max_out = ncell * ncell
+    ex = np.empty(max_out, np.float32)
+    ey = np.empty(max_out, np.float32)
+    eb = np.empty(max_out, np.float32)
+    k = 0
+    for gx in range(1, ncell - 1):
+        for gy in range(1, ncell - 1):
+            if cnt[gx, gy] < min_pts_cell:
+                continue
+            g0 = gmin[gx, gy]
+            best = np.float32(0.0)
+            bhi = g0
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    if dx == 0 and dy == 0:
+                        continue
+                    if cnt[gx + dx, gy + dy] < min_pts_cell:
+                        continue
+                    gn = gmin[gx + dx, gy + dy]
+                    d = g0 - gn
+                    if d < 0.0:
+                        d = -d
+                    if d > best:
+                        best = d
+                        bhi = g0 if g0 > gn else gn
+            if best >= curb_min_h and best <= curb_max_h:
+                ex[k] = (gx + 0.5) * cell - half_size
+                ey[k] = (gy + 0.5) * cell - half_size
+                eb[k] = bhi
+                k += 1
+    return ex[:k], ey[:k], eb[:k]
+
+
+@njit(cache=True, fastmath=True)
+def below_grade_detect(x, y, z, half_size, cell,
+                       plane_a, plane_c, z_band,
+                       drop_min, raise_min, raise_max,
+                       min_pts_cell, max_mark_range):
+    """Below-grade region masking — the validated primary detector.
+
+    The sparse-edge approaches fail here because the LiDAR rings run nearly
+    parallel to the curb, so a single frame yields only a handful of edge
+    crossings.  Instead we flag the entire region whose ground level is a
+    curb-drop BELOW the sidewalk plane the robot is on (the road: a large,
+    continuous, densely-sampled surface ~20 cm down), plus cells slightly
+    RAISED above the plane (kerb tops / islands below the costmap's 0.15 m
+    positive threshold).  The flagged region's boundary IS the curb line.
+
+    The sidewalk plane z = plane_a*x + plane_c is fitted on the strip dead
+    ahead and absorbs sensor pitch and walkway grade.
+    Returns (ex, ey): flagged cell centres."""
+    n = len(x)
+    ncell = int((2.0 * half_size) / cell) + 1
+    INF = np.float32(1e9)
+    gmin = np.full((ncell, ncell), INF, np.float32)
+    cnt = np.zeros((ncell, ncell), np.int32)
+
+    for i in range(n):
+        xi = x[i]
+        exp_z = plane_a * xi + plane_c
+        zc = z[i]
+        if zc < exp_z - z_band or zc > exp_z + z_band:
+            continue
+        gx = int((xi + half_size) / cell)
+        gy = int((y[i] + half_size) / cell)
+        if gx < 0 or gx >= ncell or gy < 0 or gy >= ncell:
+            continue
+        cnt[gx, gy] += 1
+        if zc < gmin[gx, gy]:
+            gmin[gx, gy] = zc
+
+    ex = np.empty(ncell * ncell, np.float32)
+    ey = np.empty(ncell * ncell, np.float32)
+    k = 0
+    for gx in range(ncell):
+        for gy in range(ncell):
+            if cnt[gx, gy] < min_pts_cell:
+                continue
+            cx = (gx + 0.5) * cell - half_size
+            cy = (gy + 0.5) * cell - half_size
+            if cx * cx + cy * cy > max_mark_range * max_mark_range:
+                continue
+            exp_z = plane_a * cx + plane_c
+            dev = gmin[gx, gy] - exp_z          # <0: below the sidewalk plane
+            if dev <= -drop_min:
+                ex[k] = cx; ey[k] = cy; k += 1
+            elif dev >= raise_min and dev <= raise_max:
+                ex[k] = cx; ey[k] = cy; k += 1
+    return ex[:k], ey[:k]
+
+
+def shadow_edge_cells(x, y, z, plane_a, plane_c, z_band, drop_min,
+                      max_mark_range, num_bins=720, min_gap=0.45, max_gap_w=2.5):
+    """연석 '그늘' 경계 마킹 — 낙차 직전 마지막 보도 반환점에 벽을 세운다.
+
+    below_grade 는 도로가 **보이는** 곳만 마킹한다. 그런데 연석면이 낮은
+    빔을 가려 도로의 첫 ~1.3 m 는 무데이터 그늘이고, 물리 연석선은 그
+    그늘의 '이쪽' 끝에 있다 — 즉 마킹된 도로 경계는 물리 낙차보다 1 m 이상
+    바깥이다(2026-08-02 챔버 실측: 연석 0.75 m 옆에서 costmap 벽은 2.1 m).
+    그 사이 띠를 모두가 자유공간으로 취급해 근접 기동이 모서리를 밟았다.
+
+    방식: 방위각 빈마다 반환을 거리순으로 훑어, [보도면 높이] → (min_gap
+    이상의 간격) → [도로 높이] 전이가 확인되면 간격 **직전의 보도 반환점**을
+    마킹한다. 레이 단위 논리라 격자 연결성 기반 팽창처럼 데이터 구멍으로
+    새지 않는다(격자판은 보도 위 유령 벽을 만들었다 — 단위검증 실측).
+    보행자·기둥 가림은 지면이 같은 높이로 이어지므로 전이가 성립하지 않고,
+    도로 확인 없는 간격(순수 무데이터)은 마킹하지 않는다."""
+    zrel = z - (plane_a * x + plane_c)
+    r = np.sqrt(x * x + y * y)
+    keep = r <= max_mark_range
+    is_plane = keep & (np.abs(zrel) <= drop_min)
+    is_road = keep & (zrel <= -drop_min) & (zrel >= -z_band)
+    sel = is_plane | is_road
+    if not sel.any():
+        return (np.empty(0, np.float32), np.empty(0, np.float32))
+    xs, ys, rs = x[sel], y[sel], r[sel]
+    road_f = is_road[sel]
+    theta = np.arctan2(ys, xs)
+    b = np.clip(((theta + math.pi) / (2.0 * math.pi) * num_bins).astype(np.int64),
+                0, num_bins - 1)
+    order = np.lexsort((rs, b))
+    bs, rss = b[order], rs[order]
+    rf = road_f[order]
+    same = bs[1:] == bs[:-1]
+    dgap = rss[1:] - rss[:-1]
+    # 간격 상한: 진짜 연석 그늘은 연석 높이×기하로 폭이 유한하다(~1.3 m).
+    # 상한 없이 두면 희소 샘플 구간의 과대 간격이 보도 안쪽에 유령 마크를
+    # 남긴다(단위검증 실측: 경계에서 0.6 m 안쪽까지). 상한을 넘는 간격은
+    # '관측 공백'이지 낙차 증거가 아니다.
+    gap = (dgap >= min_gap) & (dgap <= max_gap_w)
+    hit = same & gap & (~rf[:-1]) & rf[1:]     # 보도 → (간격) → 도로
+    src = order[:-1][hit]
+    return xs[src].astype(np.float32), ys[src].astype(np.float32)
+
+
+def fit_ahead_plane(x, y, z, c_min=-2.0, c_max=-0.3):
+    """Fit z = a*x + c on the narrow strip the robot is driving on.
+
+    Robustness (validated against calibration bags with a car parked 5 m
+    ahead): an object inside the strip dominates mid percentiles and hijacks
+    the fit, so we anchor on the LOWEST surface (5th percentile band — the
+    ground is always below whatever stands on it) and then require the fitted
+    height to be physically plausible for the sensor mount ([c_min, c_max]).
+    Returns (a, c, ok) — ok=False when the strip is obstructed / implausible
+    and the fit must not be trusted (caller keeps the previous EMA plane)."""
+    m = (x > 1.0) & (x < 6.0) & (np.abs(y) < 0.8) & (np.abs(z) < 3.0)
+    if m.sum() < 30:
+        return 0.0, -0.9, False
+    xs = x[m]; zs = z[m]
+    z0 = np.percentile(zs, 5)
+    mm = np.abs(zs - z0) < 0.15
+    if mm.sum() >= 20:
+        xs, zs = xs[mm], zs[mm]
+    A = np.stack([xs, np.ones_like(xs)], axis=1)
+    sol, *_ = np.linalg.lstsq(A, zs, rcond=None)
+    a, c = float(sol[0]), float(sol[1])
+    if not (c_min <= c <= c_max) or abs(a) > 0.15:
+        return a, c, False
+    return a, c, True
+
+
+def detect_ring_diff(x, y, z, ring,
+                     jump_min=0.06, jump_max=0.45, slope_min=0.8,
+                     dh_max=0.6, xr_dz=0.08, az_bin_rad=0.02618,
+                     max_range=12.0):
+    """링 미분 연석/낙차 검출 (2026-08-21, 램프 오판 해소).
+
+    기준 평면 없이 국소 미분만 사용 — 경사(램프) 불변:
+      A) 링 내: 방위각-인접 포인트의 |dz| 급변 (연석 단차 시그니처)
+      B) 링 간: 같은 방위각 빈에서 이웃 링의 z 불연속 (링-평행 연석 보완)
+    반환 (ex, ey, eb): 엣지 밑점 좌표 — 기존 벽 합성/기억 계층에 그대로 공급.
+    검증: 8/20 램프 bag 2본에서 전방 오판 중위 0 (below_grade 는 최대 233셀),
+    연석 양성 구간 실선 검출 확인. 세부는 세션 기록 참조."""
+    edges_x, edges_y, edges_z = [], [], []
+    rr = np.sqrt(x * x + y * y)
+    az = np.arctan2(y, x)
+    inr = rr < max_range
+    x, y, z, ring, rr, az = x[inr], y[inr], z[inr], ring[inr], rr[inr], az[inr]
+    # A) 링 내
+    for rg in np.unique(ring):
+        m = ring == rg
+        if m.sum() < 20:
+            continue
+        o = np.argsort(az[m])
+        xs, ys, zs = x[m][o], y[m][o], z[m][o]
+        dz = np.diff(zs)
+        dh = np.hypot(np.diff(xs), np.diff(ys))
+        adz = np.abs(dz)
+        j = np.flatnonzero((adz >= jump_min) & (adz <= jump_max) & (dh < dh_max)
+                           & (adz / np.maximum(dh, 1e-3) >= slope_min))
+        for i in j:
+            k = i if zs[i] < zs[i + 1] else i + 1
+            edges_x.append(xs[k]); edges_y.append(ys[k]); edges_z.append(zs[k])
+    # B) 링 간 (지면 후보 z<0.2 만 — 벽 상부 배제)
+    gm = z < 0.2
+    if gm.sum() > 50:
+        bins = np.floor(az[gm] / az_bin_rad).astype(np.int64)
+        order = np.lexsort((rr[gm], ring[gm], bins))
+        bb = bins[order]; rg2 = ring[gm][order]
+        xx, yy, zz, r2 = x[gm][order], y[gm][order], z[gm][order], rr[gm][order]
+        n = len(bb)
+        i = 0
+        while i < n - 1:
+            j = i + 1
+            while j < n and bb[j] == bb[i]:
+                if rg2[j] != rg2[j - 1]:
+                    dr = r2[j] - r2[j - 1]
+                    dz2 = zz[j] - zz[j - 1]
+                    if 0.0 < dr < 6.0 and (jump_min + 0.02) <= abs(dz2) <= jump_max \
+                            and abs(dz2) / max(dr, 0.3) >= 0.25:
+                        k = j if zz[j] < zz[j - 1] else j - 1
+                        edges_x.append(xx[k]); edges_y.append(yy[k]); edges_z.append(zz[k])
+                j += 1
+            i = j
+    if not edges_x:
+        e = np.zeros(0, dtype=np.float32)
+        return e, e.copy(), e.copy()
+    return (np.asarray(edges_x, np.float32), np.asarray(edges_y, np.float32),
+            np.asarray(edges_z, np.float32))
+
+
+def ring_from_elevation(xyz, bin_deg=0.25):
+    """ring 필드가 없는 클라우드(챔버 ray 플러그인, RTX 라이다)에서 고도각
+    양자화로 링 id 를 복원한다. 레이 센서는 고도각이 이산값이라 정확히 갈린다."""
+    elev = np.degrees(np.arctan2(xyz[:, 2], np.hypot(xyz[:, 0], xyz[:, 1])))
+    q = np.round(elev / bin_deg).astype(np.int32)
+    _, ring = np.unique(q, return_inverse=True)
+    return ring.astype(np.int32)
+
+
+def pointcloud2_to_xyzr(msg: PointCloud2):
+    """x,y,z,ring — ring 필드 부재 시 고도각 역산 폴백."""
+    names = [f.name for f in msg.fields]
+    if 'ring' not in names:
+        xyz = pointcloud2_to_xyz(msg)
+        if xyz.shape[0] == 0:
+            return xyz, np.zeros(0, dtype=np.int32)
+        return xyz, ring_from_elevation(xyz)
+    s = point_cloud2.read_points(msg, field_names=('x', 'y', 'z', 'ring'), skip_nans=True)
+    if s.size == 0:
+        return np.zeros((0, 3), dtype=np.float32), np.zeros(0, dtype=np.int32)
+    out = np.empty((s.shape[0], 3), dtype=np.float32)
+    out[:, 0] = s['x']; out[:, 1] = s['y']; out[:, 2] = s['z']
+    return out, s['ring'].astype(np.int32)
+
+
+def pointcloud2_to_xyz(msg: PointCloud2):
+    s = point_cloud2.read_points(msg, field_names=('x', 'y', 'z'), skip_nans=True)
+    if s.size == 0:
+        return np.zeros((0, 3), dtype=np.float32)
+    out = np.empty((s.shape[0], 3), dtype=np.float32)
+    out[:, 0] = s['x']; out[:, 1] = s['y']; out[:, 2] = s['z']
+    return out
+
+
+def xyzi_to_pointcloud2(pts, frame_id, stamp):
+    pts = np.ascontiguousarray(pts, dtype=np.float32)
+    fields = [
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+        PointField(name='intensity', offset=12, datatype=PointField.FLOAT32, count=1),
+    ]
+    m = PointCloud2()
+    m.header = Header(stamp=stamp, frame_id=frame_id)
+    m.height = 1
+    m.width = int(pts.shape[0])
+    m.fields = fields
+    m.is_bigendian = False
+    m.point_step = 16
+    m.row_step = m.point_step * m.width
+    m.is_dense = True
+    # 주의 1: `m.data = bytes` 는 rclpy 생성 setter 의 __debug__ 검증 루프가
+    # 350만 원소를 파이썬으로 훑어 56k 점 기준 72 ms 를 먹는다(실측 — 노드
+    # 92 ms 의 대부분). 주의 2: numpy uint8 뷰를 _data 에 직접 넣는 우회는
+    # serialize_message(파이썬 경로)는 통과하지만 **실제 발행의 rmw C 변환이
+    # 시퀀스 헤더를 잘못 써서 구독측 역직렬화가 "sequence size exceeds
+    # buffer" 로 죽는다**(실측). 그래서 setter 가 만들었을 것과 동일한
+    # 타입(array.array('B'))을 memcpy 로 직접 만든다 — 검증 루프만 생략,
+    # 와이어 포맷 완전 동일.
+    buf = array.array('B')
+    buf.frombytes(pts.tobytes())
+    m._data = buf
+    return m
+
+
+def build_curb_walls(ex, ey, ebase, offsets, intensity):
+    """Turn each edge into a short vertical stack of points raised into the
+    obstacle height band, so the height-filtering costmap marks it lethal."""
+    if ex.shape[0] == 0:
+        return np.zeros((0, 4), dtype=np.float32)
+    k = len(offsets)
+    n = ex.shape[0]
+    out = np.empty((n * k, 4), dtype=np.float32)
+    for j, off in enumerate(offsets):
+        s = slice(j * n, (j + 1) * n)
+        out[s, 0] = ex
+        out[s, 1] = ey
+        out[s, 2] = ebase + off
+        out[s, 3] = intensity
+    return out
+
+
+class CurbDetectionNode(Node):
+    def __init__(self):
+        super().__init__('curb_detection_node')
+
+        self.declare_parameter('input_topic', '/velodyne_points')
+        self.declare_parameter('output_topic', '/velodyne_points_curb')
+        self.declare_parameter('curb_topic', '/curb_points')  # debug-only cloud
+
+        # detector: 'below_grade' (validated default: masks the whole road
+        # region below the sidewalk plane), 'grid' (2.5D height-gradient
+        # edges) or 'radial' (per-ray walk)
+        # 'ring': 링 미분 (2026-08-21 — 램프/경사 불변, 챔버·필드 검증 중)
+        self.declare_parameter('method', 'below_grade')
+        self.declare_parameter('ring_jump_min', 0.06)
+        self.declare_parameter('ring_jump_max', 0.45)
+        self.declare_parameter('ring_slope_min', 0.8)
+        self.declare_parameter('ring_dh_max', 0.6)
+        self.declare_parameter('grid_cell', 0.30)         # grid cell size (m)
+        self.declare_parameter('grid_min_pts', 1)         # min returns per cell
+
+        # below_grade params (relative to the fitted sidewalk plane)
+        self.declare_parameter('drop_min', 0.10)      # below-plane => road
+        self.declare_parameter('raise_min', 0.08)     # raised kerb band lower
+        self.declare_parameter('raise_max', 0.45)     # raised kerb band upper
+        self.declare_parameter('plane_z_band', 0.8)   # ground band around plane
+        self.declare_parameter('max_mark_range', 12.0)
+        self.declare_parameter('plane_ema_alpha', 0.3)   # temporal smoothing
+        self.declare_parameter('plane_max_jump', 0.25)   # reject fits deviating more
+        self.declare_parameter('plane_c_min', -2.0)      # plausible ground height range
+        self.declare_parameter('plane_c_max', -0.3)      #   (sensor is c above ground)
+
+        # sensor height: ground sits near this z in the sensor frame
+        self.declare_parameter('ground_ref_z', -1.5)
+        self.declare_parameter('ground_z_band', 0.6)
+
+        self.declare_parameter('curb_min_height', 0.10)   # ignore < 10 cm (ground noise/ring)
+        self.declare_parameter('curb_max_height', 0.5)    # taller -> wall, not curb
+        self.declare_parameter('max_step_dr', 0.35)       # step must be radially abrupt (real curb face); rejects far ring-gap arcs
+        self.declare_parameter('min_dr', 0.04)
+        self.declare_parameter('max_gap', 1.0)            # occlusion gap for drop-offs
+
+        self.declare_parameter('num_angular_bins', 720)
+        # 차체 셀프 포인트 제외 박스 (센서 프레임; 후방 구조물이 costmap
+        # lethal 로 들어가 TURNAROUND 판정을 상시 오염시키는 문제의 수정 — 8/25)
+        self.declare_parameter('self_box_x_min', -1.1)
+        self.declare_parameter('self_box_x_max', 0.35)
+        self.declare_parameter('self_box_y_half', 0.55)
+        self.declare_parameter('min_range', 1.0)
+        self.declare_parameter('max_range', 15.0)
+
+        # vertical stack of synthetic wall points, metres above local ground
+        self.declare_parameter('wall_offsets', [0.20, 0.35, 0.50])
+        self.declare_parameter('wall_intensity', 250.0)
+        self.declare_parameter('merge_original', True)    # republish raw + curbs
+
+        # 연석 벽 기억 (odom 프레임 persistence).
+        # 라이다 최소거리(~0.5 m)와 차체 자체 가림 때문에 로봇 '바로 옆'의
+        # 연석은 현재 스캔에 안 잡힌다 — 접근하는 순간 벽이 사라져 costmap 이
+        # 비고, 근접 기동(K-turn 후진·급선회)이 연석 모서리를 밟는다(2026-08-02
+        # 챔버 D1 좌초 실측). 몇 초 전 그 자리에서 검출된 벽을 odom 기준으로
+        # 유지해 사각을 과거 관측으로 메운다. odom 을 쓰는 이유: map 은 앵커
+        # 스냅으로 점프하지만 odom 은 연속이라 수 초 스케일에서 강체다.
+        self.declare_parameter('curb_memory', True)
+        self.declare_parameter('shadow_edge', True)   # 그늘 경계(물리 연석선) 벽
+        self.declare_parameter('curb_memory_ttl', 15.0)     # s, 이보다 오래되면 잊음
+        self.declare_parameter('curb_memory_radius', 8.0)   # m, 로봇에서 이보다 멀면 잊음
+        self.declare_parameter('curb_memory_cell', 0.15)    # m, 중복 제거 격자
+        self.declare_parameter('odom_frame', 'odom')
+
+        gp = self.get_parameter
+        self.method = str(gp('method').value)
+        self.ring_jump_min = float(gp('ring_jump_min').value)
+        self.ring_jump_max = float(gp('ring_jump_max').value)
+        self.ring_slope_min = float(gp('ring_slope_min').value)
+        self.ring_dh_max = float(gp('ring_dh_max').value)
+        self.grid_cell = float(gp('grid_cell').value)
+        self.grid_min_pts = int(gp('grid_min_pts').value)
+        self.drop_min = float(gp('drop_min').value)
+        self.raise_min = float(gp('raise_min').value)
+        self.raise_max = float(gp('raise_max').value)
+        self.plane_z_band = float(gp('plane_z_band').value)
+        self.max_mark_range = float(gp('max_mark_range').value)
+        self.plane_ema_alpha = float(gp('plane_ema_alpha').value)
+        self.plane_max_jump = float(gp('plane_max_jump').value)
+        self.plane_c_min = float(gp('plane_c_min').value)
+        self.plane_c_max = float(gp('plane_c_max').value)
+        self.plane_a = 0.0            # EMA state of the sidewalk plane
+        self.plane_c = None
+        self.in_topic = gp('input_topic').value
+        self.out_topic = gp('output_topic').value
+        self.curb_topic = gp('curb_topic').value
+        self.ground_ref_z = float(gp('ground_ref_z').value)
+        self.z_band = float(gp('ground_z_band').value)
+        self.curb_min = float(gp('curb_min_height').value)
+        self.curb_max = float(gp('curb_max_height').value)
+        self.max_step_dr = float(gp('max_step_dr').value)
+        self.min_dr = float(gp('min_dr').value)
+        self.max_gap = float(gp('max_gap').value)
+        self.num_bins = int(gp('num_angular_bins').value)
+        self.self_box_x_min = float(gp('self_box_x_min').value)
+        self.self_box_x_max = float(gp('self_box_x_max').value)
+        self.self_box_y_half = float(gp('self_box_y_half').value)
+        self.min_range = float(gp('min_range').value)
+        self.max_range = float(gp('max_range').value)
+        self.wall_offsets = [float(v) for v in gp('wall_offsets').value]
+        self.wall_intensity = float(gp('wall_intensity').value)
+        self.merge_original = bool(gp('merge_original').value)
+
+        self.mem_enabled = bool(gp('curb_memory').value)
+        self.shadow_edge = bool(gp('shadow_edge').value)
+        self.mem_ttl = float(gp('curb_memory_ttl').value)
+        self.mem_radius = float(gp('curb_memory_radius').value)
+        self.mem_cell = float(gp('curb_memory_cell').value)
+        self.odom_frame = str(gp('odom_frame').value)
+        # {(gx,gy): (x_o, y_o, z_o, stamp_s)} — 연석 벽 '밑점'을 odom 프레임으로
+        self.mem: dict = {}
+        self.tf_buffer = None
+        if self.mem_enabled:
+            import tf2_ros
+            self.tf_buffer = tf2_ros.Buffer()
+            self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+
+        qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                         history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.sub_ = self.create_subscription(PointCloud2, self.in_topic,
+                                             self.cb, qos)
+        self.pub_ = self.create_publisher(PointCloud2, self.out_topic, 10)
+        self.curb_pub_ = self.create_publisher(PointCloud2, self.curb_topic, 10)
+
+        self._logged = 0
+        self.get_logger().info(
+            f"Curb detection ready: {self.in_topic} -> {self.out_topic} "
+            f"(curb {self.curb_min:.2f}-{self.curb_max:.2f} m, bins={self.num_bins})")
+
+    @staticmethod
+    def _quat_to_R(qx, qy, qz, qw):
+        return np.array([
+            [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+            [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+            [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+        ], dtype=np.float64)
+
+    def _memory_bases(self, msg, ex, ey, eb):
+        """현재 검출 밑점을 odom 기억에 넣고, (기억 전체)를 센서 프레임
+        밑점으로 되돌려 준다. TF 실패 시 현재 검출만 반환한다(종전 동작)."""
+        import rclpy.time
+        try:
+            tr = self.tf_buffer.lookup_transform(
+                self.odom_frame, msg.header.frame_id, rclpy.time.Time())
+        except Exception:
+            self.get_logger().warn(
+                'curb memory: TF 미가용 — 현재 스캔만 사용',
+                throttle_duration_sec=5.0)
+            return ex, ey, eb
+        q = tr.transform.rotation
+        t = tr.transform.translation
+        R = self._quat_to_R(q.x, q.y, q.z, q.w)
+        tv = np.array([t.x, t.y, t.z], dtype=np.float64)
+        now_s = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+
+        # 1) 현재 검출 → odom, 격자 중복 제거하며 기억 (최신 관측이 이김)
+        if ex.shape[0]:
+            p = np.column_stack((ex, ey, eb)).astype(np.float64) @ R.T + tv
+            gx = np.floor(p[:, 0] / self.mem_cell).astype(np.int64)
+            gy = np.floor(p[:, 1] / self.mem_cell).astype(np.int64)
+            for i in range(p.shape[0]):
+                self.mem[(gx[i], gy[i])] = (p[i, 0], p[i, 1], p[i, 2], now_s)
+
+        # 2) 만료: 오래됐거나 로봇에서 먼 항목. 로봇 위치 ≈ 센서 원점 tv.
+        if self.mem:
+            drop = []
+            r2 = self.mem_radius * self.mem_radius
+            for k, (mx, my, _, ts) in self.mem.items():
+                if now_s - ts > self.mem_ttl or \
+                        (mx - tv[0]) ** 2 + (my - tv[1]) ** 2 > r2:
+                    drop.append(k)
+            for k in drop:
+                del self.mem[k]
+
+        if not self.mem:
+            return ex, ey, eb
+
+        # 3) 기억 전체 → 센서 프레임 (현재 검출은 1에서 이미 포함됨)
+        arr = np.array([(v[0], v[1], v[2]) for v in self.mem.values()],
+                       dtype=np.float64)
+        s = (arr - tv) @ R
+        return (s[:, 0].astype(np.float32), s[:, 1].astype(np.float32),
+                s[:, 2].astype(np.float32))
+
+    def _publish_passthrough(self, xyz, msg):
+        """Fail-safe: forward the original cloud unmodified so positive
+        obstacles always reach the costmap even when curb augmentation is
+        not possible for this frame."""
+        orig = np.empty((xyz.shape[0], 4), dtype=np.float32)
+        orig[:, :3] = xyz
+        orig[:, 3] = 0.0
+        self.pub_.publish(
+            xyzi_to_pointcloud2(orig, msg.header.frame_id, msg.header.stamp))
+
+    def cb(self, msg: PointCloud2):
+        t0 = time.perf_counter()
+        ringf = None
+        if self.method == 'ring':
+            xyz, ring_arr = pointcloud2_to_xyzr(msg)
+        else:
+            xyz = pointcloud2_to_xyz(msg)
+            ring_arr = None
+        if xyz.shape[0] == 0:
+            return
+
+        # 차체 셀프 포인트 제거 — 이후 모든 경로(검출/통과/증강 출력)에 적용
+        keep = ~((xyz[:, 0] > self.self_box_x_min) &
+                 (xyz[:, 0] < self.self_box_x_max) &
+                 (np.abs(xyz[:, 1]) < self.self_box_y_half))
+        if not keep.all():
+            xyz = xyz[keep]
+            if ring_arr is not None:
+                ring_arr = ring_arr[keep]
+            if xyz.shape[0] == 0:
+                return
+
+        x = xyz[:, 0]; y = xyz[:, 1]; z = xyz[:, 2]
+        r = np.sqrt(x * x + y * y)
+        m = (r > self.min_range) & (r < self.max_range)
+        xf, yf, zf, rf = x[m], y[m], z[m], r[m]
+        if ring_arr is not None:
+            ringf = ring_arr[m]
+        if xf.shape[0] == 0:
+            self._publish_passthrough(xyz, msg)
+            return
+
+        if self.method == 'below_grade':
+            a, c, ok = fit_ahead_plane(xf, yf, zf, self.plane_c_min, self.plane_c_max)
+            if self.plane_c is None:
+                if not ok:
+                    # No trustworthy plane yet (e.g. parked facing a wall).
+                    # CRITICAL: still republish the raw cloud — downstream
+                    # local_costmap consumes ONLY our output topic, so an
+                    # early return here would starve the whole obstacle
+                    # pipeline and the vehicle would drive blind.
+                    self._publish_passthrough(xyz, msg)
+                    self.get_logger().warn(
+                        'below_grade plane not initialised — passthrough '
+                        '(no curb walls yet)', throttle_duration_sec=5.0)
+                    return
+                self.plane_a, self.plane_c = a, c
+            elif ok and abs(c - self.plane_c) <= self.plane_max_jump:
+                al = self.plane_ema_alpha
+                self.plane_a = (1 - al) * self.plane_a + al * a
+                self.plane_c = (1 - al) * self.plane_c + al * c
+            # else: keep previous EMA plane (strip obstructed / bad fit)
+            ex, ey = below_grade_detect(
+                xf, yf, zf, self.max_range, self.grid_cell,
+                np.float32(self.plane_a), np.float32(self.plane_c),
+                np.float32(self.plane_z_band),
+                np.float32(self.drop_min),
+                np.float32(self.raise_min), np.float32(self.raise_max),
+                self.grid_min_pts, np.float32(self.max_mark_range))
+            # 그늘 경계 벽: 물리 연석선(마지막 관측 보도 셀)에도 벽을 세운다.
+            # below_grade 의 도로 경계는 연석면 가림 때문에 물리 낙차보다
+            # ~1 m 바깥이라, 이게 없으면 근접 기동이 모서리를 밟는다.
+            if self.shadow_edge:
+                sx, sy = shadow_edge_cells(
+                    xf, yf, zf,
+                    self.plane_a, self.plane_c, self.plane_z_band,
+                    self.drop_min, self.max_mark_range)
+                if sx.shape[0]:
+                    ex = np.concatenate((ex, sx))
+                    ey = np.concatenate((ey, sy))
+            # anchor walls on the SIDEWALK plane (not the lower road ground)
+            # so they stay inside the costmap's odom-frame [0.15, 2.0] band
+            eb = self.plane_a * ex + self.plane_c
+        elif self.method == 'ring':
+            ex, ey, eb = detect_ring_diff(
+                xf, yf, zf, ringf,
+                self.ring_jump_min, self.ring_jump_max,
+                self.ring_slope_min, self.ring_dh_max,
+                max_range=self.max_mark_range)
+        elif self.method == 'grid':
+            ex, ey, eb = detect_curb_grid(
+                xf, yf, zf, self.max_range, self.grid_cell,
+                self.ground_ref_z, self.z_band,
+                self.curb_min, self.curb_max, self.grid_min_pts)
+        else:
+            theta = np.arctan2(yf, xf)
+            tw = (theta + math.pi) % (2.0 * math.pi)
+            bins = np.clip((tw / (2.0 * math.pi) * self.num_bins).astype(np.int32),
+                           0, self.num_bins - 1)
+            ex, ey, eb = detect_curb_edges(
+                xf, yf, zf, rf, bins, self.num_bins,
+                self.ground_ref_z, self.z_band,
+                self.curb_min, self.curb_max,
+                self.max_step_dr, self.min_dr, self.max_gap)
+
+        # 연석 벽 기억: 현재 검출을 odom 기억에 합치고, 기억 전체(현재+과거)로
+        # 벽을 세운다. 근접 사각에서 현재 스캔이 비어도 과거 관측이 벽을 유지.
+        if self.mem_enabled and self.tf_buffer is not None:
+            wx, wy, wb = self._memory_bases(msg, ex, ey, eb)
+        else:
+            wx, wy, wb = ex, ey, eb
+        walls = build_curb_walls(wx, wy, wb, self.wall_offsets, self.wall_intensity)
+
+        # debug cloud: curb walls only
+        self.curb_pub_.publish(
+            xyzi_to_pointcloud2(walls, msg.header.frame_id, msg.header.stamp))
+
+        # costmap-facing cloud: original + curb walls
+        if self.merge_original:
+            orig = np.empty((xyz.shape[0], 4), dtype=np.float32)
+            orig[:, :3] = xyz
+            orig[:, 3] = 0.0
+            out = np.vstack((orig, walls)) if walls.shape[0] else orig
+        else:
+            out = walls
+        self.pub_.publish(
+            xyzi_to_pointcloud2(out, msg.header.frame_id, msg.header.stamp))
+
+        self._logged += 1
+        if self._logged <= 3 or self._logged % 50 == 0:
+            dt = (time.perf_counter() - t0) * 1000.0
+            self.get_logger().info(
+                f"curb edges={ex.shape[0]} mem={len(self.mem)} wall_pts={walls.shape[0]} "
+                f"in={xyz.shape[0]} took={dt:.1f}ms")
+
+
+def main():
+    rclpy.init()
+    node = CurbDetectionNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+if __name__ == '__main__':
+    main()
