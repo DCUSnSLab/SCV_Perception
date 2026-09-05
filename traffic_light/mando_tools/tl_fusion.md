@@ -21,7 +21,7 @@
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ki/mando_ws/install/setup.bash
+source /home/ssc/SSC/src/perception/install/setup.bash
 ros2 run mando_tools mando_tl_fusion
 ```
 
@@ -42,7 +42,8 @@ ros2 launch mando_tools tl_fusion.launch.py
 5. 모델 클래스가 충분히 신뢰되면 그 상태를 바로 사용한다.
 6. 그렇지 않으면 ROI를 확대하고 색 분석 fallback을 수행한다.
 7. 프레임 단위 상태를 최근 이력으로 안정화한다.
-8. `/tl/state`, `/tl/state_label`, `/tl/state_reason`을 발행한다.
+8. `/tl/state_id`, `/tl/state_label`, `/tl/state_reason`을 발행한다.
+9. 입력 영상이 3초 동안 오지 않으면 `UNKNOWN(0)`과 `/tl/input_valid=false`를 발행한다.
 9. 디버그 이미지가 필요할 때만 `/tl/debug_image`를 생성해 발행한다.
 
 ## 4. 입력과 출력
@@ -54,9 +55,10 @@ ros2 launch mando_tools tl_fusion.launch.py
 출력:
 
 - `/tl/debug_image`
-- `/tl/state`
+- `/tl/state_id`
 - `/tl/state_label`
 - `/tl/state_reason`
+- `/tl/input_valid`
 
 디버그 이미지는 아래 조건에서만 생성된다.
 
@@ -106,7 +108,9 @@ tracking 유사도는 중심점 거리와 IoU를 함께 사용한다.
 클래스 이름이 아래 규칙을 만족하면 상태로 해석한다.
 
 - `left`와 `arrow`가 같이 있으면 `LEFT ARROW`
+- `green_arrow` 클래스면 `LEFT ARROW`
 - `red`와 `green`이 동시에 있으면 `LEFT ARROW`
+- `green_arrow(down)`은 종료분기 표식이므로 신호등 상태에서 제외
 - `yellow` 포함 시 `YELLOW`
 - `green` 포함 시 `GREEN`
 - `red` 포함 시 `RED`

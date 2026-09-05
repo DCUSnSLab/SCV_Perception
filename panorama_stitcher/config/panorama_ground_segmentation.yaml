@@ -16,8 +16,8 @@ panorama_ground_segmentation:
     vehicle_forward_vector: [-0.038698263640, -0.047781732859, 0.998107885149]
     vehicle_left_vector: [-0.999226552286, -0.005128348489, -0.038987142084]
     sensor_origin_vehicle_xy_m: [-0.222321534004, -0.001169205355]
-    # Accept steep road/ramp planes up to 40 deg from calibrated vehicle-up.
-    max_ground_tilt_deg: 40.0
+    # Accept steep road/ramp planes up to 45 deg from calibrated vehicle-up.
+    max_ground_tilt_deg: 45.0
 
     # Fit only plausible road points and reject vertical walls by normal.
     # With the remounted cameras, this lower ROI raises the observed ground
@@ -54,13 +54,13 @@ panorama_ground_segmentation:
 
     # A global plane cannot follow road crown and gradual vertical curvature.
     # Grow RANSAC ground through locally continuous 10 cm cells. The 9.4 cm
-    # neighbour limit (1 cm allowance + 40 deg slope over 10 cm) follows steep
-    # ramps but cannot bridge a nominal 12 cm curb step. Only points within
+    # neighbour limit (1 cm allowance + 45 deg slope over 10 cm) follows steep
+    # ramps while staying just below a nominal 12 cm curb step. Only points within
     # 6 cm of each accepted local surface are reclassified as ground.
     ground_region_filter_enabled: true
     ground_region_grid_size_m: 0.10
     ground_region_max_step_m: 0.01
-    ground_region_max_slope_deg: 40.0
+    ground_region_max_slope_deg: 45.0
     ground_region_max_plane_residual_m: 0.30
     ground_region_point_tolerance_m: 0.06
     ground_region_min_points: 2

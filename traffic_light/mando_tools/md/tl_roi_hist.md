@@ -19,7 +19,7 @@
 
 - `/tl/debug_image`
 - `/tl/zoom_image`
-- `/tl/state`
+- `/tl/roi_hist/state`
 - `/tl/hist_image` (`pub_hist_image=true`일 때)
 
 ## 3. 현재 처리 구조
@@ -40,8 +40,7 @@
 
 ## 5. launch 특징
 
-- `tl_roi_hist.launch.py`는 기본적으로 bag 재생도 같이 수행한다.
-- `play_delay_s` 기본값은 `4.0`초다.
+- `tl_roi_hist.launch.py`는 노드만 실행하며 bag은 별도로 재생한다.
 - `start_offset`으로 bag 시작 지점을 조절할 수 있다.
 - `max_fps`와 `pub_hist_image`를 launch 인자로 바로 바꿀 수 있다.
 

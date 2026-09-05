@@ -540,4 +540,5 @@ def main(args: list[str] | None = None) -> None:
         if node.show_windows:
             cv2.destroyAllWindows()
         node.destroy_node()
+    if rclpy.ok():
         rclpy.shutdown()

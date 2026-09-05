@@ -65,7 +65,7 @@ COLOR_TO_STATE = {
 
 
 def default_tl_model_path() -> str:
-    best = workspace_root() / 'models' / 'best.pt'
+    best = workspace_root() / 'model' / 'best.pt'
     if best.exists():
         return str(best)
     candidate = workspace_root() / 'yolo11s.pt'
@@ -124,7 +124,9 @@ class TLFusionNode(Node):
 
         self.model_path = self._declare_param('model_path', default_tl_model_path())
         self.image_topic = str(self._declare_param('image_topic', default_runtime_image_topic()))
+        self.state_topic = str(self._declare_param('state_topic', '/tl/state_id'))
         self.show_windows = bool(self._declare_param('show_windows', False))
+        self.input_timeout_s = float(self._declare_param('input_timeout_s', 3.0))
 
         self.max_fps = float(self._declare_param('max_fps', 15.0))
         requested_device = str(self._declare_param('detector_device', 'cuda:0'))
@@ -203,9 +205,12 @@ class TLFusionNode(Node):
         )
         self.get_logger().info(f'Detector class filter: {self.detector_classes}')
         self.get_logger().info(f'Subscribing to image topic: {self.image_topic}')
+        self.get_logger().info(f'Publishing traffic-light state: {self.state_topic}')
 
         self.latest_msg: Image | None = None
         self.processing = False
+        self.last_image_received_monotonic_ns = time.monotonic_ns()
+        self.input_timeout_active = False
         self.current_state = STATE_UNKNOWN
         self.current_source = 'init'
         self.current_reason = 'init'
@@ -234,7 +239,7 @@ class TLFusionNode(Node):
         image_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         status_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.debug_pub = self.create_publisher(Image, '/tl/debug_image', image_qos)
-        self.state_pub = self.create_publisher(Int32, '/tl/state', status_qos)
+        self.state_pub = self.create_publisher(Int32, self.state_topic, status_qos)
         self.state_label_pub = self.create_publisher(String, '/tl/state_label', status_qos)
         self.state_reason_pub = self.create_publisher(String, '/tl/state_reason', status_qos)
         self.input_valid_pub = self.create_publisher(Bool, '/tl/input_valid', status_qos)
@@ -246,10 +251,14 @@ class TLFusionNode(Node):
         return self.declare_parameter(name, default_value).value
 
     def _image_callback(self, msg: Image) -> None:
+        self.last_image_received_monotonic_ns = time.monotonic_ns()
         self.latest_msg = msg
 
     def _process_latest_frame(self) -> None:
-        if self.processing or self.latest_msg is None:
+        if self.processing:
+            return
+        if self.latest_msg is None:
+            self._publish_timeout_if_needed()
             return
 
         msg = self.latest_msg
@@ -334,6 +343,39 @@ class TLFusionNode(Node):
             self._log_processing_error(stage, exc, msg)
         finally:
             self.processing = False
+
+    def _publish_timeout_if_needed(self) -> None:
+        if self.input_timeout_s <= 0.0:
+            return
+
+        elapsed_s = (
+            time.monotonic_ns() - self.last_image_received_monotonic_ns
+        ) / 1e9
+        if elapsed_s < self.input_timeout_s:
+            return
+
+        first_timeout_publish = not self.input_timeout_active
+        self.input_timeout_active = True
+        self.current_state = STATE_UNKNOWN
+        self.current_source = 'input_timeout'
+        self.current_reason = f'no_image_for={elapsed_s:.1f}s'
+        self.state_history.clear()
+        self.state_history.append(STATE_UNKNOWN)
+        self.last_candidate_box = None
+        self.last_overlay_candidate = None
+
+        self.input_valid_pub.publish(Bool(data=False))
+        self.state_pub.publish(Int32(data=int(STATE_UNKNOWN)))
+        self.state_label_pub.publish(String(data=STATE_LABELS[STATE_UNKNOWN]))
+        self.state_reason_pub.publish(
+            String(data=f'{STATE_LABELS[STATE_UNKNOWN]} input_timeout {self.current_reason}')
+        )
+
+        if first_timeout_publish:
+            self.get_logger().error(
+                f'No image received for {elapsed_s:.1f}s on {self.image_topic}; '
+                f'publishing UNKNOWN on {self.state_topic}'
+            )
 
     def _log_processing_error(self, stage: str, exc: Exception, msg: Image) -> None:
         signature = (stage, f'{type(exc).__name__}:{exc!r}')
@@ -467,6 +509,13 @@ class TLFusionNode(Node):
 
             class_id = int(box.cls[0]) if box.cls is not None else -1
             class_name = self._class_name(class_id)
+            normalized_class_name = (
+                class_name.strip().lower().replace('-', '_').replace(' ', '_')
+            )
+            # The model also contains a downward arrow used by the terminal-branch
+            # detector. It must not be interpreted as a drivable green light.
+            if 'green_arrow' in normalized_class_name and 'down' in normalized_class_name:
+                continue
             model_state, model_resolved = self._state_from_class_name(class_name)
             detections.append(
                 DetectionCandidate(
@@ -734,6 +783,7 @@ class TLFusionNode(Node):
         stable_state: int,
         decision: DecisionResult,
     ) -> None:
+        self.input_timeout_active = False
         self.input_valid_pub.publish(Bool(data=True))
         if debug_image is not None:
             debug_msg = self._numpy_to_image_msg(
@@ -908,8 +958,10 @@ class TLFusionNode(Node):
         return detector_classes or None
 
     def _state_from_class_name(self, class_name: str) -> tuple[int, bool]:
-        normalized = class_name.strip().lower()
-        if normalized == 'traffic light' or 'etc' in normalized:
+        normalized = class_name.strip().lower().replace('-', '_').replace(' ', '_')
+        if normalized in {'traffic_light', 'trafficlight'} or 'etc' in normalized:
+            return STATE_UNKNOWN, False
+        if 'green_arrow' in normalized and 'down' in normalized:
             return STATE_UNKNOWN, False
 
         has_red = 'red' in normalized
@@ -917,7 +969,8 @@ class TLFusionNode(Node):
         has_green = 'green' in normalized
 
         has_left_arrow = 'left' in normalized and 'arrow' in normalized
-        if has_left_arrow or (has_red and has_green):
+        has_green_arrow = 'green_arrow' in normalized and 'down' not in normalized
+        if has_left_arrow or has_green_arrow or (has_red and has_green):
             return STATE_LEFT_ARROW, True
         if has_yellow:
             return STATE_YELLOW, True

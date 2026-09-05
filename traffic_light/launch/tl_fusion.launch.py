@@ -5,13 +5,10 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from pathlib import Path
 
-from mando_tools.workspace_paths import default_runtime_image_topic
-
-
 def _default_tl_model() -> str:
     launch_file = Path(__file__).resolve()
     for root in [launch_file.parent, *launch_file.parents]:
-        candidate = root / 'models' / 'best.pt'
+        candidate = root / 'model' / 'best.pt'
         if candidate.exists():
             return str(candidate)
         if root.name == 'traffic_light':
@@ -26,8 +23,18 @@ def generate_launch_description() -> LaunchDescription:
     )
     image_topic_arg = DeclareLaunchArgument(
         'image_topic',
-        default_value=default_runtime_image_topic(),
+        default_value='/panorama/image_raw',
         description='Input image topic.',
+    )
+    state_topic_arg = DeclareLaunchArgument(
+        'state_topic',
+        default_value='/tl/state_id',
+        description='Final traffic-light state topic consumed by Behavior Planner.',
+    )
+    input_timeout_arg = DeclareLaunchArgument(
+        'input_timeout_s',
+        default_value='3.0',
+        description='Publish UNKNOWN when no image arrives for this many seconds.',
     )
     show_windows_arg = DeclareLaunchArgument(
         'show_windows',
@@ -73,6 +80,11 @@ def generate_launch_description() -> LaunchDescription:
             {
                 'model_path': LaunchConfiguration('model_path'),
                 'image_topic': LaunchConfiguration('image_topic'),
+                'state_topic': LaunchConfiguration('state_topic'),
+                'input_timeout_s': ParameterValue(
+                    LaunchConfiguration('input_timeout_s'),
+                    value_type=float,
+                ),
                 'show_windows': ParameterValue(
                     LaunchConfiguration('show_windows'),
                     value_type=bool,
@@ -106,6 +118,8 @@ def generate_launch_description() -> LaunchDescription:
         [
             model_arg,
             image_topic_arg,
+            state_topic_arg,
+            input_timeout_arg,
             show_windows_arg,
             fps_arg,
             detector_device_arg,

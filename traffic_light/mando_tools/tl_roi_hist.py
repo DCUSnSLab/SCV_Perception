@@ -27,7 +27,7 @@ from collections import deque
 
 
 def default_tl_model_path() -> str:
-    best = workspace_root() / 'models' / 'best.pt'
+    best = workspace_root() / 'model' / 'best.pt'
     if best.exists():
         return str(best)
     candidate = workspace_root() / 'yolo11s.pt'
@@ -255,7 +255,7 @@ class TLCropOnlyNode(Node):
         )
         self.pub_roi_dbg = self.create_publisher(Image, '/tl/debug_image', 10)
         self.pub_zoom    = self.create_publisher(Image, '/tl/zoom_image', 10)
-        self.pub_state   = self.create_publisher(Int32, '/tl/state', 10)
+        self.pub_state   = self.create_publisher(Int32, '/tl/roi_hist/state', 10)
         self.pub_hist    = self.create_publisher(Image, '/tl/hist_image', 10) # del
 
         timer_period = 1.0 / max(self.max_fps, 0.1)

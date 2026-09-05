@@ -76,9 +76,15 @@ class YoloValidatorNode(Node):
         self.detections_topic = str(
             _declare_param(self, 'detections_topic', '/mando/yolo/detections')
         )
-        self.state_topic = str(_declare_param(self, 'state_topic', '/tl/state'))
-        self.state_label_topic = str(_declare_param(self, 'state_label_topic', '/tl/state_label'))
-        self.state_reason_topic = str(_declare_param(self, 'state_reason_topic', '/tl/state_reason'))
+        self.state_topic = str(
+            _declare_param(self, 'state_topic', '/tl/yolo_validator/state')
+        )
+        self.state_label_topic = str(
+            _declare_param(self, 'state_label_topic', '/tl/yolo_validator/state_label')
+        )
+        self.state_reason_topic = str(
+            _declare_param(self, 'state_reason_topic', '/tl/yolo_validator/state_reason')
+        )
         self.conf_threshold = float(_declare_param(self, 'conf_threshold', 0.25))
         self.iou_threshold = float(_declare_param(self, 'iou_threshold', 0.45))
         self.image_size = int(_declare_param(self, 'image_size', 640))
@@ -460,13 +466,16 @@ class YoloValidatorNode(Node):
         normalized = class_name.strip().lower().replace('-', '_').replace(' ', '_')
         if normalized in {'traffic_light', 'trafficlight'} or 'etc' in normalized:
             return STATE_UNKNOWN, False
+        if 'green_arrow' in normalized and 'down' in normalized:
+            return STATE_UNKNOWN, False
 
         has_red = 'red' in normalized
         has_yellow = 'yellow' in normalized
         has_green = 'green' in normalized
         has_left_arrow = 'left' in normalized and 'arrow' in normalized
+        has_green_arrow = 'green_arrow' in normalized and 'down' not in normalized
 
-        if has_left_arrow or (has_red and has_green):
+        if has_left_arrow or has_green_arrow or (has_red and has_green):
             return STATE_LEFT_ARROW, True
         if has_yellow:
             return STATE_YELLOW, True

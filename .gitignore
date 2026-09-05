@@ -4,5 +4,9 @@
 *.pth
 *.pyc
 __pycache__/
+.deps/
+build/
+install/
+log/
 logs/
 *vscode*

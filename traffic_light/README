@@ -1,227 +1,151 @@
 # traffic_light
 
-독립 실행 가능한 ROS 2 `mando_tools` 패키지다.
-`traffic_light_test`의 소스, 모델, bag, 설치 결과에는 의존하지 않는다. `stop_points`와 `mando_ros2` 입력은 모두 `/mando/input/image`으로 통일한다.
+카메라 또는 파노라마 영상에서 차량 신호등을 검출하는 ROS 2 `mando_tools` 패키지다.
+최종 주행 상태는 `tl_fusion` 한 노드만 `/tl/state_id`로 발행한다.
 
-## 1. 작업 위치
+## 상태 ID
+
+| ID | 의미 |
+| --- | --- |
+| `0` | `UNKNOWN` |
+| `1` | `RED` |
+| `2` | `YELLOW` |
+| `3` | `GREEN` |
+| `4` | `LEFT ARROW` |
+
+Behavior Planner는 기본적으로 `/tl/state_id`를 구독하며 `RED(1)`에서 정지한다.
+`LEFT ARROW(4)`는 좌회전 진행 가능 상태다. 실제 조향은 계획된 경로가 담당한다.
+
+## 준비와 빌드
 
 ```bash
-cd /home/ki/mando1_ws/SSC/src/perception/SCV_Perception/traffic_light
-```
-
-## 2. 환경 설정
-
-```bash
+cd /home/ssc/SSC/src/perception
 source /opt/ros/humble/setup.bash
+colcon build --symlink-install --packages-select mando_tools
 source install/setup.bash
 ```
 
-검출 노드 기본 추론 장치는 GPU(`cuda:0`)다.  
-GPU를 못 쓰는 환경에서는 내부에서 CPU로 fallback되고, 필요하면 launch 인자로 `device:=cpu` 또는 `detector_device:=cpu`를 직접 넘기면 된다.
-
-코드 수정 후 다시 반영할 때:
-
-```bash
-colcon build --packages-select mando_tools
-source install/setup.bash
-```
-
-실행 전에 현재 셸이 올바른 `mando_tools`를 보고 있는지도 확인한다:
-
-```bash
-ros2 pkg prefix mando_tools
-```
-
-정상 출력:
-
-```bash
-/home/ki/mando1_ws/SSC/src/perception/SCV_Perception/traffic_light/install/mando_tools
-```
-
-다른 워크스페이스 경로가 나오면 새 터미널에서 아래처럼 현재 워크스페이스만 다시 source 한다:
-
-```bash
-unset AMENT_PREFIX_PATH COLCON_PREFIX_PATH CMAKE_PREFIX_PATH PYTHONPATH ROS_PACKAGE_PATH
-source /opt/ros/humble/setup.bash
-source /home/ki/mando1_ws/SSC/src/perception/SCV_Perception/traffic_light/install/setup.bash
-```
-
-## 3. bag 확인
-
-대용량 bag은 Git에 포함하지 않는다. 사용할 bag 디렉터리를 `traffic_light/data/bags/` 아래에 두거나, 실행 시 절대 경로를 `bag_path`로 전달한다.
-
-기본 profile 경로:
+기본 모델 위치:
 
 ```text
-data/bags/stop_points
-data/bags/mando_ros2
+/home/ssc/SSC/src/perception/traffic_light/model/best.pt
+/home/ssc/SSC/src/perception/traffic_light/model/arrow_best.pt
+/home/ssc/SSC/src/perception/traffic_light/model/mando_arrow_best.pt
 ```
 
-```bash
-ros2 run mando_tools mando_bag info
+Python 추론 의존성은 아래 로컬 폴더를 우선 사용한다.
+
+```text
+/home/ssc/SSC/src/perception/traffic_light/.deps
 ```
 
-## 4. bag 재생
+## 최종 신호등 검출 실행
 
-bag 재생은 별도 터미널에서 실행한다.  
-기본 실행은 bag 내부 원본 토픽을 `/mando/input/image`로 remap한다.
+일반 카메라 또는 remap된 bag 입력 `/mando/input/image` 사용:
 
 ```bash
-cd /home/ki/mando1_ws/SSC/src/perception/SCV_Perception/traffic_light
 source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch mando_tools play_mando_bag.launch.py
+source /home/ssc/SSC/src/perception/install/setup.bash
+ros2 launch mando_tools tl_fusion.launch.py
 ```
 
-`mando_ros2`로 바꿀 때:
+파노라마 `/panorama/image_raw`가 기본 입력이므로 옵션 없이 실행한다.
 
 ```bash
-MANDO_BAG=mando_ros2 ros2 launch mando_tools play_mando_bag.launch.py
+ros2 launch mando_tools tl_fusion.launch.py
 ```
 
-패키지 밖의 bag을 사용할 때:
+`input_timeout_s` 기본값도 `3.0`초다.
+
+GPU를 사용하지 않을 때:
+
+```bash
+ros2 launch mando_tools tl_fusion.launch.py detector_device:=cpu
+```
+
+입력 영상이 3초 동안 갱신되지 않으면 다음을 발행한다.
+
+- `/tl/state_id`: `0` (`UNKNOWN`)
+- `/tl/input_valid`: `false`
+- `/tl/state_reason`: `UNKNOWN input_timeout ...`
+
+확인:
+
+```bash
+ros2 topic echo /tl/state_id
+ros2 topic echo /tl/state_label
+ros2 topic echo /tl/state_reason
+ros2 topic echo /tl/input_valid
+```
+
+## Bag 재생
+
+bag 재생과 검출 노드는 별도 프로세스다.
+
+```bash
+ros2 launch mando_tools play_mando_bag.launch.py
+ros2 launch mando_tools tl_fusion.launch.py
+```
+
+외부 bag을 사용할 때:
 
 ```bash
 ros2 launch mando_tools play_mando_bag.launch.py \
   bag_path:=/absolute/path/to/rosbag2_directory
 ```
 
-또는 CLI로 직접:
+## 보조·검증 노드
+
+YOLO 모델 결과 검증:
 
 ```bash
-ros2 run mando_tools mando_bag play stop_points
-ros2 run mando_tools mando_bag play mando_ros2
+ros2 launch mando_tools validate_mando_bag.launch.py
 ```
 
-## 5. 입력 이미지 토픽
+이 노드의 상태 출력은 `/tl/yolo_validator/state`이며 최종 주행 토픽을 건드리지 않는다.
 
-- bag 내부 원본 토픽
-- `stop_points`: `/zed/zed_node/left/image_rect_color`
-- `mando_ros2`: `/zed_node/left/image_rect_color`
-- 노드가 공통으로 구독하는 런타임 토픽: `/mando/input/image`
-
-주의:
-
-- `/zed/zed_node/left/image_rect_colo` 는 오타다.
-- 기본 workflow에서는 노드에 `/mando/input/image`만 넘기면 된다.
-
-## 6. validator 실행
-
-`validate_mando_bag.launch.py` 이름과 달리 bag를 직접 재생하지 않는다.  
-반드시 다른 터미널에서 bag 재생을 먼저 실행한다.
-
-GPU:
+ROI 색 히스토그램 실험:
 
 ```bash
-cd /home/ki/mando1_ws/SSC/src/perception/SCV_Perception/traffic_light
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch mando_tools validate_mando_bag.launch.py \
-  device:=cuda:0
+ros2 launch mando_tools tl_roi_hist.launch.py
 ```
 
-CPU:
+이 노드의 상태 출력은 `/tl/roi_hist/state`이며 bag을 자동 재생하지 않는다.
+
+HSV 형상 기반 녹색 아래 화살표 검출도 파노라마가 기본 입력이다.
 
 ```bash
-ros2 launch mando_tools validate_mando_bag.launch.py \
-  device:=cpu
+ros2 launch mando_tools green_down_arrow.launch.py
 ```
 
-## 7. tl_roi_hist 실행
+대표 출력은 `/tl/green_down_arrow_detected`, `/tl/green_down_arrow_score`,
+`/tl/green_down_arrow_reason`이다.
 
-GPU:
+`model/mando_arrow_best.pt`는 `O/X`, `model/arrow_best.pt`는 8방향 화살표 클래스
+모델이다. 현재 저장소에는 이 두 모델을
+실행하는 ROS 2 노드가 없으므로 X 검출용 실행 명령은 아직 없다.
+
+## 토픽 소유권
+
+- `tl_fusion`: `/tl/state_id` (최종 주행 상태)
+- `yolo_validator`: `/tl/yolo_validator/state` (모델 검증)
+- `tl_roi_hist`: `/tl/roi_hist/state` (색 분석 실험)
+- `green_down_arrow`: `/tl/green_down_arrow_*` (종료분기 표식 실험)
+
+따라서 여러 검증 노드를 같이 실행해도 Behavior Planner 입력은 `tl_fusion`만 갱신한다.
+
+## 한 명령으로 실행
+
+신호등과 녹색 아래 화살표 검출을 함께 실행:
 
 ```bash
-cd /home/ki/mando1_ws/SSC/src/perception/SCV_Perception/traffic_light
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch mando_tools tl_roi_hist.launch.py \
-  detector_device:=cuda:0
+ros2 launch mando_tools traffic_light.launch.py
 ```
 
-CPU:
+새 터미널에서 ROS 환경 source까지 생략하려면 다음 스크립트 하나만 실행한다.
 
 ```bash
-ros2 launch mando_tools tl_roi_hist.launch.py \
-  detector_device:=cpu
+/home/ssc/SSC/src/perception/traffic_light/run_traffic_light.sh
 ```
 
-## 8. tl_fusion 실행
-
-GPU:
-
-```bash
-cd /home/ki/mando1_ws/SSC/src/perception/SCV_Perception/traffic_light
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch mando_tools tl_fusion.launch.py \
-  detector_device:=cuda:0
-```
-
-CPU:
-
-```bash
-ros2 launch mando_tools tl_fusion.launch.py \
-  detector_device:=cpu
-```
-
-## 9. 확인용 명령
-
-토픽 목록:
-
-```bash
-ros2 topic list | rg "zed.*image_rect|/mando/yolo|/tl/"
-```
-
-이미지 토픽 주기 확인:
-
-```bash
-ros2 topic hz /mando/input/image
-```
-
-상태 확인:
-
-```bash
-ros2 topic echo /tl/state
-```
-
-```bash
-ros2 topic echo /tl/state_label
-```
-
-## 10. 권장 실행 순서
-
-터미널 1, bag 재생:
-
-```bash
-cd /home/ki/mando1_ws/SSC/src/perception/SCV_Perception/traffic_light
-source /opt/ros/humble/setup.bash
-source install/setup.bash
-ros2 launch mando_tools play_mando_bag.launch.py
-```
-
-터미널 2, 노드 실행:
-
-validator:
-
-```bash
-ros2 launch mando_tools validate_mando_bag.launch.py \
-  device:=cpu
-```
-
-또는 fusion:
-
-```bash
-ros2 launch mando_tools tl_fusion.launch.py \
-  detector_device:=cpu
-```
-
-## 11. 자주 보는 문제
-
-- 이미지가 안 들어오면 `image_topic` 오타부터 확인한다.
-- 기본 경로에서는 `/mando/input/image`가 들어와야 한다.
-- `colo`가 아니라 `color`다.
-- GPU에서 에러가 나면 먼저 `device:=cpu` 또는 `detector_device:=cpu`로 확인한다.
-- bag 내부 토픽과 현재 ROS graph 토픽이 다를 수 있으니 `ros2 bag info`로 실제 bag 토픽을 확인한다.
-- `Bag path '...' does not exist`가 뜨면 `traffic_light/data/bags/` 아래에 bag을 두거나 `bag_path:=/absolute/path`를 넘긴다.
-- `play_mando_bag.launch.py`를 찾지 못하면 `ros2 pkg prefix mando_tools`로 현재 `traffic_light/install/mando_tools`가 선택됐는지 확인한다.
+이 스크립트가 ROS Humble과 `mando_tools` 환경을 내부에서 source한다.

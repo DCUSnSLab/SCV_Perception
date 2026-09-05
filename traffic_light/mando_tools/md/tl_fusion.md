@@ -22,9 +22,10 @@
 출력:
 
 - `/tl/debug_image`
-- `/tl/state`
+- `/tl/state_id`
 - `/tl/state_label`
 - `/tl/state_reason`
+- `/tl/input_valid`
 
 ## 3. 현재 처리 흐름
 
@@ -36,12 +37,14 @@
 6. 그렇지 않으면 `_analyze_selected_candidate()`로 색 분석 fallback을 수행한다.
 7. `_decide_state()`와 `_update_stable_state()`로 최종 상태를 정한다.
 8. 결과를 publish하고, 필요할 때만 디버그 이미지를 생성한다.
+9. 입력 영상이 3초 동안 오지 않으면 `UNKNOWN(0)`과 `input_valid=false`를 발행한다.
 
 ## 4. 현재 기준으로 중요한 점
 
 - 클래스 필터는 `vehicular_*`와 `traffic light`만 사용한다.
 - `traffic light`와 `etc` 계열은 상태를 직접 해석하지 않는다.
-- `LEFT ARROW`는 `left+arrow` 또는 `red+green` 조합으로 해석한다.
+- `LEFT ARROW`는 `green_arrow`, `left+arrow`, `red+green` 조합으로 해석한다.
+- 종료분기용 `green_arrow(down)`은 주행 신호 상태에서 제외한다.
 - `/tl/debug_image`는 구독자가 있거나 `show_windows=true`일 때만 만든다.
 
 ## 5. launch에서 자주 조절하는 인자

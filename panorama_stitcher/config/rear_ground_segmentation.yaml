@@ -14,7 +14,7 @@ rear_ground_segmentation:
     # Rear camera is 68.5 cm behind base_link. Including this lever arm is
     # essential for temporal BEV consistency during a T/parallel turn.
     sensor_origin_vehicle_xy_m: [-0.684779832417, -0.014809559712]
-    max_ground_tilt_deg: 40.0
+    max_ground_tilt_deg: 45.0
 
     # Keep the same geometry policy as the calibrated front panorama. The rear
     # camera is mounted at the same physical height as the front rig. Score
@@ -41,11 +41,11 @@ rear_ground_segmentation:
     # remove, while retaining curbs and vertical obstacles across the local
     # step/slope gate. Disable this switch for one-command rollback.
     ground_region_filter_enabled: true
-    # The 10 cm grid and 9.4 cm neighbour-height gate stay below a nominal
-    # 12 cm curb while still permitting a locally continuous 40 deg ramp.
+    # The 10 cm grid and 11 cm neighbour-height gate stay below a nominal
+    # 12 cm curb while still permitting a locally continuous 45 deg ramp.
     ground_region_grid_size_m: 0.10
     ground_region_max_step_m: 0.01
-    ground_region_max_slope_deg: 40.0
+    ground_region_max_slope_deg: 45.0
     ground_region_max_plane_residual_m: 0.30
     ground_region_point_tolerance_m: 0.06
     ground_region_min_points: 2

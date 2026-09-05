@@ -16,6 +16,7 @@ setup(
             [
                 'launch/green_down_arrow.launch.py',
                 'launch/play_mando_bag.launch.py',
+                'launch/traffic_light.launch.py',
                 'launch/tl_fusion.launch.py',
                 'launch/tl_roi_hist.launch.py',
                 'launch/validate_mando_bag.launch.py',

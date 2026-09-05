@@ -11,7 +11,7 @@ from mando_tools.workspace_paths import default_runtime_image_topic
 def _default_tl_model() -> str:
     launch_file = Path(__file__).resolve()
     for root in [launch_file.parent, *launch_file.parents]:
-        candidate = root / 'models' / 'best.pt'
+        candidate = root / 'model' / 'best.pt'
         if candidate.exists():
             return str(candidate)
         if root.name == 'traffic_light':

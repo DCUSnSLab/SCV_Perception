@@ -104,7 +104,7 @@ def default_runtime_image_topic() -> str:
 
 
 def default_model_path() -> Path:
-    return workspace_root() / 'models' / 'best.pt'
+    return workspace_root() / 'model' / 'best.pt'
 
 
 def default_inference_device() -> str:

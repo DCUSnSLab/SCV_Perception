@@ -4,13 +4,10 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
-from mando_tools.workspace_paths import default_runtime_image_topic
-
-
 def generate_launch_description() -> LaunchDescription:
     image_topic_arg = DeclareLaunchArgument(
         'image_topic',
-        default_value=default_runtime_image_topic(),
+        default_value='/panorama/image_raw',
         description='Input image topic.',
     )
     show_windows_arg = DeclareLaunchArgument(

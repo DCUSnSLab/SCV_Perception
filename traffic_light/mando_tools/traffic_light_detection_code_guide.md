@@ -18,20 +18,21 @@
 | `3` | `GREEN` |
 | `4` | `LEFT ARROW` |
 
-클래스 이름에 `left`와 `arrow`가 함께 있거나 `red`와 `green`이 동시에 포함되면 `LEFT ARROW`로 해석한다.
+클래스 이름에 `green_arrow`, `left+arrow`, `red+green`이 포함되면 `LEFT ARROW`로 해석한다.
+종료분기용 `green_arrow(down)`은 신호등 주행 상태에서 제외한다.
 
 ## 2. 공통 실행 환경
 
 - 기본 bag profile은 `stop_points`다.
 - `stop_points`의 기본 이미지 토픽은 `/zed/zed_node/left/image_rect_color`다.
 - `mando_ros2`의 기본 이미지 토픽은 `/zed_node/left/image_rect_color`다.
-- 기본 모델은 `models/best.pt`를 먼저 찾고, 없으면 `yolo11s.pt`를 사용한다.
+- 기본 모델은 `model/best.pt`를 먼저 찾고, 없으면 `yolo11s.pt`를 사용한다.
 
 기본 환경 확인:
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ki/mando_ws/install/setup.bash
+source /home/ssc/SSC/src/perception/install/setup.bash
 ros2 run mando_tools workspace_info
 ```
 
@@ -39,9 +40,9 @@ ros2 run mando_tools workspace_info
 
 | 파일 | 역할 | 대표 출력 |
 | --- | --- | --- |
-| `yolo_validator.py` | YOLO 클래스 결과만으로 상태를 빠르게 검증 | annotated image, `Detection2DArray`, `/tl/state*` |
-| `tl_roi_hist.py` | YOLO로 ROI를 찾고 Hue histogram 기반으로 상태 판정 | `/tl/debug_image`, `/tl/zoom_image`, `/tl/hist_image`, `/tl/state` |
-| `tl_fusion.py` | 모델 클래스와 색 분석을 결합하고 안정화까지 적용 | `/tl/debug_image`, `/tl/state`, `/tl/state_label`, `/tl/state_reason` |
+| `yolo_validator.py` | YOLO 클래스 결과만으로 상태를 빠르게 검증 | annotated image, `Detection2DArray`, `/tl/yolo_validator/state` |
+| `tl_roi_hist.py` | YOLO로 ROI를 찾고 Hue histogram 기반으로 상태 판정 | `/tl/debug_image`, `/tl/zoom_image`, `/tl/hist_image`, `/tl/roi_hist/state` |
+| `tl_fusion.py` | 모델 클래스와 색 분석을 결합하고 안정화까지 적용 | `/tl/debug_image`, `/tl/state_id`, `/tl/state_label`, `/tl/state_reason` |
 
 ## 4. `yolo_validator.py`
 
@@ -54,7 +55,7 @@ ros2 run mando_tools workspace_info
 1. 가장 최근 프레임 한 장만 `latest_msg`에 유지한다.
 2. 타이머 기반으로 `max_fps` 주기마다 최신 프레임만 추론한다.
 3. YOLO 검출 결과에서 상태로 해석 가능한 클래스를 찾는다.
-4. `Detection2DArray`, annotated image, `/tl/state*` 토픽을 발행한다.
+4. `Detection2DArray`, annotated image, 전용 검증 상태 토픽을 발행한다.
 
 ### 4.3 상태 판정
 
@@ -103,7 +104,7 @@ ros2 launch mando_tools validate_mando_bag.launch.py
 - `/tl/zoom_image`
 - `/tl/hist_image` (`pub_hist_image=true`일 때)
 
-`tl_roi_hist.launch.py`는 기본적으로 bag 재생도 같이 수행하고, `play_delay_s`만큼 지연 후 bag를 시작한다.
+`tl_roi_hist.launch.py`는 노드만 실행한다. bag 영상은 별도로 재생해야 한다.
 
 실행:
 
@@ -154,7 +155,7 @@ ros2 launch mando_tools tl_fusion.launch.py
 | --- | --- | --- |
 | `src/mando_tools/launch/play_mando_bag.launch.py` | bag only | 기본 rosbag2 재생 |
 | `src/mando_tools/launch/validate_mando_bag.launch.py` | `yolo_validator.py` | validator 실행, 필요 시 bag도 같이 재생 |
-| `src/mando_tools/launch/tl_roi_hist.launch.py` | `tl_roi_hist.py` | ROI + histogram 노드 실행, bag 재생 지연 시작 가능 |
+| `src/mando_tools/launch/tl_roi_hist.launch.py` | `tl_roi_hist.py` | ROI + histogram 노드만 실행 |
 | `src/mando_tools/launch/tl_fusion.launch.py` | `tl_fusion.py` | fusion 노드 실행, bag는 외부에서 별도 공급 |
 
 ## 8. 어떤 코드를 언제 쓰면 되는가
