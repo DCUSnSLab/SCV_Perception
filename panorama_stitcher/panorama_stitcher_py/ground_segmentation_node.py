@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import time
+from collections import deque
 from typing import Tuple
 
 import numpy as np
@@ -16,6 +18,7 @@ from rclpy.qos import (
     ReliabilityPolicy,
     qos_profile_sensor_data,
 )
+from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, PointField
 from sensor_msgs_py import point_cloud2
 
@@ -23,9 +26,15 @@ from panorama_stitcher_py.ground_segmentation import (
     GroundSegmentationConfig,
     classify_points,
     fit_ground_planes,
-    radius_outlier_indices,
+    grow_ground_region,
+    expand_bev_keys,
+    extrapolate_planar_odometry,
+    horizontal_surface_filter_indices,
+    recover_ground_from_plane_history,
+    range_adaptive_radius_outlier_indices,
     range_residual_summary,
     select_ground_candidates,
+    temporal_obstacle_persistence_indices,
     voxel_first_indices,
 )
 
@@ -118,10 +127,101 @@ class PanoramaGroundSegmentationNode(Node):
         self.diagnostics_period_sec = max(
             0.2, float(self.get_parameter('diagnostics_period_sec').value))
         self.config = self._load_config()
+        self.vehicle_forward_vector = self._normalized_vector_parameter(
+            'vehicle_forward_vector')
+        self.vehicle_left_vector = self._normalized_vector_parameter(
+            'vehicle_left_vector')
+        if abs(float(
+            self.vehicle_forward_vector @ self.vehicle_left_vector
+        )) > 0.05:
+            raise ValueError(
+                'vehicle_forward_vector and vehicle_left_vector must be '
+                'orthogonal')
+        self.sensor_origin_vehicle_xy_m = np.asarray(
+            self.get_parameter('sensor_origin_vehicle_xy_m').value,
+            dtype=np.float64,
+        ).reshape(-1)
+        if self.sensor_origin_vehicle_xy_m.size != 2:
+            raise ValueError(
+                'sensor_origin_vehicle_xy_m must contain exactly 2 values')
         self.rng = np.random.default_rng(
             int(self.get_parameter('random_seed').value))
         self._last_diagnostic_time = -float('inf')
         self._idle_frames = 0
+        self.temporal_ground_recovery_enabled = bool(
+            self.get_parameter('temporal_ground_recovery_enabled').value)
+        self.temporal_ground_history_frames = max(
+            1, int(self.get_parameter('temporal_ground_history_frames').value))
+        self.temporal_ground_distance_threshold_m = max(
+            0.0, float(self.get_parameter(
+                'temporal_ground_distance_threshold_m').value))
+        self.temporal_ground_max_normal_delta_deg = max(
+            0.0, float(self.get_parameter(
+                'temporal_ground_max_normal_delta_deg').value))
+        self.temporal_ground_max_offset_delta_m = max(
+            0.0, float(self.get_parameter(
+                'temporal_ground_max_offset_delta_m').value))
+        self._plane_history = deque(
+            maxlen=self.temporal_ground_history_frames)
+        self.temporal_obstacle_filter_enabled = bool(
+            self.get_parameter('temporal_obstacle_filter_enabled').value)
+        self.temporal_obstacle_odom_topic = str(
+            self.get_parameter('temporal_obstacle_odom_topic').value)
+        self.temporal_obstacle_history_frames = max(
+            1, int(self.get_parameter(
+                'temporal_obstacle_history_frames').value))
+        self.temporal_obstacle_min_previous_hits = min(
+            self.temporal_obstacle_history_frames,
+            max(0, int(self.get_parameter(
+                'temporal_obstacle_min_previous_hits').value)),
+        )
+        self.temporal_obstacle_cell_size_m = max(
+            0.01, float(self.get_parameter(
+                'temporal_obstacle_cell_size_m').value))
+        self.temporal_obstacle_neighbor_cells = max(
+            0, int(self.get_parameter(
+                'temporal_obstacle_neighbor_cells').value))
+        self.temporal_obstacle_near_bypass_range_m = max(
+            0.0, float(self.get_parameter(
+                'temporal_obstacle_near_bypass_range_m').value))
+        self.temporal_obstacle_max_odom_age_sec = max(
+            0.0, float(self.get_parameter(
+                'temporal_obstacle_max_odom_age_sec').value))
+        self._obstacle_bev_history = deque(
+            maxlen=self.temporal_obstacle_history_frames)
+        self._latest_odom = None
+        self.horizontal_surface_filter_enabled = bool(
+            self.get_parameter('horizontal_surface_filter_enabled').value)
+        self.horizontal_surface_cell_size_m = max(
+            0.02, float(self.get_parameter(
+                'horizontal_surface_cell_size_m').value))
+        self.horizontal_surface_min_component_points = max(
+            3, int(self.get_parameter(
+                'horizontal_surface_min_component_points').value))
+        self.horizontal_surface_min_up_alignment = min(
+            1.0, max(0.0, float(self.get_parameter(
+                'horizontal_surface_min_up_alignment').value)))
+        self.horizontal_surface_max_plane_thickness_m = max(
+            0.001, float(self.get_parameter(
+                'horizontal_surface_max_plane_thickness_m').value))
+        self.horizontal_surface_near_bypass_range_m = max(
+            0.0, float(self.get_parameter(
+                'horizontal_surface_near_bypass_range_m').value))
+        self.horizontal_surface_vertical_bin_size_m = max(
+            0.005, float(self.get_parameter(
+                'horizontal_surface_vertical_bin_size_m').value))
+        self.horizontal_surface_vertical_min_points_per_bin = max(
+            1, int(self.get_parameter(
+                'horizontal_surface_vertical_min_points_per_bin').value))
+        self.horizontal_surface_vertical_min_run_bins = max(
+            2, int(self.get_parameter(
+                'horizontal_surface_vertical_min_run_bins').value))
+        self.horizontal_surface_vertical_min_occupied_bins = max(
+            2, int(self.get_parameter(
+                'horizontal_surface_vertical_min_occupied_bins').value))
+        self.horizontal_surface_vertical_min_support_cells = max(
+            1, int(self.get_parameter(
+                'horizontal_surface_vertical_min_support_cells').value))
 
         output_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
@@ -141,7 +241,14 @@ class PanoramaGroundSegmentationNode(Node):
             self._pointcloud_callback,
             qos_profile_sensor_data,
         )
+        self.odom_subscription = self.create_subscription(
+            Odometry,
+            self.temporal_obstacle_odom_topic,
+            self._odom_callback,
+            qos_profile_sensor_data,
+        )
         up = self.config.expected_up
+        forward = self.vehicle_forward_vector
         self.get_logger().info(
             'Python ground segmentation: '
             f'{self.input_topic} -> {self.obstacle_topic}, '
@@ -149,8 +256,58 @@ class PanoramaGroundSegmentationNode(Node):
             f'obstacle_radius_filter='
             f'{self.config.obstacle_radius_filter_radius_m:.2f}m/'
             f'{self.config.obstacle_radius_filter_min_neighbors}, '
+            f'far_obstacle_radius_filter='
+            f'{self.config.obstacle_far_radius_filter_start_m:.1f}m:'
+            f'{self.config.obstacle_far_radius_filter_radius_m:.2f}m/'
+            f'{self.config.obstacle_far_radius_filter_min_neighbors}, '
+            f'ground_region_filter='
+            f'{self.config.ground_region_filter_enabled}/'
+            f'{self.config.ground_region_grid_size_m:.2f}m/'
+            f'{self.config.ground_region_max_step_m:.2f}m/'
+            f'{self.config.ground_region_max_slope_deg:.1f}deg, '
+            f'temporal_ground_recovery='
+            f'{self.temporal_ground_recovery_enabled}/'
+            f'{self.temporal_ground_history_frames}/'
+            f'{self.temporal_ground_distance_threshold_m:.2f}m, '
+            f'temporal_obstacle_filter='
+            f'{self.temporal_obstacle_filter_enabled}/'
+            f'{self.temporal_obstacle_history_frames}/'
+            f'{self.temporal_obstacle_min_previous_hits}/'
+            f'{self.temporal_obstacle_cell_size_m:.2f}m/'
+            f'near<{self.temporal_obstacle_near_bypass_range_m:.1f}m, '
+            f'horizontal_surface_filter='
+            f'{self.horizontal_surface_filter_enabled}/'
+            f'{self.horizontal_surface_cell_size_m:.2f}m/'
+            f'near<{self.horizontal_surface_near_bypass_range_m:.1f}m, '
+            f'vehicle_forward=['
+            f'{forward[0]:.2f} {forward[1]:.2f} {forward[2]:.2f}], '
+            f'sensor_origin=['
+            f'{self.sensor_origin_vehicle_xy_m[0]:.2f} '
+            f'{self.sensor_origin_vehicle_xy_m[1]:.2f}], '
             f'expected_up=[{up[0]:.2f} {up[1]:.2f} {up[2]:.2f}], '
             f'tilt<={self.config.max_ground_tilt_deg:.1f} deg')
+
+    def _odom_callback(self, message: Odometry) -> None:
+        orientation = message.pose.pose.orientation
+        sin_yaw = 2.0 * (
+            orientation.w * orientation.z
+            + orientation.x * orientation.y)
+        cos_yaw = 1.0 - 2.0 * (
+            orientation.y * orientation.y
+            + orientation.z * orientation.z)
+        stamp_ns = (
+            int(message.header.stamp.sec) * 1_000_000_000
+            + int(message.header.stamp.nanosec)
+        )
+        self._latest_odom = (
+            stamp_ns,
+            float(message.pose.pose.position.x),
+            float(message.pose.pose.position.y),
+            math.atan2(sin_yaw, cos_yaw),
+            float(message.twist.twist.linear.x),
+            float(message.twist.twist.linear.y),
+            float(message.twist.twist.angular.z),
+        )
 
     def _load_config(self) -> GroundSegmentationConfig:
         def value(name):
@@ -194,8 +351,38 @@ class PanoramaGroundSegmentationNode(Node):
                 value('obstacle_radius_filter_radius_m')),
             obstacle_radius_filter_min_neighbors=int(
                 value('obstacle_radius_filter_min_neighbors')),
+            obstacle_far_radius_filter_start_m=float(
+                value('obstacle_far_radius_filter_start_m')),
+            obstacle_far_radius_filter_radius_m=float(
+                value('obstacle_far_radius_filter_radius_m')),
+            obstacle_far_radius_filter_min_neighbors=int(
+                value('obstacle_far_radius_filter_min_neighbors')),
             obstacle_voxel_size_m=float(value('obstacle_voxel_size_m')),
+            ground_region_filter_enabled=bool(
+                value('ground_region_filter_enabled')),
+            ground_region_grid_size_m=float(
+                value('ground_region_grid_size_m')),
+            ground_region_max_step_m=float(
+                value('ground_region_max_step_m')),
+            ground_region_max_slope_deg=float(
+                value('ground_region_max_slope_deg')),
+            ground_region_max_plane_residual_m=float(
+                value('ground_region_max_plane_residual_m')),
+            ground_region_point_tolerance_m=float(
+                value('ground_region_point_tolerance_m')),
+            ground_region_min_points=int(
+                value('ground_region_min_points')),
         ).normalized()
+
+    def _normalized_vector_parameter(self, name: str) -> np.ndarray:
+        values = np.asarray(
+            self.get_parameter(name).value, dtype=np.float64).reshape(-1)
+        if values.size != 3:
+            raise ValueError(f'{name} must contain exactly 3 values')
+        norm = float(np.linalg.norm(values))
+        if norm < 1.0e-9:
+            raise ValueError(f'{name} must be non-zero')
+        return values / norm
 
     def _diagnostic(self, level: str, message: str) -> None:
         now = time.monotonic()
@@ -253,18 +440,115 @@ class PanoramaGroundSegmentationNode(Node):
 
             obstacle_mask, ground_mask = classify_points(
                 xyz, planes, self.config)
+            plane_ground_count = int(np.count_nonzero(ground_mask))
+            ground_mask = grow_ground_region(
+                xyz, ground_mask, planes, self.config)
+            if self.temporal_ground_recovery_enabled:
+                historical_planes = tuple(
+                    model
+                    for frame_planes in self._plane_history
+                    for model in frame_planes
+                )
+                ground_mask = recover_ground_from_plane_history(
+                    xyz,
+                    ground_mask,
+                    planes,
+                    historical_planes,
+                    self.temporal_ground_distance_threshold_m,
+                    self.temporal_ground_max_normal_delta_deg,
+                    self.temporal_ground_max_offset_delta_m,
+                )
+            self._plane_history.append(tuple(planes))
+            obstacle_mask &= ~ground_mask
+            grown_ground_count = int(np.count_nonzero(ground_mask))
             classified = time.perf_counter()
             obstacle_xyz = xyz[obstacle_mask]
             obstacle_rgb = rgb[obstacle_mask]
             raw_obstacle_count = len(obstacle_xyz)
-            radius_selected = radius_outlier_indices(
+            radius_selected = range_adaptive_radius_outlier_indices(
                 obstacle_xyz,
                 self.config.obstacle_radius_filter_radius_m,
                 self.config.obstacle_radius_filter_min_neighbors,
+                self.config.obstacle_far_radius_filter_start_m,
+                self.config.obstacle_far_radius_filter_radius_m,
+                self.config.obstacle_far_radius_filter_min_neighbors,
             )
             obstacle_xyz = obstacle_xyz[radius_selected]
             obstacle_rgb = obstacle_rgb[radius_selected]
             radius_filtered_count = len(obstacle_xyz)
+            horizontal_filtered_count = radius_filtered_count
+            if self.horizontal_surface_filter_enabled:
+                horizontal_selected = horizontal_surface_filter_indices(
+                    obstacle_xyz,
+                    xyz,
+                    self.config.expected_up,
+                    self.horizontal_surface_cell_size_m,
+                    self.horizontal_surface_min_component_points,
+                    self.horizontal_surface_min_up_alignment,
+                    self.horizontal_surface_max_plane_thickness_m,
+                    self.horizontal_surface_near_bypass_range_m,
+                    self.horizontal_surface_vertical_bin_size_m,
+                    self.horizontal_surface_vertical_min_points_per_bin,
+                    self.horizontal_surface_vertical_min_run_bins,
+                    self.horizontal_surface_vertical_min_occupied_bins,
+                    self.horizontal_surface_vertical_min_support_cells,
+                    self.vehicle_forward_vector,
+                    self.vehicle_left_vector,
+                )
+                obstacle_xyz = obstacle_xyz[horizontal_selected]
+                obstacle_rgb = obstacle_rgb[horizontal_selected]
+                horizontal_filtered_count = len(obstacle_xyz)
+            temporally_filtered_count = horizontal_filtered_count
+            if self.temporal_obstacle_filter_enabled and self._latest_odom:
+                cloud_stamp_ns = (
+                    int(message.header.stamp.sec) * 1_000_000_000
+                    + int(message.header.stamp.nanosec)
+                )
+                (
+                    odom_stamp_ns,
+                    odom_x,
+                    odom_y,
+                    odom_yaw,
+                    odom_velocity_x,
+                    odom_velocity_y,
+                    odom_yaw_rate,
+                ) = self._latest_odom
+                odom_delta_sec = (cloud_stamp_ns - odom_stamp_ns) * 1.0e-9
+                odom_age_sec = abs(odom_delta_sec)
+                if odom_age_sec <= self.temporal_obstacle_max_odom_age_sec:
+                    odom_x, odom_y, odom_yaw = extrapolate_planar_odometry(
+                        odom_x,
+                        odom_y,
+                        odom_yaw,
+                        odom_velocity_x,
+                        odom_velocity_y,
+                        odom_yaw_rate,
+                        odom_delta_sec,
+                    )
+                    temporal_selected, current_keys = (
+                        temporal_obstacle_persistence_indices(
+                            obstacle_xyz,
+                            odom_x,
+                            odom_y,
+                            odom_yaw,
+                            tuple(self._obstacle_bev_history),
+                            self.temporal_obstacle_cell_size_m,
+                            self.temporal_obstacle_min_previous_hits,
+                            self.temporal_obstacle_near_bypass_range_m,
+                            self.vehicle_forward_vector,
+                            self.vehicle_left_vector,
+                            self.sensor_origin_vehicle_xy_m,
+                        )
+                    )
+                    self._obstacle_bev_history.append(expand_bev_keys(
+                        current_keys,
+                        self.temporal_obstacle_neighbor_cells,
+                    ))
+                    obstacle_xyz = obstacle_xyz[temporal_selected]
+                    obstacle_rgb = obstacle_rgb[temporal_selected]
+                    temporally_filtered_count = len(obstacle_xyz)
+                else:
+                    self._obstacle_bev_history.clear()
             if self.config.obstacle_voxel_size_m > 0.0:
                 selected = voxel_first_indices(
                     obstacle_xyz, self.config.obstacle_voxel_size_m)
@@ -314,7 +598,10 @@ class PanoramaGroundSegmentationNode(Node):
                 f'candidates={candidate_count} inliers={primary.inliers}'
                 f'({ratio * 100.0:.1f}%) obstacles='
                 f'{raw_obstacle_count}->{radius_filtered_count}'
+                f'->{horizontal_filtered_count}'
+                f'->{temporally_filtered_count}'
                 f'->{published_obstacle_count} '
+                f'ground={plane_ground_count}->{grown_ground_count} '
                 f'ground_residual_by_range={residual_text} '
                 f'timing(total/cpu/read/candidate/ransac/classify+publish)='
                 f'{processing_ms:.1f}/{process_cpu_ms:.1f}/'

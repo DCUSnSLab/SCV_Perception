@@ -19,12 +19,15 @@ panorama_stitcher:
     publish_range_output: true
     publish_validity_output: false
     publish_pointcloud: true
-    # Stride 4 samples 2.25x as many panorama pixels as stride 6. The ground
-    # node's ROI and bounded RANSAC scoring keep processing cost bounded.
-    pointcloud_stride: 4
+    # Vehicle A/B (2026-08-26): stride 3 emits about 1.79x the points of stride
+    # 4 (20.4k vs 11.4k) while preserving roughly 24-25 Hz obstacle output.
+    # Stride 2 emitted about 45.4k points but reduced output to 17-19 Hz.
+    pointcloud_stride: 3
     # Sample spacing for 3D depth reprojection. One keeps every aligned 720p
     # depth pixel; two is the real-time mode evaluated below and leaves the
     # full-resolution RGB cylindrical warp unchanged.
+    # Stride 1 used four times as many CUDA source samples but increased the
+    # valid cloud by only about 0.3%, so retain the lower-cost real-time mode.
     depth_projection_stride: 2
     publisher_best_effort: false
     auxiliary_publisher_best_effort: false
@@ -128,9 +131,11 @@ panorama_stitcher:
     # and point-cloud subscribers active. Set 1.0 (and stride 1 above) for the
     # original full-resolution diagnostic profile.
     projection_scale: 0.60
-    # Trust measured depth through 10 m, then keep distant RGB stable on a
-    # 20 m reference plane instead of the former 2.974 m indoor-board plane.
-    color_reference_plane_z_m: 20.0
+    # Trust measured depth through 10 m, then keep distant RGB stable on the
+    # inverse-depth midpoint of the requested 15-18 m clean-stitch interval.
+    # 2/(1/15 + 1/18) = 16.36 m minimizes the worst-case stereo parallax error
+    # at the two ends of that interval.
+    color_reference_plane_z_m: 16.36
     depth_scale_m: 0.001
     min_depth_m: 0.20
     max_depth_m: 10.0
@@ -140,6 +145,10 @@ panorama_stitcher:
     # independent of sparse depth reprojection; fused depth is the next stage.
     auto_seam_center: true
     seam_angle_deg: 0.0
+    # Feather only the far-field reference-plane images across a narrow central
+    # band. At the current projection this is about 19 px wide. Near objects
+    # with valid depth still use metric reprojection and overwrite this blend.
+    far_seam_blend_width_deg: 2.0
     # Outside the true binocular overlap, keep the smooth calibrated reference
     # projection. Inside it, reconstruct RGB from aligned depth so objects at
     # different ranges retain their physical width in the common rig frame.

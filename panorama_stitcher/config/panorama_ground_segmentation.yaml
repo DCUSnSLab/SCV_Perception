@@ -10,8 +10,14 @@ panorama_ground_segmentation:
     # panorama_optical_frame, calculated from the 2026-08-11 calibrated
     # velodyne -> front_camera_rig -> panorama_optical_frame TF chain.
     expected_up_vector: [0.006981518272723905, -0.9988446355899094, -0.047546318005377564]
-    # Accept road planes up to 35 deg from the calibrated vehicle-up direction.
-    max_ground_tilt_deg: 35.0
+    # Calibrated panorama optical axes expressed in base_link. These are used
+    # by the horizontal-sheet and odom-persistence stages; keeping the camera
+    # lever arm prevents stationary obstacles shifting cells while turning.
+    vehicle_forward_vector: [-0.038698263640, -0.047781732859, 0.998107885149]
+    vehicle_left_vector: [-0.999226552286, -0.005128348489, -0.038987142084]
+    sensor_origin_vehicle_xy_m: [-0.222321534004, -0.001169205355]
+    # Accept steep road/ramp planes up to 40 deg from calibrated vehicle-up.
+    max_ground_tilt_deg: 40.0
 
     # Fit only plausible road points and reject vertical walls by normal.
     # With the remounted cameras, this lower ROI raises the observed ground
@@ -46,15 +52,76 @@ panorama_ground_segmentation:
     min_plane_distance_from_origin_m: 0.80
     max_plane_distance_from_origin_m: 1.40
 
+    # A global plane cannot follow road crown and gradual vertical curvature.
+    # Grow RANSAC ground through locally continuous 10 cm cells. The 9.4 cm
+    # neighbour limit (1 cm allowance + 40 deg slope over 10 cm) follows steep
+    # ramps but cannot bridge a nominal 12 cm curb step. Only points within
+    # 6 cm of each accepted local surface are reclassified as ground.
+    ground_region_filter_enabled: true
+    ground_region_grid_size_m: 0.10
+    ground_region_max_step_m: 0.01
+    ground_region_max_slope_deg: 40.0
+    ground_region_max_plane_residual_m: 0.30
+    ground_region_point_tolerance_m: 0.06
+    ground_region_min_points: 2
+
+    # Recover only short-lived road points caused by a compatible RANSAC plane
+    # moving between frames. Historical planes add ground labels but never
+    # lower obstacle height, preserving a 12 cm curb above the current road.
+    # A/B on parking_debug_20260829_185453 reduced hard-turn obstacle count by
+    # only about 1%; keep the experiment available but disabled by default.
+    temporal_ground_recovery_enabled: false
+    temporal_ground_history_frames: 2
+    temporal_ground_distance_threshold_m: 0.05
+    temporal_ground_max_normal_delta_deg: 2.0
+    temporal_ground_max_offset_delta_m: 0.06
+
     # Only points clearly above the fitted ground enter the costmap.
     obstacle_min_height_m: 0.10
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0
     # Reject isolated/small outdoor depth speckles before obstacle publication.
-    # A point needs five other obstacle returns within 15 cm to survive.
+    # Live outdoor validation retained both 3 m traffic cones while raising
+    # this support gate from five to eight neighbors removed the remaining
+    # six-point road speckle cluster.
     obstacle_radius_filter_radius_m: 0.15
-    obstacle_radius_filter_min_neighbors: 5
+    obstacle_radius_filter_min_neighbors: 8
+    # RealSense point spacing grows with range. Keep the strict near gate, but
+    # widen only the support radius beyond 5 m so a measured cone at 6.3..7.2 m
+    # remains detectable without restoring the near-field speckles.
+    obstacle_far_radius_filter_start_m: 5.0
+    obstacle_far_radius_filter_radius_m: 0.40
+    obstacle_far_radius_filter_min_neighbors: 8
+    # Remove dense, persistent but traversable horizontal sheets (paint and
+    # shallow road shape). A far component is suppressed only when its PCA
+    # normal is nearly vehicle-up, it is thinner than 7 cm, and the raw cloud
+    # lacks a continuous vertical face in at least two 10 cm cells. The face
+    # exception is what preserves the top of a nominal 12 cm curb.
+    horizontal_surface_filter_enabled: true
+    horizontal_surface_cell_size_m: 0.10
+    horizontal_surface_min_component_points: 8
+    horizontal_surface_min_up_alignment: 0.98
+    horizontal_surface_max_plane_thickness_m: 0.07
+    horizontal_surface_near_bypass_range_m: 3.0
+    horizontal_surface_vertical_bin_size_m: 0.02
+    horizontal_surface_vertical_min_points_per_bin: 2
+    horizontal_surface_vertical_min_run_bins: 5
+    horizontal_surface_vertical_min_occupied_bins: 4
+    horizontal_surface_vertical_min_support_cells: 2
+    # Odom-stabilized persistence rejects far RGB-D road artefacts that move
+    # as the vehicle turns. Near hazards publish immediately; beyond 3 m a
+    # return must occupy the same 10 cm BEV neighborhood in two of the three
+    # previous frames. Bag A/B retained cones, vehicles, curbs and walls while
+    # substantially reducing transient open-road clusters in bag replay.
+    temporal_obstacle_filter_enabled: true
+    temporal_obstacle_odom_topic: /odom
+    temporal_obstacle_history_frames: 3
+    temporal_obstacle_min_previous_hits: 2
+    temporal_obstacle_cell_size_m: 0.10
+    temporal_obstacle_neighbor_cells: 1
+    temporal_obstacle_near_bypass_range_m: 3.0
+    temporal_obstacle_max_odom_age_sec: 0.20
     # Publish every obstacle point from the source depth cloud, just like the
     # ground output after the radius filter above.
     obstacle_voxel_size_m: 0.0

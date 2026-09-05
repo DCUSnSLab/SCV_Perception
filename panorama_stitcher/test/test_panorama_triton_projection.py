@@ -31,6 +31,7 @@ def synthetic_parameters(use_triton: bool):
         "auto_seam_center": True,
         "seam_angle_deg": 0.0,
         "depth_color_band_margin_deg": 0.0,
+        "depth_projection_stride": 1,
         "pointcloud_stride": 2,
         "min_depth_m": 0.2,
         "max_depth_m": 15.0,
@@ -39,6 +40,7 @@ def synthetic_parameters(use_triton: bool):
         "depth_splat_radius_px": 1,
         "depth_edge_splat_radius_px": 0,
         "occlusion_switch_margin_m": 0.05,
+        "pytorch_output_space_splat": False,
         "use_triton_projection": use_triton,
     }
     for prefix in ("left", "right"):

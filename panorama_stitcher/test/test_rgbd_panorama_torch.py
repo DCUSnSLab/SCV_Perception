@@ -7,6 +7,7 @@ import sys
 import threading
 import time
 
+import numpy as np
 import pytest
 from sensor_msgs.msg import CameraInfo, Image
 import torch
@@ -29,6 +30,53 @@ def _image_at(milliseconds: int) -> Image:
     message.header.stamp.sec = nanoseconds // 1_000_000_000
     message.header.stamp.nanosec = nanoseconds % 1_000_000_000
     return message
+
+
+def _depth_image(encoding: str, values: np.ndarray) -> Image:
+    message = Image()
+    message.height, message.width = values.shape
+    message.encoding = encoding
+    message.is_bigendian = False
+    message.step = values.strides[0]
+    message.data = values.tobytes()
+    return message
+
+
+def test_depth_numpy_uses_millimetre_scale_for_realsense_uint16():
+    node = object.__new__(RgbdPanoramaTorchNode)
+    message = _depth_image(
+        "16UC1", np.array([[1000, 2500], [0, 9999]], dtype=np.uint16)
+    )
+
+    depth, scale = node._depth_numpy(message, 0.001)
+
+    assert depth.dtype == np.uint16
+    assert depth.tolist() == [[1000, 2500], [0, 9999]]
+    assert scale == pytest.approx(0.001)
+
+
+def test_depth_numpy_keeps_gazebo_float32_metres():
+    node = object.__new__(RgbdPanoramaTorchNode)
+    message = _depth_image(
+        "32FC1", np.array([[1.0, 2.5], [0.0, 9.999]], dtype=np.float32)
+    )
+
+    depth, scale = node._depth_numpy(message, 0.001)
+
+    assert depth.dtype == np.float32
+    np.testing.assert_allclose(
+        depth,
+        np.array([[1.0, 2.5], [0.0, 9.999]], dtype=np.float32),
+    )
+    assert scale == pytest.approx(1.0)
+
+
+def test_depth_numpy_rejects_unsupported_encoding():
+    node = object.__new__(RgbdPanoramaTorchNode)
+    message = _depth_image("8UC1", np.ones((2, 2), dtype=np.uint8))
+
+    with pytest.raises(RuntimeError, match="unsupported depth encoding"):
+        node._depth_numpy(message, 0.001)
 
 
 def test_sync_statistics_count_success_stale_input_and_span():
@@ -172,6 +220,7 @@ def synthetic_parameters():
         "color_reference_plane_z_m": 0.0,
         "auto_seam_center": True,
         "seam_angle_deg": 0.0,
+        "far_seam_blend_width_deg": 0.0,
         "depth_color_band_margin_deg": 0.0,
         "pointcloud_stride": 2,
         "depth_projection_stride": 1,

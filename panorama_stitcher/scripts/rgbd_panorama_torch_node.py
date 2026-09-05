@@ -928,6 +928,34 @@ class TorchPanoramaBackend:
         panorama[base_owner_left] = left_base[base_owner_left]
         panorama[base_owner_right] = right_base[base_owner_right]
 
+        # Distant objects normally use the stable reference-plane warp because
+        # D435 depth becomes sparse before the end of the useful colour range.
+        # A hard ownership switch can still make a sub-pixel calibration error
+        # look like a cut through a thin pole or tree.  Feather only the base
+        # (far-field) images near the seam; valid near-field depth samples below
+        # overwrite this band with their metric reprojection as before.
+        blend_width_deg = max(
+            0.0, float(self.parameters.get("far_seam_blend_width_deg", 0.0))
+        )
+        blend_half_width_px = 0.5 * math.radians(blend_width_deg) * projection.focal_px
+        if blend_half_width_px > 0.0:
+            columns = torch.arange(
+                projection.width, device=self.device, dtype=torch.float32
+            )[None, :]
+            right_weight = torch.clamp(
+                0.5 + (columns - projection.seam_x) / (2.0 * blend_half_width_px),
+                0.0,
+                1.0,
+            )
+            feather_mask = projection.left_mask & projection.right_mask & (
+                torch.abs(columns - projection.seam_x) <= blend_half_width_px
+            )
+            blended_base = (
+                left_base * (1.0 - right_weight[..., None])
+                + right_base * right_weight[..., None]
+            )
+            panorama[feather_mask] = blended_base[feather_mask]
+
         if bool(self.parameters["depth_aware_color"]):
             left_source = left_bgr.reshape(-1, 3)
             right_source = right_bgr.reshape(-1, 3)
@@ -1322,6 +1350,28 @@ class RgbdPanoramaTorchNode(Node):
             return selected.reshape(int(message.height), int(message.width))
         return selected.reshape(int(message.height), int(message.width), channels)
 
+    @classmethod
+    def _depth_numpy(
+        cls,
+        message: Image,
+        depth_scale_m: float,
+    ) -> tuple[np.ndarray, float]:
+        """Return the native depth array and its scale to metres.
+
+        RealSense publishes unsigned 16-bit millimetres, while the Gazebo
+        depth cameras publish 32-bit floating-point metres. Reading a Gazebo
+        image as uint16 corrupts both its row stride and every depth value.
+        """
+        encoding = message.encoding.lower()
+        if encoding in ("16uc1", "mono16"):
+            return cls._image_numpy(message, np.uint16, 1), float(depth_scale_m)
+        if encoding == "32fc1":
+            return cls._image_numpy(message, np.float32, 1), 1.0
+        raise RuntimeError(
+            f"unsupported depth encoding {message.encoding!r}; "
+            "expected 16UC1, mono16, or 32FC1"
+        )
+
     @staticmethod
     def _color_to_bgr(message: Image, image: torch.Tensor) -> torch.Tensor:
         encoding = message.encoding.lower()
@@ -1452,22 +1502,28 @@ class RgbdPanoramaTorchNode(Node):
         process_cpu_start = time.process_time()
         left_color_np = self._image_numpy(left_color_message, np.uint8, 3)
         right_color_np = self._image_numpy(right_color_message, np.uint8, 3)
-        left_depth_np = self._image_numpy(left_depth_message, np.uint16, 1)
-        right_depth_np = self._image_numpy(right_depth_message, np.uint16, 1)
+        depth_scale_m = float(self.parameters["depth_scale_m"])
+        left_depth_np, left_depth_scale = self._depth_numpy(
+            left_depth_message,
+            depth_scale_m,
+        )
+        right_depth_np, right_depth_scale = self._depth_numpy(
+            right_depth_message,
+            depth_scale_m,
+        )
         left_color = self._color_to_bgr(
             left_color_message, self._stage_input("left_color", left_color_np)
         )
         right_color = self._color_to_bgr(
             right_color_message, self._stage_input("right_color", right_color_np)
         )
-        depth_scale = float(self.parameters["depth_scale_m"])
         left_depth = (
             self._stage_input("left_depth", left_depth_np).to(torch.float32)
-            * depth_scale
+            * left_depth_scale
         )
         right_depth = (
             self._stage_input("right_depth", right_depth_np).to(torch.float32)
-            * depth_scale
+            * right_depth_scale
         )
         input_staged = time.monotonic()
 

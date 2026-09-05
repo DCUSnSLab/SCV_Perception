@@ -60,5 +60,5 @@ charuco_rig_calibrator:
     camera_serial: "239122073045"
     device_model: Intel RealSense D435if
 
-    output_calibration_file: /home/ssc/SSC/src/perception/panorama_stitcher/config/rig_extrinsics.yaml
-    output_report_file: /home/ssc/SSC/src/perception/panorama_stitcher/config/rig_calibration_report.yaml
+    output_calibration_file: /home/ssc/SSC-260825/src/perception/panorama_stitcher/config/rig_extrinsics.yaml
+    output_report_file: /home/ssc/SSC-260825/src/perception/panorama_stitcher/config/rig_calibration_report.yaml

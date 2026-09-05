@@ -6,12 +6,15 @@ rear_ground_segmentation:
     publish_ground_cloud: true
 
     # RealSense optical frame: +X right, +Y down, +Z forward. The rear camera
-    # points straight backward with a physical 30 deg downward pitch, so
-    # vehicle +Z expressed in rear_color_optical_frame is [0, -cos(30),
-    # -sin(30)]. This compensates the mount pitch before applying the road
-    # slope tolerance; flat ground is therefore 0 deg, not 30 deg.
-    expected_up_vector: [0.0, -0.8660254037844386, -0.5]
-    max_ground_tilt_deg: 35.0
+    # points backward with a physical 30 deg downward pitch. These calibrated
+    # base_link axes include the RealSense color-frame factory rotation.
+    expected_up_vector: [0.000445542580, -0.864990743780, -0.501787619084]
+    vehicle_forward_vector: [-0.000372073187, 0.501787490762, -0.864990852944]
+    vehicle_left_vector: [0.999999831527, 0.000572091975, -0.000098272169]
+    # Rear camera is 68.5 cm behind base_link. Including this lever arm is
+    # essential for temporal BEV consistency during a T/parallel turn.
+    sensor_origin_vehicle_xy_m: [-0.684779832417, -0.014809559712]
+    max_ground_tilt_deg: 40.0
 
     # Keep the same geometry policy as the calibrated front panorama. The rear
     # camera is mounted at the same physical height as the front rig. Score
@@ -34,13 +37,68 @@ rear_ground_segmentation:
     min_plane_distance_from_origin_m: 0.80
     max_plane_distance_from_origin_m: 1.40
 
+    # Suppress dense rough-road residuals that a point-radius filter cannot
+    # remove, while retaining curbs and vertical obstacles across the local
+    # step/slope gate. Disable this switch for one-command rollback.
+    ground_region_filter_enabled: true
+    # The 10 cm grid and 9.4 cm neighbour-height gate stay below a nominal
+    # 12 cm curb while still permitting a locally continuous 40 deg ramp.
+    ground_region_grid_size_m: 0.10
+    ground_region_max_step_m: 0.01
+    ground_region_max_slope_deg: 40.0
+    ground_region_max_plane_residual_m: 0.30
+    ground_region_point_tolerance_m: 0.06
+    ground_region_min_points: 2
+
+    temporal_ground_recovery_enabled: false
+    temporal_ground_history_frames: 2
+    temporal_ground_distance_threshold_m: 0.05
+    temporal_ground_max_normal_delta_deg: 2.0
+    temporal_ground_max_offset_delta_m: 0.06
+
     obstacle_min_height_m: 0.10
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0
-    # Keep rear behavior unchanged until the front outdoor filter is validated.
-    obstacle_radius_filter_radius_m: 0.0
-    obstacle_radius_filter_min_neighbors: 0
+    # Apply the same source-stage support gate as the panorama. Live validation
+    # retained the dense nearby obstacle while reducing sparse 4..8 m returns
+    # from 76 to 22 before they can reach any downstream consumer.
+    obstacle_radius_filter_radius_m: 0.15
+    obstacle_radius_filter_min_neighbors: 8
+    obstacle_far_radius_filter_start_m: 5.0
+    obstacle_far_radius_filter_radius_m: 0.40
+    obstacle_far_radius_filter_min_neighbors: 8
+    # Same traversable-horizontal-sheet rejection as the front panorama. The
+    # rear cloud is sampled 4x4, so one return per height bin and three bins
+    # are sufficient for a 12 cm curb face; support is still required in two
+    # adjacent 10 cm cells before a horizontal top is retained.
+    horizontal_surface_filter_enabled: true
+    horizontal_surface_cell_size_m: 0.10
+    horizontal_surface_min_component_points: 8
+    horizontal_surface_min_up_alignment: 0.98
+    horizontal_surface_max_plane_thickness_m: 0.07
+    horizontal_surface_near_bypass_range_m: 3.0
+    horizontal_surface_vertical_bin_size_m: 0.02
+    horizontal_surface_vertical_min_points_per_bin: 1
+    horizontal_surface_vertical_min_run_bins: 5
+    horizontal_surface_vertical_min_occupied_bins: 3
+    horizontal_surface_vertical_min_support_cells: 2
+    # Odom persistence now uses the calibrated rear forward/left axes and
+    # camera lever arm rather than the front optical-frame convention.
+    temporal_obstacle_filter_enabled: true
+    temporal_obstacle_odom_topic: /odom
+    # Rear live capture on 2026-09-02 showed only transient road residuals in
+    # the empty scene. Requiring three of four previous frames reduced their
+    # total to 28.5% while the <3 m safety bypass remains immediate.
+    temporal_obstacle_history_frames: 4
+    temporal_obstacle_min_previous_hits: 3
+    temporal_obstacle_cell_size_m: 0.10
+    temporal_obstacle_neighbor_cells: 1
+    temporal_obstacle_near_bypass_range_m: 3.0
+    # The current rear cloud leads the odom callback by 0.26..0.58 s because
+    # the large depth callback occupies the executor. The node extrapolates
+    # odometry twist to cloud time within this bounded window.
+    temporal_obstacle_max_odom_age_sec: 0.75
     # Publish every obstacle point from the source depth cloud, matching the
     # front and ground-cloud output policy.
     obstacle_voxel_size_m: 0.0
