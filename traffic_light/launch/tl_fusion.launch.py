@@ -4,10 +4,21 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from pathlib import Path
+import os
 
 def _default_tl_model() -> str:
+    # Installed launch files live outside the source tree, so the walk-up
+    # search below finds nothing; MANDO_WS pins the package directory.
+    search_roots: list[Path] = []
+    for env_name in ('MANDO_WS', 'MANDO_WORKSPACE'):
+        env_root = os.environ.get(env_name)
+        if env_root:
+            search_roots.append(Path(env_root).expanduser())
+
     launch_file = Path(__file__).resolve()
-    for root in [launch_file.parent, *launch_file.parents]:
+    search_roots.extend([launch_file.parent, *launch_file.parents])
+
+    for root in search_roots:
         candidate = root / 'model' / 'best.pt'
         if candidate.exists():
             return str(candidate)

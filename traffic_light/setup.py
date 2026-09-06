@@ -29,7 +29,6 @@ setup(
     maintainer_email='ki@localhost',
     description='Utility package for the mando ROS 2 workspace.',
     license='Apache-2.0',
-    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'mando_bag = mando_tools.bag_cli:main',

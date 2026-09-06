@@ -4,8 +4,8 @@
 
 대상 파일:
 
-- `src/mando_tools/mando_tools/tl_fusion.py`
-- `src/mando_tools/launch/tl_fusion.launch.py`
+- `src/perception/traffic_light/mando_tools/tl_fusion.py`
+- `src/perception/traffic_light/launch/tl_fusion.launch.py`
 
 ## 1. 출력 상태
 
@@ -31,7 +31,13 @@ launch로 실행:
 ros2 launch mando_tools tl_fusion.launch.py
 ```
 
-`tl_fusion.launch.py`는 bag를 직접 재생하지 않는다. 기본 입력 토픽은 `default_image_topic()`에서 결정되며, 기본 bag profile인 `stop_points`에서는 `/zed/zed_node/left/image_rect_color`를 사용한다.
+`tl_fusion.launch.py`는 bag를 직접 재생하지 않는다. launch의 기본 입력 토픽은 `/panorama/image_raw`이고, `ros2 run`으로 직접 띄우면 `default_runtime_image_topic()`이 정하는 `/mando/input/image`를 사용한다(`MANDO_IMAGE_TOPIC`으로 덮어쓸 수 있다).
+
+install space에서 실행할 때는 노드가 소스 트리를 찾지 못하므로, 기본 `model_path` 해석을 위해 `MANDO_WS`를 지정하거나 `model_path`를 직접 넘긴다.
+
+```bash
+export MANDO_WS=/home/ssc/SSC/src/perception/traffic_light
+```
 
 ## 3. 전체 처리 흐름
 

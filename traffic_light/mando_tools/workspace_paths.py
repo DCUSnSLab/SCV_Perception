@@ -36,7 +36,9 @@ def _is_workspace_root(path: Path) -> bool:
     )
 
 
-def workspace_root() -> Path:
+def workspace_root_or_none() -> Path | None:
+    # Nodes installed into a colcon install space no longer sit inside the
+    # source tree, so the walk-up search can legitimately come up empty.
     env_candidates = [
         os.environ.get('MANDO_WS'),
         os.environ.get('MANDO_WORKSPACE'),
@@ -52,7 +54,17 @@ def workspace_root() -> Path:
             if _is_workspace_root(root):
                 return root
 
-    raise RuntimeError('Could not locate the mando workspace root.')
+    return None
+
+
+def workspace_root() -> Path:
+    root = workspace_root_or_none()
+    if root is None:
+        raise RuntimeError(
+            'Could not locate the mando workspace root. '
+            'Set MANDO_WS to the traffic_light package directory.'
+        )
+    return root
 
 
 def _default_bag_selection() -> str:
@@ -136,8 +148,14 @@ def _cuda_available() -> bool:
         return False
 
 
-def local_python_deps_path() -> Path:
-    root_deps = workspace_root() / '.deps'
+def local_python_deps_path() -> Path | None:
+    # Optional runtime asset: absent when the package runs from an install
+    # space, which must not stop the node from importing.
+    root = workspace_root_or_none()
+    if root is None:
+        return None
+
+    root_deps = root / '.deps'
     if root_deps.exists():
         return root_deps
-    return workspace_root() / 'mando_tools' / '.deps'
+    return root / 'mando_tools' / '.deps'

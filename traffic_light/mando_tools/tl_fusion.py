@@ -13,10 +13,10 @@ from typing import Any
 from .workspace_paths import local_python_deps_path
 from .workspace_paths import default_runtime_image_topic
 from .workspace_paths import resolve_inference_device
-from .workspace_paths import workspace_root
+from .workspace_paths import workspace_root_or_none
 
 deps_path = local_python_deps_path()
-if deps_path.exists():
+if deps_path is not None and deps_path.exists():
     sys.path.insert(0, str(deps_path))
 
 import cv2
@@ -65,10 +65,14 @@ COLOR_TO_STATE = {
 
 
 def default_tl_model_path() -> str:
-    best = workspace_root() / 'model' / 'best.pt'
+    root = workspace_root_or_none()
+    if root is None:
+        return 'best.pt'
+
+    best = root / 'model' / 'best.pt'
     if best.exists():
         return str(best)
-    candidate = workspace_root() / 'yolo11s.pt'
+    candidate = root / 'yolo11s.pt'
     return str(candidate) if candidate.exists() else 'yolo11s.pt'
 
 

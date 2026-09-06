@@ -10,7 +10,7 @@ from .workspace_paths import default_runtime_image_topic
 from .workspace_paths import local_python_deps_path
 
 deps_path = local_python_deps_path()
-if deps_path.exists():
+if deps_path is not None and deps_path.exists():
     sys.path.insert(0, str(deps_path))
 
 import cv2

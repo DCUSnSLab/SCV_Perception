@@ -15,7 +15,7 @@ from .workspace_paths import resolve_inference_device
 # 워크스페이스 로컬 의존성을 우선 로드해 전역 ROS/시스템 환경을 건드리지 않고
 # 런타임 import를 만족시킨다.
 deps_path = local_python_deps_path()
-if deps_path.exists():
+if deps_path is not None and deps_path.exists():
     sys.path.insert(0, str(deps_path))
 
 from cv_bridge import CvBridge
