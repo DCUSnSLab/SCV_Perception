@@ -24,7 +24,7 @@ def generate_launch_description():
     }
 
     return LaunchDescription([
-        DeclareLaunchArgument('use_sim_time', default_value='true'),
+        DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('enable_rear', default_value='true'),
         Node(
             package='panorama_stitcher',
@@ -53,12 +53,6 @@ def generate_launch_description():
                     'rear_ground_segmentation.yaml',
                 ]),
                 common_parameters,
-                {
-                    # Gazebo's depth camera publishes the same XYZRGB cloud
-                    # without the RealSense wrapper's extra /color namespace.
-                    # Keep the real-car output contract unchanged.
-                    'input_topic': '/rear/rear/depth/points',
-                },
             ],
             additional_env=bounded_math_threads,
             condition=IfCondition(enable_rear),

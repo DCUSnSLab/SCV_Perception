@@ -76,8 +76,11 @@ panorama_ground_segmentation:
     temporal_ground_max_normal_delta_deg: 2.0
     temporal_ground_max_offset_delta_m: 0.06
 
-    # Only points clearly above the fitted ground enter the costmap.
-    obstacle_min_height_m: 0.10
+    # Keep low curb faces in the obstacle cloud. A full 781-frame replay of
+    # parking_I1_20260906_153550 at 6 cm increased curb-face density without
+    # creating a large open-road cluster in that bag. It did raise the median
+    # obstacle count by 8.3%, so restore 0.10 if outdoor road speckles return.
+    obstacle_min_height_m: 0.06
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0

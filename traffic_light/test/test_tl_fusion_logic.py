@@ -19,9 +19,13 @@ class RecordingPublisher:
 class RecordingLogger:
     def __init__(self) -> None:
         self.errors = []
+        self.infos = []
 
     def error(self, message: str) -> None:
         self.errors.append(message)
+
+    def info(self, message: str) -> None:
+        self.infos.append(message)
 
 
 def test_model_class_state_mapping() -> None:
@@ -45,6 +49,8 @@ def test_model_class_state_mapping() -> None:
 
 def test_image_timeout_publishes_unknown_and_invalid() -> None:
     node = object.__new__(TLFusionNode)
+    node.node_type_gate_enabled = False
+    node.traffic_light_zone_active = True
     node.input_timeout_s = 3.0
     node.last_image_received_monotonic_ns = time.monotonic_ns() - 4_000_000_000
     node.input_timeout_active = False
@@ -70,3 +76,41 @@ def test_image_timeout_publishes_unknown_and_invalid() -> None:
     assert node.state_pub.messages[-1].data == STATE_UNKNOWN
     assert 'input_timeout' in node.state_reason_pub.messages[-1].data
     assert len(logger.errors) == 1
+
+
+def test_node_type_gate_publishes_once_when_leaving_type_10() -> None:
+    node = object.__new__(TLFusionNode)
+    node.traffic_light_node_type = 10
+    node.traffic_light_zone_active = False
+    node.waypoint_state_received = False
+    node.latest_msg = object()
+    node.current_state = STATE_GREEN
+    node.current_source = 'model'
+    node.current_reason = 'vehicular_green'
+    node.state_history = deque([STATE_GREEN], maxlen=5)
+    node.last_candidate_box = (1, 2, 3, 4)
+    node.last_overlay_candidate = object()
+    node.input_timeout_active = False
+    node.gate_active_pub = RecordingPublisher()
+    node.input_valid_pub = RecordingPublisher()
+    node.state_pub = RecordingPublisher()
+    node.state_label_pub = RecordingPublisher()
+    node.state_reason_pub = RecordingPublisher()
+    node.get_logger = lambda: RecordingLogger()
+    node._now_ns = lambda: 1
+
+    type_10 = type('Waypoint', (), {'current_goal_node_type': 10})()
+    type_1 = type('Waypoint', (), {'current_goal_node_type': 1})()
+
+    node._waypoint_callback(type_10)
+    assert node.traffic_light_zone_active is True
+    assert not node.state_pub.messages
+
+    node._waypoint_callback(type_1)
+    assert node.traffic_light_zone_active is False
+    assert node.state_pub.messages[-1].data == STATE_UNKNOWN
+    assert node.input_valid_pub.messages[-1].data is False
+    assert 'exited_traffic_light_section' in node.state_reason_pub.messages[-1].data
+
+    node._waypoint_callback(type_1)
+    assert len(node.state_pub.messages) == 1

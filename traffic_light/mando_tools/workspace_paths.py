@@ -17,6 +17,10 @@ _BAG_PROFILES = {
 }
 _FALLBACK_IMAGE_TOPIC = _BAG_PROFILES['mando_ros2']['image_topic']
 _DEFAULT_RUNTIME_IMAGE_TOPIC = '/mando/input/image'
+# In SSC this ROS package is kept as a nested perception component.  Installed
+# Python/launch files live under install/mando_tools, so walking parents alone
+# cannot see the package's model, data, and optional local dependencies.
+_SSC_TRAFFIC_LIGHT_RELATIVE_PATH = Path('src/perception/traffic_light')
 
 
 def _iter_search_roots(start: Path) -> list[Path]:
@@ -36,6 +40,15 @@ def _is_workspace_root(path: Path) -> bool:
     )
 
 
+def _iter_workspace_candidates(start: Path) -> list[Path]:
+    """Return standalone and SSC-nested package roots reachable from start."""
+    candidates = []
+    for root in _iter_search_roots(start):
+        candidates.append(root)
+        candidates.append(root / _SSC_TRAFFIC_LIGHT_RELATIVE_PATH)
+    return candidates
+
+
 def workspace_root() -> Path:
     env_candidates = [
         os.environ.get('MANDO_WS'),
@@ -47,8 +60,12 @@ def workspace_root() -> Path:
         if candidate:
             search_starts.insert(0, Path(candidate))
 
+    checked = set()
     for start in search_starts:
-        for root in _iter_search_roots(start):
+        for root in _iter_workspace_candidates(start):
+            if root in checked:
+                continue
+            checked.add(root)
             if _is_workspace_root(root):
                 return root
 

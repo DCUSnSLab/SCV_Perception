@@ -56,7 +56,9 @@ rear_ground_segmentation:
     temporal_ground_max_normal_delta_deg: 2.0
     temporal_ground_max_offset_delta_m: 0.06
 
-    obstacle_min_height_m: 0.10
+    # Match the front detector's 6 cm curb-height experiment. Restore 0.10 if
+    # low road/depth noise increases during the rear-camera outdoor test.
+    obstacle_min_height_m: 0.06
     obstacle_max_height_m: 2.0
     obstacle_min_range_m: 0.25
     obstacle_max_range_m: 8.0

@@ -22,6 +22,7 @@ if deps_path.exists():
 import cv2
 import numpy as np
 import rclpy
+from command_center_interfaces.msg import MultipleWaypoints
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.qos import QoSProfile
@@ -128,6 +129,21 @@ class TLFusionNode(Node):
         self.show_windows = bool(self._declare_param('show_windows', False))
         self.input_timeout_s = float(self._declare_param('input_timeout_s', 3.0))
 
+        # Run and publish only while the current target is the traffic-light
+        # node.  Set this false for standalone camera/model bench testing.
+        self.node_type_gate_enabled = bool(
+            self._declare_param('node_type_gate_enabled', True)
+        )
+        # /multiple_waypoints carries the current target node type selected by
+        # the waypoint/behavior pipeline.
+        self.waypoint_topic = str(
+            self._declare_param('waypoint_topic', '/multiple_waypoints')
+        )
+        # SSC map convention: NodeType 10 is the traffic-light section.
+        self.traffic_light_node_type = int(
+            self._declare_param('traffic_light_node_type', 10)
+        )
+
         self.max_fps = float(self._declare_param('max_fps', 15.0))
         requested_device = str(self._declare_param('detector_device', 'cuda:0'))
         self.detector_device = resolve_inference_device(requested_device)
@@ -229,6 +245,11 @@ class TLFusionNode(Node):
         self._last_invalid_input_reason: str | None = None
         self._last_invalid_input_log_time = 0.0
 
+        # With gating enabled, remain quiet until the route first enters type
+        # 10.  On leaving type 10, one UNKNOWN is published to clear consumers.
+        self.traffic_light_zone_active = not self.node_type_gate_enabled
+        self.waypoint_state_received = False
+
         self.create_subscription(
             Image,
             self.image_topic,
@@ -243,6 +264,22 @@ class TLFusionNode(Node):
         self.state_label_pub = self.create_publisher(String, '/tl/state_label', status_qos)
         self.state_reason_pub = self.create_publisher(String, '/tl/state_reason', status_qos)
         self.input_valid_pub = self.create_publisher(Bool, '/tl/input_valid', status_qos)
+        self.gate_active_pub = self.create_publisher(Bool, '/tl/gate_active', status_qos)
+
+        if self.node_type_gate_enabled:
+            self.create_subscription(
+                MultipleWaypoints,
+                self.waypoint_topic,
+                self._waypoint_callback,
+                status_qos,
+            )
+            self.get_logger().info(
+                f'Traffic-light output gate enabled: {self.waypoint_topic} '
+                f'NodeType={self.traffic_light_node_type}'
+            )
+        else:
+            self.gate_active_pub.publish(Bool(data=True))
+            self.get_logger().info('Traffic-light output gate disabled (standalone mode)')
 
         timer_period = 1.0 / max(self.max_fps, 0.1)
         self.create_timer(timer_period, self._process_latest_frame)
@@ -251,10 +288,62 @@ class TLFusionNode(Node):
         return self.declare_parameter(name, default_value).value
 
     def _image_callback(self, msg: Image) -> None:
+        if self.node_type_gate_enabled and not self.traffic_light_zone_active:
+            return
         self.last_image_received_monotonic_ns = time.monotonic_ns()
         self.latest_msg = msg
 
+    def _waypoint_callback(self, msg: MultipleWaypoints) -> None:
+        """Open the output gate for NodeType 10 and clear it once on exit."""
+        active = int(msg.current_goal_node_type) == self.traffic_light_node_type
+        was_active = self.traffic_light_zone_active
+        self.waypoint_state_received = True
+        self.gate_active_pub.publish(Bool(data=active))
+
+        if active == was_active:
+            return
+
+        self.traffic_light_zone_active = active
+        self.latest_msg = None
+        self._reset_detection_state()
+
+        if active:
+            self.last_image_received_monotonic_ns = time.monotonic_ns()
+            self.input_timeout_active = False
+            self.get_logger().info(
+                f'Entered NodeType {self.traffic_light_node_type}: '
+                'publishing traffic-light state continuously'
+            )
+            return
+
+        self._publish_gate_closed()
+        self.get_logger().info(
+            f'Exited NodeType {self.traffic_light_node_type}: '
+            'published final UNKNOWN and stopped traffic-light output'
+        )
+
+    def _reset_detection_state(self) -> None:
+        self.current_state = STATE_UNKNOWN
+        self.current_source = 'node_type_gate'
+        self.current_reason = 'reset'
+        self.last_state_change_ns = self._now_ns()
+        self.last_seen_candidate_ns = self._now_ns()
+        self.state_history.clear()
+        self.last_candidate_box = None
+        self.last_overlay_candidate = None
+
+    def _publish_gate_closed(self) -> None:
+        """Publish one explicit clear message when the type-10 section ends."""
+        self.input_valid_pub.publish(Bool(data=False))
+        self.state_pub.publish(Int32(data=int(STATE_UNKNOWN)))
+        self.state_label_pub.publish(String(data=STATE_LABELS[STATE_UNKNOWN]))
+        self.state_reason_pub.publish(
+            String(data='UNKNOWN node_type_gate exited_traffic_light_section')
+        )
+
     def _process_latest_frame(self) -> None:
+        if self.node_type_gate_enabled and not self.traffic_light_zone_active:
+            return
         if self.processing:
             return
         if self.latest_msg is None:
@@ -345,6 +434,8 @@ class TLFusionNode(Node):
             self.processing = False
 
     def _publish_timeout_if_needed(self) -> None:
+        if self.node_type_gate_enabled and not self.traffic_light_zone_active:
+            return
         if self.input_timeout_s <= 0.0:
             return
 

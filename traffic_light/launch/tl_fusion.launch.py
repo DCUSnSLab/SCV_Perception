@@ -3,17 +3,19 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from pathlib import Path
+
+from mando_tools.workspace_paths import default_model_path
+
 
 def _default_tl_model() -> str:
-    launch_file = Path(__file__).resolve()
-    for root in [launch_file.parent, *launch_file.parents]:
-        candidate = root / 'model' / 'best.pt'
-        if candidate.exists():
-            return str(candidate)
-        if root.name == 'traffic_light':
-            return str(candidate)
-    return 'best.pt'
+    """Resolve the model from either a standalone or SSC-nested checkout."""
+    try:
+        return str(default_model_path())
+    except RuntimeError:
+        # Preserve a useful node-level FileNotFoundError when the source tree
+        # really is unavailable instead of failing while parsing the launch.
+        return 'best.pt'
+
 
 def generate_launch_description() -> LaunchDescription:
     model_arg = DeclareLaunchArgument(
@@ -30,6 +32,24 @@ def generate_launch_description() -> LaunchDescription:
         'state_topic',
         default_value='/tl/state_id',
         description='Final traffic-light state topic consumed by Behavior Planner.',
+    )
+    node_type_gate_arg = DeclareLaunchArgument(
+        'node_type_gate_enabled',
+        default_value='true',
+        description=(
+            'Publish continuously only while current_goal_node_type is the '
+            'traffic-light type; disable for standalone detector tests.'
+        ),
+    )
+    waypoint_topic_arg = DeclareLaunchArgument(
+        'waypoint_topic',
+        default_value='/multiple_waypoints',
+        description='Waypoint topic that carries current_goal_node_type.',
+    )
+    traffic_light_node_type_arg = DeclareLaunchArgument(
+        'traffic_light_node_type',
+        default_value='10',
+        description='Map node type that enables traffic-light state output.',
     )
     input_timeout_arg = DeclareLaunchArgument(
         'input_timeout_s',
@@ -81,6 +101,15 @@ def generate_launch_description() -> LaunchDescription:
                 'model_path': LaunchConfiguration('model_path'),
                 'image_topic': LaunchConfiguration('image_topic'),
                 'state_topic': LaunchConfiguration('state_topic'),
+                'node_type_gate_enabled': ParameterValue(
+                    LaunchConfiguration('node_type_gate_enabled'),
+                    value_type=bool,
+                ),
+                'waypoint_topic': LaunchConfiguration('waypoint_topic'),
+                'traffic_light_node_type': ParameterValue(
+                    LaunchConfiguration('traffic_light_node_type'),
+                    value_type=int,
+                ),
                 'input_timeout_s': ParameterValue(
                     LaunchConfiguration('input_timeout_s'),
                     value_type=float,
@@ -119,6 +148,9 @@ def generate_launch_description() -> LaunchDescription:
             model_arg,
             image_topic_arg,
             state_topic_arg,
+            node_type_gate_arg,
+            waypoint_topic_arg,
+            traffic_light_node_type_arg,
             input_timeout_arg,
             show_windows_arg,
             fps_arg,

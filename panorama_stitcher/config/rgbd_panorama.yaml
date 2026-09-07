@@ -23,7 +23,7 @@ panorama_stitcher:
     # 4 (20.4k vs 11.4k) while preserving roughly 24-25 Hz obstacle output.
     # Stride 2 emitted about 45.4k points but reduced output to 17-19 Hz.
     pointcloud_stride: 3
-    # Sample spacing for 3D depth reprojection. One keeps every aligned 720p
+    # Sample spacing for 3D depth reprojection. One keeps every aligned 1080p
     # depth pixel; two is the real-time mode evaluated below and leaves the
     # full-resolution RGB cylindrical warp unchanged.
     # Stride 1 used four times as many CUDA source samples but increased the
@@ -37,7 +37,7 @@ panorama_stitcher:
     # each topic one independent publisher thread with a single latest-frame
     # slot, so no stale backlog can accumulate and reliable QoS is preserved.
     asynchronous_publish: true
-    # Reuse page-locked CPU staging buffers for the four 720p inputs and the
+    # Reuse page-locked CPU staging buffers for the four 1080p inputs and the
     # three panorama outputs. This makes H2D/D2H copies genuinely asynchronous
     # and avoids allocating pageable staging memory every frame.
     pinned_memory_io: true
@@ -53,7 +53,7 @@ panorama_stitcher:
     # showing it. Set false to restore unconditional publishing.
     publish_only_when_subscribed: true
     # Exposure gain is a slowly varying mean ratio, so it is measured on every
-    # 4th pixel of the 720p sources instead of on full-resolution masks.
+    # 4th pixel of the 1080p sources instead of on full-resolution masks.
     exposure_sample_stride: 4
     # Reliable input readers. A best-effort reader was measured to be much
     # worse here: the middleware discarded most 6 MB colour samples before the
@@ -97,26 +97,26 @@ panorama_stitcher:
     left_input_image_rotated_180: true
     right_input_image_rotated_180: false
 
-    # 720p fallback used only until live CameraInfo arrives. Runtime intrinsics
+    # 1080p fallback used only until live CameraInfo arrives. Runtime intrinsics
     # from each active sensor profile replace these values immediately.
-    left_fx: 917.2926432291666
-    left_fy: 917.3385416666666
+    left_fx: 1375.93896484375
+    left_fy: 1376.0078125
     # Keep native CameraInfo values here; the node applies the 180-degree
     # principal-point transform exactly once for the wrapper-rotated image.
-    left_cx: 641.9837239583333
-    left_cy: 359.9818929036458
-    left_width: 1280
-    left_height: 720
-    right_fx: 913.190673828125
-    right_fy: 913.0777180989583
-    right_cx: 644.9159342447916
-    right_cy: 377.4438069661458
-    right_width: 1280
-    right_height: 720
-    # Replace the fallback intrinsics above with each live 720p sensor profile.
+    left_cx: 962.9755859375
+    left_cy: 539.9728393554688
+    left_width: 1920
+    left_height: 1080
+    right_fx: 1369.7860107421875
+    right_fy: 1369.6165771484375
+    right_cx: 967.3739013671875
+    right_cy: 566.1657104492188
+    right_width: 1920
+    right_height: 1080
+    # Replace the fallback intrinsics above with each live 1080p sensor profile.
     use_runtime_camera_info: true
 
-    # Keep only a bounded recent history of four 720p RGB-D streams. Processing
+    # Keep only a bounded recent history of four 1080p RGB-D streams. Processing
     # always takes the newest synchronized set instead of accumulating latency.
     sync_queue_size: 4
     # Reject the worst ~39-40 ms pairs that visibly duplicate moving objects,
