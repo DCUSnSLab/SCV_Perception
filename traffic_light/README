@@ -136,7 +136,7 @@ ros2 launch mando_tools green_down_arrow.launch.py
 
 ## 한 명령으로 실행
 
-신호등과 녹색 아래 화살표 검출을 함께 실행:
+최종 주행 상태 신호등 검출만 실행한다. 녹색 아래 화살표 실험 노드는 포함하지 않는다:
 
 ```bash
 ros2 launch mando_tools traffic_light.launch.py

@@ -45,7 +45,11 @@
 - `traffic light`와 `etc` 계열은 상태를 직접 해석하지 않는다.
 - `LEFT ARROW`는 `green_arrow`, `left+arrow`, `red+green` 조합으로 해석한다.
 - 종료분기용 `green_arrow(down)`은 주행 신호 상태에서 제외한다.
-- `/tl/debug_image`는 구독자가 있거나 `show_windows=true`일 때만 만든다.
+- 디버그 영상과 색상 하이라이트는 구독자가 있거나 `show_windows=true`일 때만 만든다.
+- `/tl/debug_image` 메시지 변환과 발행은 구독자가 있을 때만 수행한다. 창만 켜면 화면에만 표시하며, 창과 구독자를 함께 사용할 때는 같은 영상을 재사용한다.
+- 후보가 없거나 고신뢰 모델 판정으로 색 분석을 생략하면 색상 inset용 빈 이미지를 만들지 않는다.
+- 검출 박스는 한 번에 CPU로 가져온 뒤 기존 순서와 필터 조건대로 처리한다.
+- 빨강+초록 조합이 확정되면 판정에 사용되지 않는 연결요소 분석을 생략한다. 모델, 판정 임계값, FPS, 상태 안정화와 타임아웃 규칙은 유지한다.
 
 ## 5. launch에서 자주 조절하는 인자
 
@@ -61,3 +65,20 @@
 ```bash
 ros2 launch mando_tools tl_fusion.launch.py
 ```
+
+## 6. GPU 런타임
+
+- 패키지 로컬 `.deps`에 `torch==2.10.0+cu128`, `torchvision==0.25.0+cu128`과 필요한 CUDA 12.8 런타임 라이브러리를 설치했다. 버전 조합은 [PyTorch 공식 설치 안내](https://pytorch.org/get-started/previous-versions/)를 따른다.
+- NumPy는 ROS 영상 변환 환경과의 호환성을 위해 기존 `1.26.4`를 유지한다. 모델, FPS와 판정 임계값은 변경하지 않는다.
+- 노드는 로컬 `.deps`를 우선 사용하므로, 다른 Python 환경에서 확인한 PyTorch 버전과 다를 수 있다.
+- `detector_device=cuda:0`이어도 CUDA를 사용할 수 없으면 기존 장치 선택 로직이 CPU로 전환한다. 아래 명령으로 노드가 사용하는 패키지의 CUDA 지원 여부를 확인한다.
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ki/SSC/install/setup.bash
+export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
+PYTHONPATH="$MANDO_WS/.deps${PYTHONPATH:+:$PYTHONPATH}" python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+ros2 launch mando_tools tl_fusion.launch.py detector_device:=cuda:0
+```
+
+의존성 교체 후에는 실행 중이던 노드를 재시작해야 새 PyTorch가 로드된다.

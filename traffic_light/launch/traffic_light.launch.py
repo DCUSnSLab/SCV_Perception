@@ -42,12 +42,5 @@ def generate_launch_description() -> LaunchDescription:
                     }
                 ],
             ),
-            Node(
-                package='mando_tools',
-                executable='mando_green_down_arrow',
-                name='green_down_arrow_detector',
-                output='screen',
-                parameters=[{'image_topic': image_topic}],
-            ),
         ]
     )
