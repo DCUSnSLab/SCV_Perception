@@ -25,6 +25,24 @@ def generate_launch_description() -> LaunchDescription:
                 default_value='cuda:0',
                 description='YOLO inference device.',
             ),
+            DeclareLaunchArgument(
+                'color_fallback_device',
+                default_value='auto',
+                description='PyTorch device for color fallback. auto follows detector_device.',
+            ),
+            DeclareLaunchArgument(
+                'enable_low_confidence_color_fallback',
+                default_value='true',
+                description=(
+                    'Recheck low-confidence resolved detections with color analysis. '
+                    'Disable for the real-time performance profile.'
+                ),
+            ),
+            DeclareLaunchArgument(
+                'fallback_max_side_px',
+                default_value='640',
+                description='Maximum fallback ROI side before color preprocessing resize.',
+            ),
             Node(
                 package='mando_tools',
                 executable='mando_tl_fusion',
@@ -39,6 +57,15 @@ def generate_launch_description() -> LaunchDescription:
                             value_type=float,
                         ),
                         'detector_device': LaunchConfiguration('detector_device'),
+                        'color_fallback_device': LaunchConfiguration('color_fallback_device'),
+                        'enable_low_confidence_color_fallback': ParameterValue(
+                            LaunchConfiguration('enable_low_confidence_color_fallback'),
+                            value_type=bool,
+                        ),
+                        'fallback_max_side_px': ParameterValue(
+                            LaunchConfiguration('fallback_max_side_px'),
+                            value_type=int,
+                        ),
                     }
                 ],
             ),

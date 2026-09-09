@@ -45,8 +45,8 @@ Python 추론 의존성은 아래 로컬 폴더를 우선 사용한다.
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ssc/SSC/src/perception/install/setup.bash
-ros2 launch mando_tools tl_fusion.launch.py
+source /home/ki/SSC/install/setup.bash
+/home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh
 ```
 
 파노라마 `/panorama/image_raw`가 기본 입력이므로 옵션 없이 실행한다.
@@ -61,6 +61,16 @@ GPU를 사용하지 않을 때:
 
 ```bash
 ros2 launch mando_tools tl_fusion.launch.py detector_device:=cpu
+```
+
+10 FPS 성능 프로파일이 필요하면, 저신뢰 모델 프레임의 CPU 색상 재검증을 끈다. 이 옵션은 저신뢰 색상 보정 동작이 생략되므로 정확도 확인 후 사용한다.
+
+```bash
+/home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh \\
+  detector_device:=cuda:0 \\
+  color_fallback_device:=cuda:0 \\
+  fallback_max_side_px:=640 \\
+  enable_low_confidence_color_fallback:=false
 ```
 
 입력 영상이 3초 동안 갱신되지 않으면 다음을 발행한다.
@@ -121,6 +131,22 @@ ros2 launch mando_tools green_down_arrow.launch.py
 대표 출력은 `/tl/green_down_arrow_detected`, `/tl/green_down_arrow_score`,
 `/tl/green_down_arrow_reason`이다.
 
+검은 배경으로 채워진 디스플레이별 빨강/초록 비트 검출:
+
+```bash
+ros2 launch mando_tools black_box_color_bits.launch.py
+ros2 topic echo /tl/box_color_bits
+```
+
+상단 ROI에서 검은색으로 채워진 디스플레이를 찾고 내부 표시를 HSV로 판정한다. 박스는
+왼쪽부터 정렬하며 초록은 `1`, 빨강은 `0`으로 `/tl/box_color_bits`에
+`UInt8MultiArray`로 발행한다. 예를 들어 결과 `010`은 `data: [0, 1, 0]`이다.
+성능 확인이나 임계값 조정 시에는 다음처럼 디버그 영상을 켤 수 있다:
+
+```bash
+ros2 launch mando_tools black_box_color_bits.launch.py publish_debug_image:=true
+```
+
 `model/mando_arrow_best.pt`는 `O/X`, `model/arrow_best.pt`는 8방향 화살표 클래스
 모델이다. 현재 저장소에는 이 두 모델을
 실행하는 ROS 2 노드가 없으므로 X 검출용 실행 명령은 아직 없다.
@@ -145,7 +171,7 @@ ros2 launch mando_tools traffic_light.launch.py
 새 터미널에서 ROS 환경 source까지 생략하려면 다음 스크립트 하나만 실행한다.
 
 ```bash
-/home/ssc/SSC/src/perception/traffic_light/run_traffic_light.sh
+/home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh
 ```
 
 이 스크립트가 ROS Humble과 `mando_tools` 환경을 내부에서 source한다.

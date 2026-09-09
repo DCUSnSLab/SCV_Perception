@@ -54,6 +54,13 @@ from std_msgs.msg import Int32
 from std_msgs.msg import String
 from ultralytics import YOLO
 
+try:
+    import torch
+    import torch.nn.functional as torch_functional
+except ImportError:  # pragma: no cover - exercised only without local PyTorch.
+    torch = None
+    torch_functional = None
+
 
 # 외부 소비자와 공유하는 상태 ID: 순서 변경이나 재번호 부여는 호환성을 깨뜨린다.
 STATE_UNKNOWN = 0
@@ -196,6 +203,18 @@ class TLFusionNode(Node):
         self.max_fps = float(self._declare_param('max_fps', 15.0))
         requested_device = str(self._declare_param('detector_device', 'cuda:0'))
         self.detector_device = resolve_inference_device(requested_device)
+        requested_color_device = str(
+            self._declare_param('color_fallback_device', 'auto')
+        )
+        if requested_color_device.strip().lower() == 'auto':
+            self.color_fallback_device = self.detector_device
+        else:
+            self.color_fallback_device = resolve_inference_device(requested_color_device)
+        self.use_torch_color_fallback = bool(
+            torch is not None
+            and self.color_fallback_device.lower().startswith('cuda')
+            and torch.cuda.is_available()
+        )
         self.detector_image_size = int(self._declare_param('detector_image_size', 640))
         self.detector_conf_threshold = float(self._declare_param('detector_conf_threshold', 0.10))
         self.detector_iou_threshold = float(self._declare_param('detector_iou_threshold', 0.45))
@@ -224,11 +243,17 @@ class TLFusionNode(Node):
         self.model_min_confidence_threshold = float(
             self._declare_param('model_min_confidence_threshold', 0.30)
         )
+        # 저신뢰 모델도 색상 fallback으로 재검증하면 정확도는 높지만 CPU 비용이 크다.
+        # 기본값은 기존 동작을 유지하고, 실시간 성능 모드에서만 fallback을 생략한다.
+        self.enable_low_confidence_color_fallback = bool(
+            self._declare_param('enable_low_confidence_color_fallback', True)
+        )
 
         # 색상 fallback: 박스 주변 확장 -> 명암/채도 보정 -> HSV 마스크 분석.
         # S/V는 OpenCV uint8의 0~255 범위이며, 픽셀 수 기준은 보정된 ROI에 적용된다.
         self.fallback_expand_ratio = float(self._declare_param('fallback_expand_ratio', 1.80))
         self.fallback_min_margin_px = int(self._declare_param('fallback_min_margin_px', 4))
+        self.fallback_max_side_px = int(self._declare_param('fallback_max_side_px', 640))
         self.fallback_saturation_gain = float(self._declare_param('fallback_saturation_gain', 1.80))
         self.fallback_value_gain = float(self._declare_param('fallback_value_gain', 1.25))
         self.fallback_gamma = float(self._declare_param('fallback_gamma', 0.85))
@@ -282,6 +307,14 @@ class TLFusionNode(Node):
         self.get_logger().info(f'YOLO model loaded: {model_path}')
         self.get_logger().info(
             f'Inference device: {self.detector_device} (requested: {requested_device})'
+        )
+        self.get_logger().info(
+            'Color fallback backend: '
+            f"{'torch_cuda' if self.use_torch_color_fallback else 'opencv_cpu'} "
+            f'(device: {self.color_fallback_device})'
+        )
+        self.get_logger().info(
+            f'Color fallback ROI max side: {self.fallback_max_side_px}px'
         )
         self.get_logger().info(f'Detector class filter: {self.detector_classes}')
         self.get_logger().info(f'Subscribing to image topic: {self.image_topic}')
@@ -393,6 +426,15 @@ class TLFusionNode(Node):
                     source='model',
                     reason=f'{selected.class_name}:{selected.conf:.2f}',
                 )
+            elif (
+                selected is not None
+                and selected.model_resolved
+                and selected.conf >= self.model_min_confidence_threshold
+                and not self.enable_low_confidence_color_fallback
+            ):
+                stage = 'model_low_conf_fast'
+                analysis = self._empty_analysis('model_low_conf_fallback_disabled')
+                decision = self._decide_state(selected, analysis)
             else:
                 stage = 'analyze'
                 analysis = self._analyze_selected_candidate(
@@ -730,41 +772,53 @@ class TLFusionNode(Node):
 
         crop = self._expanded_crop(frame, candidate.box)
         enhanced = self._enhance_crop(crop)
-        hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
-        # 채도와 밝기가 높은 픽셀에 더 큰 가중치를 준다. 합산은 float32 기준이며,
-        # 벡터화/합산 순서를 바꾸면 임계값 근처 결과가 달라질 수 있어 회귀 검증이 필요하다.
-        saturation = hsv[:, :, 1].astype(np.float32) / 255.0
-        value = hsv[:, :, 2].astype(np.float32) / 255.0
-        weights = 0.25 + 0.40 * saturation + 0.35 * value
+        if self.use_torch_color_fallback:
+            try:
+                raw_scores, valid_pixels, masks = self._torch_color_measurements(enhanced)
+            except Exception as exc:  # noqa: BLE001
+                self.use_torch_color_fallback = False
+                self.get_logger().warning(
+                    f'PyTorch color fallback failed; switching to OpenCV CPU: {exc!r}'
+                )
 
-        # uint8 OpenCV HSV의 H는 0~179다. 적색은 hue 경계 양쪽에 있어 두 구간을 합친다.
-        red_mask_1 = cv2.inRange(hsv, (0, self.fallback_s_min, self.fallback_v_min), (9, 255, 255))
-        red_mask_2 = cv2.inRange(hsv, (165, self.fallback_s_min, self.fallback_v_min), (179, 255, 255))
-        red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
-        yellow_mask = cv2.inRange(
-            hsv,
-            (14, self.fallback_s_min, self.fallback_v_min),
-            (38, 255, 255),
-        )
-        green_mask = cv2.inRange(
-            hsv,
-            (40, self.fallback_s_min, self.fallback_v_min),
-            (95, 255, 255),
-        )
+        if not self.use_torch_color_fallback:
+            hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
+            # 채도와 밝기가 높은 픽셀에 더 큰 가중치를 준다. 합산은 float32 기준이며,
+            # 벡터화/합산 순서를 바꾸면 임계값 근처 결과가 달라질 수 있어 회귀 검증이 필요하다.
+            saturation = hsv[:, :, 1].astype(np.float32) / 255.0
+            value = hsv[:, :, 2].astype(np.float32) / 255.0
+            weights = 0.25 + 0.40 * saturation + 0.35 * value
 
-        red_mask = self._clean_mask(red_mask)
-        yellow_mask = self._clean_mask(yellow_mask)
-        green_mask = self._clean_mask(green_mask)
+            # uint8 OpenCV HSV의 H는 0~179다. 적색은 hue 경계 양쪽에 있어 두 구간을 합친다.
+            red_mask_1 = cv2.inRange(hsv, (0, self.fallback_s_min, self.fallback_v_min), (9, 255, 255))
+            red_mask_2 = cv2.inRange(hsv, (165, self.fallback_s_min, self.fallback_v_min), (179, 255, 255))
+            red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
+            yellow_mask = cv2.inRange(
+                hsv,
+                (14, self.fallback_s_min, self.fallback_v_min),
+                (38, 255, 255),
+            )
+            green_mask = cv2.inRange(
+                hsv,
+                (40, self.fallback_s_min, self.fallback_v_min),
+                (95, 255, 255),
+            )
 
-        masks = {
-            'red': red_mask,
-            'yellow': yellow_mask,
-            'green': green_mask,
-        }
-        raw_scores = {
-            name: float(weights[mask > 0].sum())
-            for name, mask in masks.items()
-        }
+            red_mask = self._clean_mask(red_mask)
+            yellow_mask = self._clean_mask(yellow_mask)
+            green_mask = self._clean_mask(green_mask)
+
+            masks = {
+                'red': red_mask,
+                'yellow': yellow_mask,
+                'green': green_mask,
+            }
+            raw_scores = {
+                name: float(weights[mask > 0].sum())
+                for name, mask in masks.items()
+            }
+            valid_pixels = int(sum(int(np.count_nonzero(mask)) for mask in masks.values()))
+
         # 분모는 ROI 면적이 아니라 세 색상의 가중치 합이다. 배경이 많아도 한 색만
         # 조금 남으면 비율이 커질 수 있으므로 아래 픽셀 수/연결요소 조건을 함께 사용한다.
         total_score = float(sum(raw_scores.values()))
@@ -772,7 +826,6 @@ class TLFusionNode(Node):
             name: (raw_scores[name] / total_score) if total_score > 0.0 else 0.0
             for name in COLOR_ORDER
         }
-        valid_pixels = int(sum(int(np.count_nonzero(mask)) for mask in masks.values()))
         top_color = max(COLOR_ORDER, key=lambda name: scores[name])
         top_score = float(scores[top_color])
         second_score = max(
@@ -1222,6 +1275,16 @@ class TLFusionNode(Node):
             return np.zeros((64, 64, 3), dtype=np.uint8)
 
         working = crop
+        # 모델이 큰 배경 영역을 후보로 반환해도 색상 fallback은 신호등 판정에
+        # 필요한 해상도만 유지한다. 이 제한이 없으면 4K ROI에 CPU CLAHE를 적용해
+        # GPU HSV 경로보다 전처리 시간이 훨씬 커질 수 있다.
+        max_side = self.fallback_max_side_px
+        if max_side > 0 and max(working.shape[:2]) > max_side:
+            scale = max_side / float(max(working.shape[:2]))
+            new_width = max(1, int(round(working.shape[1] * scale)))
+            new_height = max(1, int(round(working.shape[0] * scale)))
+            working = cv2.resize(working, (new_width, new_height), interpolation=cv2.INTER_AREA)
+
         # 짧은 변을 최소 64px로 만든다. 연결요소 크기 기준은 이렇게 확대된 영상 기준이다.
         if min(working.shape[:2]) < 64:
             scale = 64.0 / float(max(1, min(working.shape[:2])))
@@ -1268,6 +1331,123 @@ class TLFusionNode(Node):
         except AttributeError:
             # 구독 수 조회 API가 없는 대체 publisher에서는 기존 표시 호환성을 보존한다.
             return True
+
+    def _torch_color_measurements(
+        self,
+        enhanced: np.ndarray,
+    ) -> tuple[dict[str, float], int, dict[str, np.ndarray]]:
+        """PyTorch CUDA로 HSV 마스크와 색상 점수를 계산한다.
+
+        ROS/OpenCV 영상은 CPU 메모리에 있으므로 입력 ROI만 CUDA로 옮긴다. CLAHE와
+        연결요소 분석은 기존 OpenCV 구현을 유지하고, 이 함수에서는 픽셀별 HSV,
+        마스크 정제, 가중 점수 합산을 GPU에서 처리한다. 마지막 마스크는 기존
+        디버그/연결요소 코드와 호환되도록 uint8 NumPy로 한 번만 되돌린다.
+        """
+        if torch is None or torch_functional is None:
+            raise RuntimeError('PyTorch is not available')
+
+        with torch.inference_mode():
+            bgr = torch.from_numpy(np.ascontiguousarray(enhanced)).to(
+                device=self.color_fallback_device,
+                non_blocking=True,
+            )
+            rgb = bgr[..., (2, 1, 0)].to(dtype=torch.float32).div_(255.0)
+            red, green, blue = rgb.unbind(dim=-1)
+            max_value = rgb.amax(dim=-1)
+            min_value = rgb.amin(dim=-1)
+            delta = max_value - min_value
+            safe_delta = delta.clamp_min(1.0e-6)
+
+            hue_red = torch.remainder((green - blue) / safe_delta, 6.0)
+            hue_green = ((blue - red) / safe_delta) + 2.0
+            hue_blue = ((red - green) / safe_delta) + 4.0
+            hue = torch.where(
+                max_value == red,
+                hue_red,
+                torch.where(max_value == green, hue_green, hue_blue),
+            )
+            hue = torch.where(delta > 0.0, torch.remainder(hue, 6.0) * 30.0, torch.zeros_like(hue))
+            saturation = torch.where(
+                max_value > 0.0,
+                delta / max_value * 255.0,
+                torch.zeros_like(max_value),
+            )
+            value = max_value * 255.0
+            weights = 0.25 + 0.40 * (saturation / 255.0) + 0.35 * (value / 255.0)
+
+            red_mask = (
+                ((hue >= 0.0) & (hue <= 9.0))
+                | ((hue >= 165.0) & (hue < 180.0))
+            ) & (saturation >= self.fallback_s_min) & (value >= self.fallback_v_min)
+            yellow_mask = (
+                (hue >= 14.0) & (hue <= 38.0)
+                & (saturation >= self.fallback_s_min)
+                & (value >= self.fallback_v_min)
+            )
+            green_mask = (
+                (hue >= 40.0) & (hue <= 95.0)
+                & (saturation >= self.fallback_s_min)
+                & (value >= self.fallback_v_min)
+            )
+
+            masks_gpu = {
+                'red': self._torch_clean_mask(red_mask),
+                'yellow': self._torch_clean_mask(yellow_mask),
+                'green': self._torch_clean_mask(green_mask),
+            }
+            raw_values = torch.stack([
+                (weights * masks_gpu[name].to(dtype=weights.dtype)).sum()
+                for name in COLOR_ORDER
+            ])
+            valid_value = torch.stack([
+                masks_gpu[name].sum(dtype=torch.int64) for name in COLOR_ORDER
+            ]).sum()
+            metrics = torch.cat((raw_values, valid_value.reshape(1))).cpu().tolist()
+            masks = {
+                name: mask.to(dtype=torch.uint8).mul(255).cpu().numpy()
+                for name, mask in masks_gpu.items()
+            }
+
+        raw_scores = {
+            name: float(metrics[index]) for index, name in enumerate(COLOR_ORDER)
+        }
+        valid_pixels = int(metrics[-1])
+        return raw_scores, valid_pixels, masks
+
+    def _torch_clean_mask(self, mask: Any) -> Any:
+        """OpenCV 3x3 타원 커널과 같은 십자형 morphology를 PyTorch로 수행한다."""
+        eroded = self._torch_ellipse_reduce(mask, reduce='min', border_value=1.0)
+        opened = self._torch_ellipse_reduce(eroded, reduce='max', border_value=0.0)
+        dilated = self._torch_ellipse_reduce(opened, reduce='max', border_value=0.0)
+        return self._torch_ellipse_reduce(dilated, reduce='min', border_value=1.0)
+
+    def _torch_ellipse_reduce(
+        self,
+        mask: Any,
+        *,
+        reduce: str,
+        border_value: float,
+    ) -> Any:
+        """3x3 타원 커널의 중심/상하좌우 픽셀에 min/max를 적용한다."""
+        values = mask.to(dtype=torch.float32).unsqueeze(0).unsqueeze(0)
+        padded = torch_functional.pad(
+            values,
+            (1, 1, 1, 1),
+            mode='constant',
+            value=border_value,
+        )
+        neighbors = torch.stack(
+            (
+                padded[:, :, 1:-1, 1:-1],
+                padded[:, :, :-2, 1:-1],
+                padded[:, :, 2:, 1:-1],
+                padded[:, :, 1:-1, :-2],
+                padded[:, :, 1:-1, 2:],
+            ),
+            dim=0,
+        )
+        reduced = neighbors.amin(dim=0) if reduce == 'min' else neighbors.amax(dim=0)
+        return reduced.squeeze(0).squeeze(0) > 0.5
 
     def _clean_mask(self, mask: np.ndarray) -> np.ndarray:
         """opening으로 작은 잡음을 없앤 뒤 closing으로 작은 빈틈을 메운다."""

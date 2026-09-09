@@ -10,3 +10,10 @@ install/
 log/
 logs/
 *vscode*
+*.bag
+*.db3
+*.db3-wal
+*.db3-shm
+*.mcap
+/traffic_light/data/bags/*
+!/traffic_light/data/bags/.gitkeep

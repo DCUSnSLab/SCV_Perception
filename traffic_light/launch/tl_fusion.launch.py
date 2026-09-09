@@ -62,6 +62,11 @@ def generate_launch_description() -> LaunchDescription:
         default_value='cuda:0',
         description='Inference device for YOLO. Examples: cuda:0, cpu, auto.',
     )
+    color_fallback_device_arg = DeclareLaunchArgument(
+        'color_fallback_device',
+        default_value='auto',
+        description='PyTorch device for color fallback. auto follows detector_device.',
+    )
     detector_conf_arg = DeclareLaunchArgument(
         'detector_conf_threshold',
         default_value='0.10',
@@ -77,10 +82,23 @@ def generate_launch_description() -> LaunchDescription:
         default_value='0.60',
         description='Confidence above which the model state is trusted directly.',
     )
+    low_conf_fallback_arg = DeclareLaunchArgument(
+        'enable_low_confidence_color_fallback',
+        default_value='true',
+        description=(
+            'Recheck low-confidence resolved detections with color analysis. '
+            'Disable for the real-time performance profile.'
+        ),
+    )
     fallback_score_arg = DeclareLaunchArgument(
         'fallback_score_threshold',
         default_value='0.50',
         description='Normalized color score required for the fallback state.',
+    )
+    fallback_max_side_arg = DeclareLaunchArgument(
+        'fallback_max_side_px',
+        default_value='640',
+        description='Maximum fallback ROI side before color preprocessing resize.',
     )
     tl_fusion = Node(
         package='mando_tools',
@@ -105,6 +123,7 @@ def generate_launch_description() -> LaunchDescription:
                     value_type=float,
                 ),
                 'detector_device': LaunchConfiguration('detector_device'),
+                'color_fallback_device': LaunchConfiguration('color_fallback_device'),
                 'detector_conf_threshold': ParameterValue(
                     LaunchConfiguration('detector_conf_threshold'),
                     value_type=float,
@@ -117,9 +136,17 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration('model_confidence_threshold'),
                     value_type=float,
                 ),
+                'enable_low_confidence_color_fallback': ParameterValue(
+                    LaunchConfiguration('enable_low_confidence_color_fallback'),
+                    value_type=bool,
+                ),
                 'fallback_score_threshold': ParameterValue(
                     LaunchConfiguration('fallback_score_threshold'),
                     value_type=float,
+                ),
+                'fallback_max_side_px': ParameterValue(
+                    LaunchConfiguration('fallback_max_side_px'),
+                    value_type=int,
                 ),
             }
         ],
@@ -134,10 +161,13 @@ def generate_launch_description() -> LaunchDescription:
             show_windows_arg,
             fps_arg,
             detector_device_arg,
+            color_fallback_device_arg,
             detector_conf_arg,
             detector_size_arg,
             model_conf_arg,
+            low_conf_fallback_arg,
             fallback_score_arg,
+            fallback_max_side_arg,
             tl_fusion,
         ]
     )

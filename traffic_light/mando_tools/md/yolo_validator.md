@@ -13,7 +13,7 @@
 
 입력:
 
-- `image_topic`
+- `image_topic` (기본값: `/panorama/image_raw`)
 
 출력:
 

@@ -5,9 +5,6 @@ from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 from pathlib import Path
 
-from mando_tools.workspace_paths import default_runtime_image_topic
-
-
 def _default_tl_model() -> str:
     launch_file = Path(__file__).resolve()
     for root in [launch_file.parent, *launch_file.parents]:
@@ -26,7 +23,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     image_topic_arg = DeclareLaunchArgument(
         'image_topic',
-        default_value=default_runtime_image_topic(),
+        default_value='/panorama/image_raw',
         description='Image topic consumed by the model.',
     )
     annotated_topic_arg = DeclareLaunchArgument(

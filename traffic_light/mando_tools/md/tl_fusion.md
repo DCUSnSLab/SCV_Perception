@@ -55,9 +55,12 @@
 
 - `image_topic`
 - `max_fps`
+- `color_fallback_device`
+- `fallback_max_side_px`
 - `detector_conf_threshold`
 - `detector_image_size`
 - `model_confidence_threshold`
+- `enable_low_confidence_color_fallback`
 - `fallback_score_threshold`
 
 실행:
@@ -78,7 +81,15 @@ source /opt/ros/humble/setup.bash
 source /home/ki/SSC/install/setup.bash
 export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 PYTHONPATH="$MANDO_WS/.deps${PYTHONPATH:+:$PYTHONPATH}" python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
-ros2 launch mando_tools tl_fusion.launch.py detector_device:=cuda:0
+ros2 launch mando_tools tl_fusion.launch.py \\
+  detector_device:=cuda:0 \\
+  color_fallback_device:=cuda:0
+```
+
+저신뢰 모델 프레임에서 CPU 색상 fallback을 생략하는 성능 프로파일은 다음과 같이 실행한다. 기본값은 `true`이며, 이 옵션은 정확도 확인 후 사용한다.
+
+```bash
+/home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh enable_low_confidence_color_fallback:=false
 ```
 
 의존성 교체 후에는 실행 중이던 노드를 재시작해야 새 PyTorch가 로드된다.

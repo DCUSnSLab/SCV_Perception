@@ -8,7 +8,6 @@ from typing import Any
 
 from .workspace_paths import default_image_topic
 from .workspace_paths import default_model_path
-from .workspace_paths import default_runtime_image_topic
 from .workspace_paths import local_python_deps_path
 from .workspace_paths import resolve_inference_device
 
@@ -68,7 +67,7 @@ class YoloValidatorNode(Node):
         # launch/실행 시 튜닝 포인트를 모두 일반 ROS 파라미터로 노출한다.
         model_path = Path(_declare_param(self, 'model_path', str(default_model_path()))).expanduser()
         self.image_topic = str(
-            _declare_param(self, 'image_topic', default_runtime_image_topic())
+            _declare_param(self, 'image_topic', '/panorama/image_raw')
         )
         self.annotated_topic = str(
             _declare_param(self, 'annotated_topic', '/mando/yolo/annotated')

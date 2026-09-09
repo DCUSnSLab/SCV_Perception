@@ -15,6 +15,7 @@ setup(
             'share/' + package_name + '/launch',
             [
                 'launch/green_down_arrow.launch.py',
+                'launch/black_box_color_bits.launch.py',
                 'launch/play_mando_bag.launch.py',
                 'launch/traffic_light.launch.py',
                 'launch/tl_fusion.launch.py',
@@ -33,6 +34,7 @@ setup(
         'console_scripts': [
             'mando_bag = mando_tools.bag_cli:main',
             'mando_green_down_arrow = mando_tools.green_down_arrow:main',
+            'mando_black_box_color_bits = mando_tools.black_box_color_bits:main',
             'mando_tl_fusion = mando_tools.tl_fusion:main',
             'mando_tl_roi_hist = mando_tools.tl_roi_hist:main',
             'workspace_info = mando_tools.workspace_info:main',

@@ -211,6 +211,31 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
     node._log_processing_error.assert_not_called()
 
 
+def test_low_confidence_fast_mode_skips_color_analysis(fusion_node):
+    node = fusion_node
+    node.enable_low_confidence_color_fallback = False
+    node.show_windows = False
+    node.debug_pub.subscription_count = 0
+    node.last_state_change_ns = 0
+    frame = np.zeros((160, 320, 3), dtype=np.uint8)
+    candidate = make_candidate(0.4, STATE_RED, 'vehicular_red')
+    node._detect_candidates = Mock(return_value=([candidate], (0, 0, 320, 160)))
+    node._analyze_selected_candidate = Mock(
+        side_effect=AssertionError('low-confidence fast mode ran color analysis')
+    )
+    node.bridge = SimpleNamespace(imgmsg_to_cv2=Mock(return_value=frame))
+    node._publish_outputs = Mock()
+    message = Image()
+    message.header.stamp.sec = 1
+    node.latest_msg = message
+
+    node._process_latest_frame()
+
+    node._analyze_selected_candidate.assert_not_called()
+    assert node._publish_outputs.call_args.args[3].source == 'model_low_conf'
+    node._log_processing_error.assert_not_called()
+
+
 @pytest.mark.parametrize('render_debug', [False, True])
 def test_absent_candidate_has_no_placeholder_image(fusion_node, monkeypatch, render_debug):
     draw_text = Mock()

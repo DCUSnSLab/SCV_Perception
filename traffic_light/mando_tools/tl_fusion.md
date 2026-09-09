@@ -21,7 +21,7 @@
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ssc/SSC/src/perception/install/setup.bash
+source /home/ki/SSC/install/setup.bash
 ros2 run mando_tools mando_tl_fusion
 ```
 
@@ -36,7 +36,7 @@ ros2 launch mando_tools tl_fusion.launch.py
 install space에서 실행할 때는 노드가 소스 트리를 찾지 못하므로, 기본 `model_path` 해석을 위해 `MANDO_WS`를 지정하거나 `model_path`를 직접 넘긴다.
 
 ```bash
-export MANDO_WS=/home/ssc/SSC/src/perception/traffic_light
+export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 ```
 
 ## 3. 전체 처리 흐름
@@ -192,9 +192,12 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `image_topic`
 - `show_windows`
 - `max_fps`
+- `color_fallback_device`
+- `fallback_max_side_px`
 - `detector_conf_threshold`
 - `detector_image_size`
 - `model_confidence_threshold`
+- `enable_low_confidence_color_fallback`
 - `fallback_score_threshold`
 
 예시:
