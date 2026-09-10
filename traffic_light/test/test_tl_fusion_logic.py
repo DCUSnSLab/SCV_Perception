@@ -55,7 +55,11 @@ def fusion_node(monkeypatch):
     monkeypatch.setattr(tl_fusion.Node, '__init__', lambda self, name: None)
     monkeypatch.setattr(tl_fusion, 'YOLO', Mock(return_value=model))
     monkeypatch.setattr(tl_fusion, 'resolve_inference_device', lambda device: 'cpu')
-    overrides = {'model_path': str(Path(__file__))}
+    overrides = {
+        'model_path': str(Path(__file__)),
+        'detect_left_ratio': 0.0, 'detect_right_ratio': 1.0,
+        'detect_top_ratio': 0.0, 'detect_bottom_ratio': 1.0,
+    }
     monkeypatch.setattr(
         TLFusionNode, '_declare_param',
         lambda self, name, default: overrides.get(name, default),
@@ -293,6 +297,50 @@ def test_detection_without_boxes(fusion_node):
     assert fusion_node._detect_candidates(np.zeros((100, 200, 3), dtype=np.uint8)) == (
         [], (0, 0, 200, 100),
     )
+
+
+@pytest.mark.parametrize('width,height,expected', [(1254, 370, (123, 627)), (1878, 555, (185, 939))])
+def test_default_center_roi_reaches_model(fusion_node, monkeypatch, width, height, expected):
+    monkeypatch.setattr(TLFusionNode, '_declare_param', lambda self, name, default: str(Path(__file__)) if name == 'model_path' else default)
+    node = TLFusionNode()
+    node.model.predict.return_value = [SimpleNamespace(boxes=None)]
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    _, bounds = node._detect_candidates(frame)
+    source = node.model.predict.call_args.kwargs['source']
+    assert source.shape[:2] == expected
+    assert np.shares_memory(frame, source)
+    assert bounds == (int(width * .25), 0, int(width * .75), int(height / 3))
+
+
+@pytest.mark.parametrize('width,height', [(1254, 370), (1878, 555), (40, 30)])
+def test_cropped_debug_and_inset_fit(fusion_node, width, height):
+    node = fusion_node
+    node.detect_left_ratio, node.detect_right_ratio = .25, .75
+    node.detect_bottom_ratio = 1.0 / 3.0
+    frame = np.zeros((height, width, 3), dtype=np.uint8)
+    original = frame.copy()
+    left = int(width * .25)
+    overlay = tl_fusion.OverlayCandidate((left+5, 5, left+25, 30), 'RED', (0, 0, 255), True)
+    analysis = replace(node._empty_analysis('test'), highlighted=np.ones((100, 100, 3), dtype=np.uint8))
+    debug = node._build_debug_image(frame, [overlay], make_candidate(), analysis)
+    assert debug.shape == (int(height / 3), int(width*.75)-left, 3)
+    np.testing.assert_array_equal(frame, original)
+    assert not np.shares_memory(frame, debug)
+    if height > 30:
+        assert debug[25, 5].tolist() == [0, 0, 255]
+    assert overlay.box == (left+5, 5, left+25, 30)
+
+
+def test_fallback_expansion_stays_inside_detection_roi(fusion_node):
+    node = fusion_node
+    node.detect_left_ratio, node.detect_right_ratio = .25, .75
+    node.detect_bottom_ratio = 1.0 / 3.0
+    node.fallback_min_margin_px = 1000
+    frame = np.zeros((370, 1254, 3), dtype=np.uint8)
+    frame[:123, 313:940] = 80
+    crop = node._expanded_crop(frame, (320, 10, 350, 40))
+    assert crop.shape == (123, 627, 3)
+    assert np.all(crop == 80)
 
 
 def test_detection_preserves_crop_offsets(fusion_node):

@@ -33,6 +33,7 @@ setup(
     entry_points={
         'console_scripts': [
             'mando_bag = mando_tools.bag_cli:main',
+            'mando_panorama_resize = mando_tools.panorama_resize:main',
             'mando_green_down_arrow = mando_tools.green_down_arrow:main',
             'mando_black_box_color_bits = mando_tools.black_box_color_bits:main',
             'mando_tl_fusion = mando_tools.tl_fusion:main',

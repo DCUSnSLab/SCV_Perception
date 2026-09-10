@@ -222,9 +222,9 @@ class TLFusionNode(Node):
 
         # detect_*: YOLO에 실제로 전달할 crop 범위. 비율은 원본 영상의 0~1 기준이다.
         self.detect_top_ratio = float(self._declare_param('detect_top_ratio', 0.00))
-        self.detect_bottom_ratio = float(self._declare_param('detect_bottom_ratio', 1.00))
-        self.detect_left_ratio = float(self._declare_param('detect_left_ratio', 0.00))
-        self.detect_right_ratio = float(self._declare_param('detect_right_ratio', 1.00))
+        self.detect_bottom_ratio = float(self._declare_param('detect_bottom_ratio', 1.0 / 3.0))
+        self.detect_left_ratio = float(self._declare_param('detect_left_ratio', 0.25))
+        self.detect_right_ratio = float(self._declare_param('detect_right_ratio', 0.75))
 
         # preferred_*: 대표 후보 선택 시 가산점만 주는 영역. 추론 범위를 줄이지 않는다.
         self.preferred_top_ratio = float(self._declare_param('preferred_top_ratio', 0.00))
@@ -1059,16 +1059,29 @@ class TLFusionNode(Node):
         selected: DetectionCandidate | None,
         analysis: ColorAnalysisResult,
     ) -> np.ndarray:
-        """원본을 복사해 박스/라벨/색상 inset을 그린다. 원본 프레임은 수정하지 않는다."""
-        debug = frame.copy()
+        """검출 ROI만 복사한다. 후보는 원본 좌표를 유지하고 표시 좌표만 이동한다."""
+        roi_x0, roi_y0, roi_x1, roi_y1 = self._window_from_ratios(
+            frame.shape, self.detect_left_ratio, self.detect_right_ratio,
+            self.detect_top_ratio, self.detect_bottom_ratio,
+        )
+        debug = frame[roi_y0:roi_y1, roi_x0:roi_x1].copy()
+        if debug.size == 0:
+            return debug
         for overlay in overlay_candidates:
             x_a, y_a, x_b, y_b = overlay.box
+            x_a, x_b = x_a - roi_x0, x_b - roi_x0
+            y_a, y_b = y_a - roi_y0, y_b - roi_y0
+            if x_b <= 0 or y_b <= 0 or x_a >= debug.shape[1] or y_a >= debug.shape[0]:
+                continue
             thickness = 2 if overlay.selected else 1
             cv2.rectangle(debug, (x_a, y_a), (x_b, y_b), overlay.color, thickness)
             self._draw_box_label(debug, overlay.label, x_a, y_a, overlay.color)
         if selected is not None and analysis.highlighted is not None and analysis.highlighted.size > 0:
-            inset = self._fit_to_canvas(analysis.highlighted, 200, 120)
-            self._draw_debug_inset(debug, inset, 'Color Mask')
+            inset_width = min(200, debug.shape[1] - 24)
+            inset_height = min(120, debug.shape[0] - 42)
+            if inset_width > 0 and inset_height > 0:
+                inset = self._fit_to_canvas(analysis.highlighted, inset_width, inset_height)
+                self._draw_debug_inset(debug, inset, 'Color Mask')
         return debug
 
     def _build_overlay_candidates(
@@ -1257,10 +1270,14 @@ class TLFusionNode(Node):
         x1 = int(round(center_x + 0.5 * expand_w))
         y0 = int(round(center_y - 0.5 * expand_h))
         y1 = int(round(center_y + 0.5 * expand_h))
-        x0 = max(0, x0)
-        y0 = max(0, y0)
-        x1 = min(frame.shape[1], x1)
-        y1 = min(frame.shape[0], y1)
+        roi_x0, roi_y0, roi_x1, roi_y1 = self._window_from_ratios(
+            frame.shape, self.detect_left_ratio, self.detect_right_ratio,
+            self.detect_top_ratio, self.detect_bottom_ratio,
+        )
+        x0 = max(roi_x0, x0)
+        y0 = max(roi_y0, y0)
+        x1 = min(roi_x1, x1)
+        y1 = min(roi_y1, y1)
         if x1 <= x0 or y1 <= y0:
             return np.zeros((64, 64, 3), dtype=np.uint8)
         return frame[y0:y1, x0:x1]
@@ -1529,8 +1546,15 @@ class TLFusionNode(Node):
         scale = 0.42
         thickness = 1
         text_size, baseline = cv2.getTextSize(text, font, scale, thickness)
-        label_x = max(4, x)
-        label_y = max(24, y - 4)
+        height, width = image.shape[:2]
+        if width < 20 or height < 20:
+            return
+        scale *= min(1.0, (width - 16) / max(text_size[0], 1), (height - 12) / max(text_size[1] + baseline, 1))
+        text_size, baseline = cv2.getTextSize(text, font, scale, thickness)
+        if text_size[0] + 16 > width or text_size[1] + baseline + 12 > height:
+            return
+        label_x = max(4, min(x, width - text_size[0] - 14))
+        label_y = max(text_size[1] + 6, min(y - 4, height - baseline - 3))
         y0 = label_y - text_size[1] - 6
         y1 = label_y + baseline + 2
         x1 = min(image.shape[1] - 4, label_x + text_size[0] + 10)

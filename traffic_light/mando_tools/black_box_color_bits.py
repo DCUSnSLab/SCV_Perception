@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-"""상단 ROI에서 검은 바탕 디스플레이를 찾아 빨강=0, 초록=1로 발행한다.
+"""상단 ROI의 빨강/초록 색 영역마다 빨강=0, 초록=1로 발행한다.
 
-처리 흐름: BGR 영상 → ROI → 어두운 사각형 → 내부 HSV 점수 → 추적/EMA → 비트.
+처리 흐름: BGR 영상 → ROI → HSV 색 마스크 → 연결 영역 → 추적/EMA → 비트.
 검출기는 영상/시간을 입력받고, ROS 노드는 구독·주기 제한·발행을 담당한다.
 출력은 확정된 박스만 영상의 왼쪽부터 나열한 가변 길이 배열이다. 미확정은
 0으로 대체하지 않으며, 최초 유효 검출 전이나 모든 트랙 만료 시에는 []이다.
-검은 외곽선만 있는 물체가 아니라 검은 픽셀 비율이 높은 디스플레이가 대상이다.
-형태/색상 기반이므로 어두운 배경 물체와의 의미적 구분을 보장하지 않는다.
+사각형 모양은 요구하지 않는다. 가까운 동색 LED를 묶고 주변의 어두운 비율을 검사한다.
+어두운 창문/옷의 유색 반사까지 완벽하게 구분하는 의미 기반 검출기는 아니다.
+기존 실행 파일·클래스·토픽 이름은 호환성을 위해 유지한다.
 """
 
 from __future__ import annotations
 
 import sys
 import time
+from math import hypot
 from dataclasses import dataclass
 from typing import Any
 
 from .workspace_paths import local_python_deps_path
+from .workspace_paths import workspace_root_or_none
 
 deps_path = local_python_deps_path()
 if deps_path is not None and deps_path.exists():
@@ -40,51 +43,46 @@ from std_msgs.msg import UInt8MultiArray
 class DetectorConfig:
     """검출/추적 설정. ROS 기본값 변경 시 노드의 파라미터 선언도 함께 맞춘다.
 
-    권장 튜닝 순서: ROI → 검은색/크기 필터 → 내부 색상 → 시간 안정화.
+    권장 튜닝 순서: ROI → HSV 범위 → 색 영역 크기 필터 → 시간 안정화.
     픽셀 크기 기준은 입력 해상도에 의존하며, 모든 비율의 기준은 아래와 같다.
     """
 
-    # 입력 영상 전체를 기준으로 한 경계 비율(0~1); 기본값은 상단 35%.
+    # 입력 영상 전체 기준 경계 비율(0~1); 중앙 절반 너비의 상단 1/2만 처리한다.
     roi_top_ratio: float = 0.0
-    roi_bottom_ratio: float = 0.35
-    roi_left_ratio: float = 0.0
-    roi_right_ratio: float = 1.0
+    roi_bottom_ratio: float = 0.50
+    roi_left_ratio: float = 0.25
+    roi_right_ratio: float = 0.75
 
-    # OpenCV HSV의 V(0~255) 상한. close는 틈을 메우고 open은 작은 잡음을 제거한다.
-    # 큰 커널/open 반복은 멀리 있는 작은 디스플레이까지 지울 수 있다.
-    black_v_max: int = 45
+    # close는 같은 색의 틈을 메우고 open은 작은 색 잡음을 제거한다.
     morphology_kernel_size: int = 5
     morphology_close_iterations: int = 0
-    morphology_open_iterations: int = 1
+    morphology_open_iterations: int = 0
+    led_group_gap_px: int = 6
+    surround_margin_px: int = 4
+    surround_v_max: int = 70
+    surround_min_dark_ratio: float = 0.55
 
-    # 폭/높이는 bounding rect, 면적은 contourArea(px²) 기준이다.
+    # 폭/높이는 색 영역 bounding rect, 면적은 영역 내 원본 유색 픽셀 수다.
     # 최대 크기는 절대 픽셀 제한과 ROI 대비 비율 제한을 모두 만족해야 한다.
-    min_box_width_px: int = 10
-    min_box_height_px: int = 6
-    min_box_area_px: int = 80
+    min_box_width_px: int = 3
+    min_box_height_px: int = 3
+    min_box_area_px: int = 12
     max_box_width_px: int = 160
     max_box_height_px: int = 160
     max_box_width_ratio: float = 0.35
     max_box_height_ratio: float = 0.80
-    # 종횡비=폭/높이, 직사각형성=외곽 contour 면적/bounding rect 면적.
-    min_aspect_ratio: float = 0.65
-    max_aspect_ratio: float = 1.50
-    min_rectangularity: float = 0.65
-    # 원본 검은색 마스크의 점유율로, 외곽 형태만 사각형인 물체를 추가로 거른다.
-    min_black_ratio: float = 0.65
-    duplicate_iou_threshold: float = 0.45
 
-    # 각 변에서 폭/높이의 해당 비율만큼 제외한다(0.20이면 중앙 약 60%씩 사용).
+    # YOLO 모드에서 박스 내부 색상을 측정할 때만 사용하는 각 변의 여백 비율.
     inner_margin_ratio: float = 0.20
     # uint8 OpenCV HSV: H=0~179, S/V=0~255. 빨강은 hue 양 끝의 합집합이다.
     color_s_min: int = 80
-    color_v_min: int = 70
+    color_v_min: int = 45
     red_hue_high: int = 10
     red_hue_low_wrap: int = 170
     green_hue_low: int = 35
     green_hue_high: int = 95
-    # 점수는 내부 전체 픽셀 대비 색상 픽셀 비율이다. 우세 점수와 두 점수의
-    # 차이가 각각 임계값을 넘어야 갱신한다. alpha가 작을수록 반응이 느려진다.
+    # 점수는 색 영역 bounding rect 대비 해당 연결 영역의 원본 색상 픽셀 비율이다.
+    # 우세 점수와 점수 차이가 각각 임계값을 넘어야 갱신한다. 작은 alpha는 반응을 늦춘다.
     color_score_threshold: float = 0.04
     color_hysteresis_delta: float = 0.08
     color_ema_alpha: float = 0.45
@@ -167,6 +165,11 @@ class BlackBoxColorDetector:
             cv2.MORPH_RECT,
             (kernel_size, kernel_size),
         )
+        radius = max(0, int(self.config.led_group_gap_px)) // 2
+        self.grouping_kernel = (
+            cv2.getStructuringElement(cv2.MORPH_RECT, (2 * radius + 1, 2 * radius + 1))
+            if radius else None
+        )
         self.tracks: list[BoxTrack] = []
         self.next_track_id = 0
         self.last_bits: list[int] = []
@@ -214,134 +217,90 @@ class BlackBoxColorDetector:
         roi: np.ndarray,
         roi_bounds: tuple[int, int, int, int],
     ) -> list[BoxObservation]:
-        """어두운 연결 영역에 형태/검은색 점유율 필터를 적용하고 색상을 측정한다."""
+        """빨강/초록 마스크를 각각 연결 영역으로 나눠 색 영역당 관측 하나를 만든다.
+
+        서로 닿은 빨강과 초록은 별도로 검출한다. 가까운 동색 발광부는 묶고,
+        원본 픽셀로 영역 크기/점수와 주변의 어두운 비율을 확인한다.
+        """
         if roi.size == 0:
             return []
-
-        # V는 채널 최댓값이므로 밝은 유색 발광부를 검은 바탕과 분리할 수 있다.
-        value = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)[:, :, 2]
-        raw_black_mask = cv2.inRange(value, 0, int(self.config.black_v_max))
-        black_mask = raw_black_mask.copy()
-        if self.config.morphology_close_iterations > 0:
-            black_mask = cv2.morphologyEx(
-                black_mask,
-                cv2.MORPH_CLOSE,
-                self.morphology_kernel,
-                iterations=int(self.config.morphology_close_iterations),
-            )
-        if self.config.morphology_open_iterations > 0:
-            black_mask = cv2.morphologyEx(
-                black_mask,
-                cv2.MORPH_OPEN,
-                self.morphology_kernel,
-                iterations=int(self.config.morphology_open_iterations),
-            )
-
-        # 내부 발광부가 마스크의 구멍이어도 외곽선 하나로 디스플레이를 표현한다.
-        contours, _ = cv2.findContours(
-            black_mask,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
-        )
-        candidates: list[tuple[tuple[int, int, int, int], float]] = []
+        hue, saturation, value = cv2.split(cv2.cvtColor(roi, cv2.COLOR_BGR2HSV))
+        valid = (saturation >= self.config.color_s_min) & (value >= self.config.color_v_min)
+        masks = [
+            valid & ((hue <= self.config.red_hue_high) | (hue >= self.config.red_hue_low_wrap)),
+            valid & (hue >= self.config.green_hue_low) & (hue <= self.config.green_hue_high),
+        ]
+        observations: list[BoxObservation] = []
         roi_height, roi_width = roi.shape[:2]
         roi_x0, roi_y0, _, _ = roi_bounds
-
-        for contour in contours:
-            contour_area = float(cv2.contourArea(contour))
-            x, y, width, height = cv2.boundingRect(contour)
-            if width < self.config.min_box_width_px or height < self.config.min_box_height_px:
-                continue
-            if contour_area < self.config.min_box_area_px:
-                continue
-            if width > self.config.max_box_width_px or height > self.config.max_box_height_px:
-                continue
-            if width > roi_width * self.config.max_box_width_ratio:
-                continue
-            if height > roi_height * self.config.max_box_height_ratio:
-                continue
-
-            aspect_ratio = width / max(float(height), 1.0)
-            if not self.config.min_aspect_ratio <= aspect_ratio <= self.config.max_aspect_ratio:
-                continue
-            rectangularity = contour_area / max(float(width * height), 1.0)
-            if rectangularity < self.config.min_rectangularity:
-                continue
-            # morphology로 메운 픽셀을 검은색으로 세지 않도록 원본 마스크를 사용한다.
-            black_ratio = np.count_nonzero(raw_black_mask[y:y + height, x:x + width]) / (width * height)
-            if black_ratio < self.config.min_black_ratio:
-                continue
-
-            bbox = (x + roi_x0, y + roi_y0, x + width + roi_x0, y + height + roi_y0)
-            candidates.append((bbox, contour_area))
-
-        # 큰 후보를 우선하는 IoU 중복 억제 후 영상 x 순서로 되돌린다.
-        candidates.sort(key=lambda item: item[1], reverse=True)
-        selected: list[tuple[int, int, int, int]] = []
-        for bbox, _ in candidates:
-            if any(_iou(bbox, existing) >= self.config.duplicate_iou_threshold for existing in selected):
-                continue
-            selected.append(bbox)
-
-        selected.sort(key=lambda box: (box[0], box[1]))
-        observations: list[BoxObservation] = []
-        for bbox in selected:
-            red_score, green_score = self._color_scores(roi, bbox, roi_bounds)
-            observations.append(
-                BoxObservation(
-                    bbox=bbox,
-                    red_score=red_score,
-                    green_score=green_score,
+        for bit, mask in enumerate(masks):
+            raw_mask = mask.astype(np.uint8)
+            cleaned = raw_mask
+            for operation, iterations in [
+                (cv2.MORPH_CLOSE, self.config.morphology_close_iterations),
+                (cv2.MORPH_OPEN, self.config.morphology_open_iterations),
+            ]:
+                if iterations > 0:
+                    cleaned = cv2.morphologyEx(
+                        cleaned, operation, self.morphology_kernel, iterations=int(iterations),
+                    )
+            if self.grouping_kernel is not None:
+                grouped = cv2.dilate(cleaned, self.grouping_kernel)
+            else:
+                grouped = cleaned
+            count, labels, stats, _ = cv2.connectedComponentsWithStats(grouped, connectivity=8)
+            for label_index in range(1, count):
+                left, top, width, height, area = (int(item) for item in stats[label_index])
+                if (area < self.config.min_box_area_px
+                        or width < self.config.min_box_width_px
+                        or height < self.config.min_box_height_px):
+                    continue
+                component = labels[top:top + height, left:left + width] == label_index
+                source_pixels = cv2.bitwise_and(
+                    raw_mask[top:top + height, left:left + width], component.astype(np.uint8),
                 )
-            )
+                color_pixels = cv2.countNonZero(source_pixels)
+                if color_pixels < self.config.min_box_area_px or color_pixels == 0:
+                    continue
+                source_left, source_top, width, height = cv2.boundingRect(source_pixels)
+                left += source_left
+                top += source_top
+                if width < self.config.min_box_width_px or height < self.config.min_box_height_px:
+                    continue
+                if width > self.config.max_box_width_px or height > self.config.max_box_height_px:
+                    continue
+                if width > roi_width * self.config.max_box_width_ratio:
+                    continue
+                if height > roi_height * self.config.max_box_height_ratio:
+                    continue
+                if (self.config.surround_min_dark_ratio > 0.0
+                        and self._surrounding_dark_ratio(value, (left, top, left + width, top + height)) < self.config.surround_min_dark_ratio):
+                    continue
+                score = float(color_pixels / (width * height))
+                observations.append(BoxObservation(
+                    bbox=(left + roi_x0, top + roi_y0, left + width + roi_x0, top + height + roi_y0),
+                    red_score=score if bit == 0 else 0.0,
+                    green_score=score if bit == 1 else 0.0,
+                ))
+        observations.sort(key=lambda observation: (observation.bbox[0], observation.bbox[1]))
         return observations
 
-    def _color_scores(
-        self,
-        roi: np.ndarray,
-        bbox: tuple[int, int, int, int],
-        roi_bounds: tuple[int, int, int, int],
-    ) -> tuple[float, float]:
-        """테두리를 제외한 내부에서 (빨강 비율, 초록 비율)을 반환한다.
-
-        bbox를 ROI 로컬 좌표로 변환한 뒤 잘라낸다. 리사이즈/다운샘플링은 하지 않는다.
-        검은 바탕/저채도/노랑은 색상 분자에 포함되지 않지만 전체 픽셀 분모에는 포함된다.
-        """
-        roi_x0, roi_y0, _, _ = roi_bounds
-        x0, y0, x1, y1 = bbox
-        local_x0 = x0 - roi_x0
-        local_y0 = y0 - roi_y0
-        local_x1 = x1 - roi_x0
-        local_y1 = y1 - roi_y0
-        box_width = local_x1 - local_x0
-        box_height = local_y1 - local_y0
-        margin_x = int(box_width * _clamp_ratio(self.config.inner_margin_ratio))
-        margin_y = int(box_height * _clamp_ratio(self.config.inner_margin_ratio))
-        inner_x0 = min(local_x1 - 1, local_x0 + margin_x)
-        inner_y0 = min(local_y1 - 1, local_y0 + margin_y)
-        inner_x1 = max(inner_x0 + 1, local_x1 - margin_x)
-        inner_y1 = max(inner_y0 + 1, local_y1 - margin_y)
-        inner = roi[inner_y0:inner_y1, inner_x0:inner_x1]
-        if inner.size == 0:
-            return 0.0, 0.0
-
-        hsv = cv2.cvtColor(inner, cv2.COLOR_BGR2HSV)
-        hue, saturation, value = cv2.split(hsv)
-        valid_mask = (saturation >= self.config.color_s_min) & (value >= self.config.color_v_min)
-        red_mask = (
-            valid_mask
-            & ((hue <= self.config.red_hue_high) | (hue >= self.config.red_hue_low_wrap))
-        )
-        green_mask = (
-            valid_mask
-            & (hue >= self.config.green_hue_low)
-            & (hue <= self.config.green_hue_high)
-        )
-        # 유색 픽셀만 분모로 쓰면 작은 잡음 하나도 높은 점수가 되므로 전체 면적을 쓴다.
-        pixel_count = max(1, inner.shape[0] * inner.shape[1])
-        return float(np.count_nonzero(red_mask) / pixel_count), float(
-            np.count_nonzero(green_mask) / pixel_count
-        )
+    def _surrounding_dark_ratio(
+        self, value: np.ndarray, bbox: tuple[int, int, int, int],
+    ) -> float:
+        """발광부 bbox 바깥 띠의 V 임계값 이하 비율. ROI 경계 밖은 세지 않는다."""
+        left, top, right, bottom = bbox
+        margin = max(1, int(self.config.surround_margin_px))
+        outer_left, outer_top = max(0, left - margin), max(0, top - margin)
+        outer_right = min(value.shape[1], right + margin)
+        outer_bottom = min(value.shape[0], bottom + margin)
+        ring_pixels = ((outer_bottom - outer_top) * (outer_right - outer_left)
+                       - (bottom - top) * (right - left))
+        if ring_pixels == 0:
+            return 0.0
+        dark = value[outer_top:outer_bottom, outer_left:outer_right] <= self.config.surround_v_max
+        inner_dark = dark[top - outer_top:bottom - outer_top, left - outer_left:right - outer_left]
+        return float((np.count_nonzero(dark) - np.count_nonzero(inner_dark)) / ring_pixels)
 
     def _update_tracks(
         self,
@@ -362,10 +321,10 @@ class BlackBoxColorDetector:
             for track_index in unmatched_track_indices:
                 track = self.tracks[track_index]
                 track_center = self._center(track.bbox)
-                distance = float(np.hypot(
+                distance = hypot(
                     observation_center[0] - track_center[0],
                     observation_center[1] - track_center[1],
-                ))
+                )
                 max_dimension = max(
                     observation.bbox[2] - observation.bbox[0],
                     observation.bbox[3] - observation.bbox[1],
@@ -404,7 +363,7 @@ class BlackBoxColorDetector:
             alpha = max(0.0, min(1.0, self.config.color_ema_alpha))
             track.red_ema = alpha * observation.red_score + (1.0 - alpha) * track.red_ema
             track.green_ema = alpha * observation.green_score + (1.0 - alpha) * track.green_ema
-            # 색상이 불명확해도 박스가 보이면 수명은 연장된다. 별도 색상 만료는 없다.
+            # 색 영역을 다시 관측하면 수명을 연장한다. 무색 프레임은 관측을 만들지 않는다.
             track.last_seen_ns = timestamp_ns
             self._update_track_bit(track)
             observation.track_id = track.track_id
@@ -475,32 +434,34 @@ class BlackBoxColorBitsNode(Node):
         )
         self.publish_debug_image = bool(self._declare_param('publish_debug_image', False))
         self.max_fps = float(self._declare_param('max_fps', 15.0))
+        opencv_threads = int(self._declare_param('opencv_threads', 1))
+        if opencv_threads < 1:
+            raise ValueError('opencv_threads must be positive')
+        cv2.setNumThreads(opencv_threads)
 
         # 설정은 시작 시 한 번 읽는다. 런타임 set_parameters 반영 콜백은 없다.
         config = DetectorConfig(
             roi_top_ratio=float(self._declare_param('roi_top_ratio', 0.0)),
-            roi_bottom_ratio=float(self._declare_param('roi_bottom_ratio', 0.35)),
-            roi_left_ratio=float(self._declare_param('roi_left_ratio', 0.0)),
-            roi_right_ratio=float(self._declare_param('roi_right_ratio', 1.0)),
-            black_v_max=int(self._declare_param('black_v_max', 45)),
+            roi_bottom_ratio=float(self._declare_param('roi_bottom_ratio', 0.5)),
+            roi_left_ratio=float(self._declare_param('roi_left_ratio', 0.25)),
+            roi_right_ratio=float(self._declare_param('roi_right_ratio', 0.75)),
             morphology_kernel_size=int(self._declare_param('morphology_kernel_size', 5)),
             morphology_close_iterations=int(self._declare_param('morphology_close_iterations', 0)),
-            morphology_open_iterations=int(self._declare_param('morphology_open_iterations', 1)),
-            min_box_width_px=int(self._declare_param('min_box_width_px', 10)),
-            min_box_height_px=int(self._declare_param('min_box_height_px', 6)),
-            min_box_area_px=int(self._declare_param('min_box_area_px', 80)),
+            morphology_open_iterations=int(self._declare_param('morphology_open_iterations', 0)),
+            led_group_gap_px=int(self._declare_param('led_group_gap_px', 6)),
+            surround_margin_px=int(self._declare_param('surround_margin_px', 4)),
+            surround_v_max=int(self._declare_param('surround_v_max', 70)),
+            surround_min_dark_ratio=float(self._declare_param('surround_min_dark_ratio', 0.55)),
+            min_box_width_px=int(self._declare_param('min_box_width_px', 3)),
+            min_box_height_px=int(self._declare_param('min_box_height_px', 3)),
+            min_box_area_px=int(self._declare_param('min_box_area_px', 12)),
             max_box_width_px=int(self._declare_param('max_box_width_px', 160)),
             max_box_height_px=int(self._declare_param('max_box_height_px', 160)),
             max_box_width_ratio=float(self._declare_param('max_box_width_ratio', 0.35)),
             max_box_height_ratio=float(self._declare_param('max_box_height_ratio', 0.80)),
-            min_aspect_ratio=float(self._declare_param('min_aspect_ratio', 0.65)),
-            max_aspect_ratio=float(self._declare_param('max_aspect_ratio', 1.50)),
-            min_rectangularity=float(self._declare_param('min_rectangularity', 0.65)),
-            duplicate_iou_threshold=float(self._declare_param('duplicate_iou_threshold', 0.45)),
-            min_black_ratio=float(self._declare_param('min_black_ratio', 0.65)),
             inner_margin_ratio=float(self._declare_param('inner_margin_ratio', 0.20)),
             color_s_min=int(self._declare_param('color_s_min', 80)),
-            color_v_min=int(self._declare_param('color_v_min', 70)),
+            color_v_min=int(self._declare_param('color_v_min', 45)),
             red_hue_high=int(self._declare_param('red_hue_high', 10)),
             red_hue_low_wrap=int(self._declare_param('red_hue_low_wrap', 170)),
             green_hue_low=int(self._declare_param('green_hue_low', 35)),
@@ -511,7 +472,28 @@ class BlackBoxColorBitsNode(Node):
             match_distance_ratio=float(self._declare_param('match_distance_ratio', 2.5)),
             hold_timeout_s=float(self._declare_param('hold_timeout_s', 0.5)),
         )
-        self.detector = BlackBoxColorDetector(config)
+        detector_mode = str(self._declare_param('detector_mode', 'color_regions'))
+        root = workspace_root_or_none()
+        default_box_model = str(root / 'model' / 'box_best.pt') if root is not None else 'box_best.pt'
+        box_model_path = str(self._declare_param('box_model_path', default_box_model))
+        box_device = str(self._declare_param('box_device', 'auto'))
+        box_confidence = float(self._declare_param('box_confidence', 0.25))
+        box_image_size = int(self._declare_param('box_image_size', 640))
+        if detector_mode == 'color_regions':
+            self.detector = BlackBoxColorDetector(config)
+        elif detector_mode == 'yolo_boxes':
+            from .yolo_box_color_bits import YoloBoxColorDetector
+            self.detector = YoloBoxColorDetector(
+                config, box_model_path, device=box_device,
+                confidence=box_confidence, image_size=box_image_size,
+            )
+            self.get_logger().info(
+                f'YOLO box model: {box_model_path}; device={self.detector.device}; '
+                f'classes={self.detector.class_ids}; bit source=HSV'
+            )
+        else:
+            raise ValueError('detector_mode must be color_regions or yolo_boxes')
+        self.get_logger().info(f'Detector mode: {detector_mode}')
 
         self.get_logger().info(f'Subscribing to image topic: {self.image_topic}')
         self.get_logger().info(f'Publishing color bits on: {self.bits_topic}')
@@ -558,7 +540,7 @@ class BlackBoxColorBitsNode(Node):
             frame = self.bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
             bits, observations, roi_bounds = self.detector.process(frame)
             self._publish_bits(bits)
-            if self.publish_debug_image:
+            if self.publish_debug_image and self.debug_pub.get_subscription_count() > 0:
                 debug_image = self._draw_debug(frame, observations, roi_bounds, bits)
                 debug_message = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
                 debug_message.header = message.header
@@ -589,15 +571,19 @@ class BlackBoxColorBitsNode(Node):
         roi_bounds: tuple[int, int, int, int],
         bits: list[int],
     ) -> np.ndarray:
-        """원본 복사본에 ROI와 현재 관측을 그린다. r/g는 원시 점수, 색은 확정 비트다.
+        """ROI만 복사해 현재 관측을 그린다. r/g는 원시 점수, 색은 확정 비트다.
 
         표시 인덱스는 관측 순서이며 미확정/유지 중 트랙 때문에 출력 인덱스와 다를 수 있다.
+        트랙은 전체 영상 좌표를 유지하고 표시 좌표만 ROI 시작점만큼 이동한다.
         """
-        debug = frame.copy()
         roi_x0, roi_y0, roi_x1, roi_y1 = roi_bounds
-        cv2.rectangle(debug, (roi_x0, roi_y0), (roi_x1, roi_y1), (255, 0, 255), 2)
+        debug = frame[roi_y0:roi_y1, roi_x0:roi_x1].copy()
+        if debug.size == 0:
+            return debug
         for index, observation in enumerate(observations):
             x0, y0, x1, y1 = observation.bbox
+            x0, x1 = x0 - roi_x0, x1 - roi_x0
+            y0, y1 = y0 - roi_y0, y1 - roi_y0
             if observation.stable_bit == 1:
                 color = (0, 255, 0)
                 label = 'G:1'
@@ -607,30 +593,33 @@ class BlackBoxColorBitsNode(Node):
             else:
                 color = (0, 165, 255)
                 label = '?:-'
-            cv2.rectangle(debug, (x0, y0), (x1, y1), color, 2)
+            cv2.rectangle(debug, (x0, y0), (x1 - 1, y1 - 1), color, 2)
             text = f'{index} {label} r={observation.red_score:.2f} g={observation.green_score:.2f}'
-            text_y = max(18, y0 - 5)
-            cv2.putText(
-                debug,
-                text,
-                (x0, text_y),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
-                color,
-                1,
-                cv2.LINE_AA,
-            )
-        cv2.putText(
-            debug,
-            f'bits={bits}',
-            (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (255, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
+            self._put_debug_text(debug, text, (x0, y0 - 5), color)
+        self._put_debug_text(debug, f'bits={bits}', (10, 25), (255, 255, 255))
         return debug
+
+    @staticmethod
+    def _put_debug_text(
+        debug: np.ndarray,
+        text: str,
+        origin: tuple[int, int],
+        color: tuple[int, int, int],
+    ) -> None:
+        """라벨을 크롭 영상 안으로 이동한다. 작은 ROI에서는 글꼴 크기도 줄인다."""
+        height, width = debug.shape[:2]
+        if height < 4 or width < 4:
+            return
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.45
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, 1)
+        scale *= min(1.0, (width - 3) / max(text_width, 1), (height - 3) / max(text_height + baseline, 1))
+        (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, 1)
+        if text_width > width - 2 or text_height + baseline > height - 2:
+            return
+        text_x = max(1, min(origin[0], width - text_width - 1))
+        text_y = max(text_height + 1, min(origin[1], height - baseline - 1))
+        cv2.putText(debug, text, (text_x, text_y), font, scale, color, 1, cv2.LINE_AA)
 
 
 def main(args: list[str] | None = None) -> None:

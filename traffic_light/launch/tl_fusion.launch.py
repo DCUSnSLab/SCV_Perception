@@ -27,6 +27,14 @@ def _default_tl_model() -> str:
     return 'best.pt'
 
 def generate_launch_description() -> LaunchDescription:
+    roi_defaults = {
+        'detect_top_ratio': 0.0, 'detect_bottom_ratio': 1.0 / 3.0,
+        'detect_left_ratio': 0.25, 'detect_right_ratio': 0.75,
+    }
+    roi_args = [
+        DeclareLaunchArgument(name, default_value=str(value), description='Detection ROI boundary in full-image coordinates (0-1).')
+        for name, value in roi_defaults.items()
+    ]
     model_arg = DeclareLaunchArgument(
         'model_path',
         default_value=_default_tl_model(),
@@ -123,6 +131,7 @@ def generate_launch_description() -> LaunchDescription:
                     value_type=float,
                 ),
                 'detector_device': LaunchConfiguration('detector_device'),
+                **{name: ParameterValue(LaunchConfiguration(name), value_type=float) for name in roi_defaults},
                 'color_fallback_device': LaunchConfiguration('color_fallback_device'),
                 'detector_conf_threshold': ParameterValue(
                     LaunchConfiguration('detector_conf_threshold'),
@@ -155,6 +164,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             model_arg,
+            *roi_args,
             image_topic_arg,
             state_topic_arg,
             input_timeout_arg,

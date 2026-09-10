@@ -3,9 +3,26 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from mando_tools.workspace_paths import workspace_root_or_none
 
 
 def generate_launch_description() -> LaunchDescription:
+    root = workspace_root_or_none()
+    model_default = str(root / 'model' / 'box_best.pt') if root is not None else 'box_best.pt'
+    model_args = [
+        DeclareLaunchArgument('detector_mode', default_value='color_regions', choices=['color_regions', 'yolo_boxes']),
+        DeclareLaunchArgument('box_model_path', default_value=model_default),
+        DeclareLaunchArgument('box_device', default_value='auto'),
+        DeclareLaunchArgument('box_confidence', default_value='0.25'),
+        DeclareLaunchArgument('box_image_size', default_value='640'),
+    ]
+    led_defaults = {
+        'opencv_threads': 1,
+        'led_group_gap_px': 6, 'surround_margin_px': 4, 'surround_v_max': 70,
+        'surround_min_dark_ratio': 0.55,
+        'min_box_width_px': 3, 'min_box_height_px': 3, 'min_box_area_px': 12,
+    }
+    led_args = [DeclareLaunchArgument(name, default_value=str(value)) for name, value in led_defaults.items()]
     image_topic_arg = DeclareLaunchArgument(
         'image_topic',
         default_value='/panorama/image_raw',
@@ -33,33 +50,31 @@ def generate_launch_description() -> LaunchDescription:
     )
     roi_bottom_arg = DeclareLaunchArgument(
         'roi_bottom_ratio',
-        default_value='0.35',
+        default_value='0.5',
         description='Bottom of the upper ROI as a frame-height ratio.',
     )
-    black_v_max_arg = DeclareLaunchArgument(
-        'black_v_max',
-        default_value='45',
-        description='Maximum HSV value treated as black.',
-    )
+    roi_top_arg = DeclareLaunchArgument('roi_top_ratio', default_value='0.0')
+    roi_left_arg = DeclareLaunchArgument('roi_left_ratio', default_value='0.25')
+    roi_right_arg = DeclareLaunchArgument('roi_right_ratio', default_value='0.75')
     max_box_width_arg = DeclareLaunchArgument(
         'max_box_width_px',
         default_value='160',
-        description='Maximum black-box width in pixels.',
+        description='Maximum color-region width in pixels.',
     )
     max_box_height_arg = DeclareLaunchArgument(
         'max_box_height_px',
         default_value='160',
-        description='Maximum black-box height in pixels.',
+        description='Maximum color-region height in pixels.',
     )
     open_iterations_arg = DeclareLaunchArgument(
         'morphology_open_iterations',
-        default_value='1',
-        description='Optional morphology opening iterations for black-mask noise removal.',
+        default_value='0',
+        description='Opening iterations applied separately to each color mask.',
     )
     close_iterations_arg = DeclareLaunchArgument(
         'morphology_close_iterations',
         default_value='0',
-        description='Optional morphology closing iterations for black-mask hole filling.',
+        description='Closing iterations applied separately to each color mask.',
     )
     color_s_min_arg = DeclareLaunchArgument(
         'color_s_min',
@@ -68,7 +83,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     color_v_min_arg = DeclareLaunchArgument(
         'color_v_min',
-        default_value='70',
+        default_value='45',
         description='Minimum HSV value for a color pixel.',
     )
     score_threshold_arg = DeclareLaunchArgument(
@@ -95,6 +110,12 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[
             {
                 'image_topic': LaunchConfiguration('image_topic'),
+                'detector_mode': LaunchConfiguration('detector_mode'),
+                'box_model_path': LaunchConfiguration('box_model_path'),
+                'box_device': LaunchConfiguration('box_device'),
+                'box_confidence': ParameterValue(LaunchConfiguration('box_confidence'), value_type=float),
+                'box_image_size': ParameterValue(LaunchConfiguration('box_image_size'), value_type=int),
+                **{name: ParameterValue(LaunchConfiguration(name), value_type=type(value)) for name, value in led_defaults.items()},
                 'bits_topic': LaunchConfiguration('bits_topic'),
                 'debug_image_topic': LaunchConfiguration('debug_image_topic'),
                 'publish_debug_image': ParameterValue(
@@ -106,10 +127,9 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration('roi_bottom_ratio'),
                     value_type=float,
                 ),
-                'black_v_max': ParameterValue(
-                    LaunchConfiguration('black_v_max'),
-                    value_type=int,
-                ),
+                'roi_top_ratio': ParameterValue(LaunchConfiguration('roi_top_ratio'), value_type=float),
+                'roi_left_ratio': ParameterValue(LaunchConfiguration('roi_left_ratio'), value_type=float),
+                'roi_right_ratio': ParameterValue(LaunchConfiguration('roi_right_ratio'), value_type=float),
                 'max_box_width_px': ParameterValue(
                     LaunchConfiguration('max_box_width_px'),
                     value_type=int,
@@ -153,12 +173,16 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             image_topic_arg,
+            *model_args,
+            *led_args,
             bits_topic_arg,
             debug_topic_arg,
             publish_debug_arg,
             fps_arg,
             roi_bottom_arg,
-            black_v_max_arg,
+            roi_top_arg,
+            roi_left_arg,
+            roi_right_arg,
             max_box_width_arg,
             max_box_height_arg,
             open_iterations_arg,
