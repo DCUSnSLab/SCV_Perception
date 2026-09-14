@@ -2,7 +2,6 @@
 
 흐름: 부모 클래스의 ROI 추출 → YOLO 박스 → 중복 억제 → 내부 HSV 점수
 → 부모 클래스의 위치 매칭/EMA/비트 확정. ROS 발행은 BlackBoxColorBitsNode가 담당한다.
-이 모드는 색 영역 모드의 LED 묶기·주변 어둠·박스 크기 필터를 사용하지 않는다.
 YOLO가 놓친 디스플레이를 색 영역 검출로 보완하는 자동 fallback도 없다.
 """
 
@@ -99,17 +98,15 @@ class YoloBoxColorDetector(BlackBoxColorDetector):
             margin_x, margin_y = int((right-left)*margin), int((bottom-top)*margin)
             inner = roi[top+margin_y:bottom-margin_y, left+margin_x:right-margin_x]
             hue, saturation, value = cv2.split(cv2.cvtColor(inner, cv2.COLOR_BGR2HSV))
-            # uint8 OpenCV HSV: H=0~179, S/V=0~255. 빨강은 hue 양 끝 구간의 합집합이다.
             valid = (saturation >= self.config.color_s_min) & (value >= self.config.color_v_min)
             red = valid & ((hue <= self.config.red_hue_high) | (hue >= self.config.red_hue_low_wrap))
             green = valid & (hue >= self.config.green_hue_low) & (hue <= self.config.green_hue_high)
-            # 분모에는 검정/노랑/저채도 픽셀도 포함해 작은 색 잡음이 높은 점수가 되지 않게 한다.
-            # 색상이 불확실해도 박스 관측은 남는다. 부모는 이전 비트를 유지할 수 있으며,
-            # hold_timeout은 마지막 유효 색상이 아니라 마지막 박스 관측 이후에 적용된다.
             pixels = inner.shape[0] * inner.shape[1]
+            red_score = float(np.count_nonzero(red) / pixels)
+            green_score = float(np.count_nonzero(green) / pixels)
             observations.append(BoxObservation(
                 bbox=(left+offset_x, top+offset_y, right+offset_x, bottom+offset_y),
-                red_score=float(np.count_nonzero(red)/pixels),
-                green_score=float(np.count_nonzero(green)/pixels),
+                red_score=red_score,
+                green_score=green_score,
             ))
         return observations

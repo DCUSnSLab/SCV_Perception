@@ -7,14 +7,19 @@ from launch_ros.parameter_descriptions import ParameterValue
 
 def generate_launch_description() -> LaunchDescription:
     image_topic = LaunchConfiguration('image_topic')
-    roi_defaults = {
+    parameter_defaults = {
         'detect_top_ratio': 0.0, 'detect_bottom_ratio': 1.0 / 3.0,
         'detect_left_ratio': 0.25, 'detect_right_ratio': 0.75,
+        'max_image_age_ms': 250.0,
+        'future_stamp_tolerance_ms': 50.0,
+        'state_confirm_ms': 200.0,
+        'state_max_gap_ms': 250.0,
     }
 
     return LaunchDescription(
         [
-            *[DeclareLaunchArgument(name, default_value=str(value)) for name, value in roi_defaults.items()],
+            *[DeclareLaunchArgument(name, default_value=str(value)) for name, value in parameter_defaults.items()],
+            DeclareLaunchArgument('use_sim_time', default_value='false'),
             DeclareLaunchArgument(
                 'image_topic',
                 default_value='/panorama/image_raw',
@@ -57,7 +62,8 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         'image_topic': image_topic,
                         'state_topic': '/tl/state_id',
-                        **{name: ParameterValue(LaunchConfiguration(name), value_type=float) for name in roi_defaults},
+                        **{name: ParameterValue(LaunchConfiguration(name), value_type=float) for name in parameter_defaults},
+                        'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
                         'input_timeout_s': ParameterValue(
                             LaunchConfiguration('input_timeout_s'),
                             value_type=float,

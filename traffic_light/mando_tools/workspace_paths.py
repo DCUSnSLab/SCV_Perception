@@ -31,28 +31,34 @@ def _is_workspace_root(path: Path) -> bool:
     return (
         (path / 'mando_tools').is_dir()
         and (path / 'launch').is_dir()
-        and (path / 'data').is_dir()
         and (path / 'package.xml').is_file()
     )
 
 
 def workspace_root_or_none() -> Path | None:
-    # Nodes installed into a colcon install space no longer sit inside the
-    # source tree, so the walk-up search can legitimately come up empty.
     env_candidates = [
         os.environ.get('MANDO_WS'),
         os.environ.get('MANDO_WORKSPACE'),
     ]
-    search_starts = [Path.cwd(), Path(__file__)]
-
-    for candidate in env_candidates:
-        if candidate:
-            search_starts.insert(0, Path(candidate))
+    search_starts = [Path(candidate) for candidate in env_candidates if candidate]
+    search_starts.extend([Path(__file__), Path.cwd()])
+    source_locations = (
+        Path('.'),
+        Path('src/perception/traffic_light'),
+        Path('src/traffic_light'),
+        Path('traffic_light'),
+    )
+    checked: set[Path] = set()
 
     for start in search_starts:
         for root in _iter_search_roots(start):
-            if _is_workspace_root(root):
-                return root
+            for relative in source_locations:
+                candidate = root / relative
+                if candidate in checked:
+                    continue
+                checked.add(candidate)
+                if _is_workspace_root(candidate):
+                    return candidate.resolve()
 
     return None
 

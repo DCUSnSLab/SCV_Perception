@@ -42,7 +42,7 @@ ros2 run mando_tools workspace_info
 | --- | --- | --- |
 | `yolo_validator.py` | YOLO 클래스 결과만으로 상태를 빠르게 검증 | annotated image, `Detection2DArray`, `/tl/yolo_validator/state` |
 | `tl_roi_hist.py` | YOLO로 ROI를 찾고 Hue histogram 기반으로 상태 판정 | `/tl/debug_image`, `/tl/zoom_image`, `/tl/hist_image`, `/tl/roi_hist/state` |
-| `tl_fusion.py` | 모델 클래스와 색 분석을 결합하고 안정화까지 적용 | `/tl/debug_image`, `/tl/state_id`, `/tl/state_label`, `/tl/state_reason` |
+| `tl_fusion.py` | 모델 클래스와 색 분석을 결합하고 안정화까지 적용 | `/tl/state_id`, `/tl/detections`, `/tl/debug_image` |
 
 ## 4. `yolo_validator.py`
 
@@ -139,7 +139,7 @@ ros2 launch mando_tools tl_roi_hist.launch.py
 
 - `/tl/debug_image`는 구독자가 있거나 `show_windows=true`일 때만 생성/발행한다.
 - `show_windows=true`면 OpenCV 디버그 창을 띄운다.
-- 별도 zoom/panel 창 이미지는 현재 publish하지 않는다.
+- 상단 1/3·중앙 1/2 ROI와 검출 박스 테두리만 표시하며, 색상 마스크 패널과 문자 오버레이는 표시하지 않는다.
 
 실행:
 

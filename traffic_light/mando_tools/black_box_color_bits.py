@@ -1,19 +1,16 @@
 #!/usr/bin/env python3
-"""상단 ROI의 빨강/초록 색 영역마다 빨강=0, 초록=1로 발행한다.
+"""YOLO로 상단 ROI의 디스플레이 위치를 찾고 색상 비트를 발행한다.
 
-처리 흐름: BGR 영상 → ROI → HSV 색 마스크 → 연결 영역 → 추적/EMA → 비트.
+처리 흐름: BGR 영상 → ROI → YOLO 박스 → 박스 내부 HSV 색 판정 → 추적/EMA → 비트.
 검출기는 영상/시간을 입력받고, ROS 노드는 구독·주기 제한·발행을 담당한다.
-출력은 확정된 박스만 영상의 왼쪽부터 나열한 가변 길이 배열이다. 미확정은
-0으로 대체하지 않으며, 최초 유효 검출 전이나 모든 트랙 만료 시에는 []이다.
-사각형 모양은 요구하지 않는다. 가까운 동색 LED를 묶고 주변의 어두운 비율을 검사한다.
-어두운 창문/옷의 유색 반사까지 완벽하게 구분하는 의미 기반 검출기는 아니다.
-기존 실행 파일·클래스·토픽 이름은 호환성을 위해 유지한다.
+출력은 확정된 박스만 영상의 왼쪽부터 나열한 가변 길이 배열이다.
 """
 
 from __future__ import annotations
 
 import sys
 import time
+import fcntl
 from math import hypot
 from dataclasses import dataclass
 from typing import Any
@@ -30,6 +27,7 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
+from rclpy.clock import Clock, ClockType
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
@@ -50,8 +48,8 @@ class DetectorConfig:
     # 입력 영상 전체 기준 경계 비율(0~1); 중앙 절반 너비의 상단 1/2만 처리한다.
     roi_top_ratio: float = 0.0
     roi_bottom_ratio: float = 0.50
-    roi_left_ratio: float = 0.25
-    roi_right_ratio: float = 0.75
+    roi_left_ratio: float = 0.35
+    roi_right_ratio: float = 0.65
 
     # close는 같은 색의 틈을 메우고 open은 작은 색 잡음을 제거한다.
     morphology_kernel_size: int = 5
@@ -419,13 +417,21 @@ class BlackBoxColorDetector:
 
 
 class BlackBoxColorBitsNode(Node):
-    """최신 영상만 처리하고 타이머마다 상태 배열을 발행하는 ROS 2 어댑터."""
+    """최신 영상만 처리하고 새 입력마다 결과를 발행하는 ROS 2 어댑터."""
 
     def __init__(self) -> None:
         super().__init__('black_box_color_bits')
         self.bridge = CvBridge()
         self.latest_msg: Image | None = None
         self.processing = False
+        self.last_valid_receive_ns = None
+        self.latest_receive_ns = None
+        self.max_image_age_ms = float(self._declare_param('max_image_age_ms', 250.0))
+        self.input_timeout_s = float(self._declare_param('input_timeout_s', 0.5))
+        if not np.isfinite(self.max_image_age_ms) or self.max_image_age_ms <= 0:
+            raise ValueError('max_image_age_ms must be finite and positive')
+        if not np.isfinite(self.input_timeout_s) or self.input_timeout_s <= 0:
+            raise ValueError('input_timeout_s must be finite and positive')
 
         self.image_topic = str(self._declare_param('image_topic', '/panorama/image_raw'))
         self.bits_topic = str(self._declare_param('bits_topic', '/tl/box_color_bits'))
@@ -445,20 +451,6 @@ class BlackBoxColorBitsNode(Node):
             roi_bottom_ratio=float(self._declare_param('roi_bottom_ratio', 0.5)),
             roi_left_ratio=float(self._declare_param('roi_left_ratio', 0.25)),
             roi_right_ratio=float(self._declare_param('roi_right_ratio', 0.75)),
-            morphology_kernel_size=int(self._declare_param('morphology_kernel_size', 5)),
-            morphology_close_iterations=int(self._declare_param('morphology_close_iterations', 0)),
-            morphology_open_iterations=int(self._declare_param('morphology_open_iterations', 0)),
-            led_group_gap_px=int(self._declare_param('led_group_gap_px', 6)),
-            surround_margin_px=int(self._declare_param('surround_margin_px', 4)),
-            surround_v_max=int(self._declare_param('surround_v_max', 70)),
-            surround_min_dark_ratio=float(self._declare_param('surround_min_dark_ratio', 0.55)),
-            min_box_width_px=int(self._declare_param('min_box_width_px', 3)),
-            min_box_height_px=int(self._declare_param('min_box_height_px', 3)),
-            min_box_area_px=int(self._declare_param('min_box_area_px', 12)),
-            max_box_width_px=int(self._declare_param('max_box_width_px', 160)),
-            max_box_height_px=int(self._declare_param('max_box_height_px', 160)),
-            max_box_width_ratio=float(self._declare_param('max_box_width_ratio', 0.35)),
-            max_box_height_ratio=float(self._declare_param('max_box_height_ratio', 0.80)),
             inner_margin_ratio=float(self._declare_param('inner_margin_ratio', 0.20)),
             color_s_min=int(self._declare_param('color_s_min', 80)),
             color_v_min=int(self._declare_param('color_v_min', 45)),
@@ -472,28 +464,21 @@ class BlackBoxColorBitsNode(Node):
             match_distance_ratio=float(self._declare_param('match_distance_ratio', 2.5)),
             hold_timeout_s=float(self._declare_param('hold_timeout_s', 0.5)),
         )
-        detector_mode = str(self._declare_param('detector_mode', 'color_regions'))
         root = workspace_root_or_none()
         default_box_model = str(root / 'model' / 'box_best.pt') if root is not None else 'box_best.pt'
         box_model_path = str(self._declare_param('box_model_path', default_box_model))
         box_device = str(self._declare_param('box_device', 'auto'))
         box_confidence = float(self._declare_param('box_confidence', 0.25))
         box_image_size = int(self._declare_param('box_image_size', 640))
-        if detector_mode == 'color_regions':
-            self.detector = BlackBoxColorDetector(config)
-        elif detector_mode == 'yolo_boxes':
-            from .yolo_box_color_bits import YoloBoxColorDetector
-            self.detector = YoloBoxColorDetector(
-                config, box_model_path, device=box_device,
-                confidence=box_confidence, image_size=box_image_size,
-            )
-            self.get_logger().info(
-                f'YOLO box model: {box_model_path}; device={self.detector.device}; '
-                f'classes={self.detector.class_ids}; bit source=HSV'
-            )
-        else:
-            raise ValueError('detector_mode must be color_regions or yolo_boxes')
-        self.get_logger().info(f'Detector mode: {detector_mode}')
+        from .yolo_box_color_bits import YoloBoxColorDetector
+        self.detector = YoloBoxColorDetector(
+            config, box_model_path, device=box_device,
+            confidence=box_confidence, image_size=box_image_size,
+        )
+        self.get_logger().info(
+            f'YOLO box model: {box_model_path}; device={self.detector.device}; '
+            f'classes={self.detector.class_ids}; bit source=HSV'
+        )
 
         self.get_logger().info(f'Subscribing to image topic: {self.image_topic}')
         self.get_logger().info(f'Publishing color bits on: {self.bits_topic}')
@@ -503,14 +488,14 @@ class BlackBoxColorBitsNode(Node):
             Image,
             self.image_topic,
             self._image_callback,
-            qos_profile_sensor_data,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT),
         )
         status_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.bits_pub = self.create_publisher(UInt8MultiArray, self.bits_topic, status_qos)
         self.debug_pub = self.create_publisher(Image, self.debug_image_topic, qos_profile_sensor_data)
 
         timer_period = 1.0 / max(self.max_fps, 0.1)
-        self.create_timer(timer_period, self._process_latest_frame)
+        self.create_timer(timer_period, self._process_latest_frame, clock=Clock(clock_type=ClockType.STEADY_TIME))
 
     def _declare_param(self, name: str, default_value: Any) -> Any:
         return self.declare_parameter(name, default_value).value
@@ -518,6 +503,20 @@ class BlackBoxColorBitsNode(Node):
     def _image_callback(self, msg: Image) -> None:
         """처리를 예약하는 대신 최신 메시지로 덮어써 입력 적체를 방지한다."""
         self.latest_msg = msg
+        self.latest_receive_ns = time.monotonic_ns()
+
+    def _fresh(self, message, received_ns):
+        stamp_ns = message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec
+        age_ns = self.get_clock().now().nanoseconds - stamp_ns
+        return (stamp_ns > 0 and 0 <= age_ns <= self.max_image_age_ms * 1_000_000
+                and time.monotonic_ns() - received_ns <= self.input_timeout_s * 1_000_000_000)
+
+    def _invalidate(self, publish: bool = True):
+        self.detector.tracks.clear()
+        self.detector.last_bits = []
+        self.last_valid_receive_ns = None
+        if publish:
+            self._publish_bits([])
 
     def _process_latest_frame(self) -> None:
         """최신 프레임을 최대 max_fps 주기로 처리한다(실제 처리 속도는 연산량에 의존).
@@ -530,22 +529,32 @@ class BlackBoxColorBitsNode(Node):
             return
         if self.latest_msg is None:
             timestamp_ns = time.monotonic_ns()
-            self.detector._expire_tracks(timestamp_ns)
-            self._publish_bits(self.detector._bits_after_tracking(timestamp_ns))
+            if (self.last_valid_receive_ns is None or
+                    timestamp_ns - self.last_valid_receive_ns > self.input_timeout_s * 1_000_000_000):
+                self._invalidate(publish=False)
             return
         message = self.latest_msg
+        received_ns = self.latest_receive_ns
         self.latest_msg = None
+        if not self._fresh(message, received_ns):
+            self._invalidate()
+            return
         self.processing = True
         try:
             frame = self.bridge.imgmsg_to_cv2(message, desired_encoding='bgr8')
             bits, observations, roi_bounds = self.detector.process(frame)
+            if not self._fresh(message, received_ns):
+                self._invalidate()
+                return
+            self.last_valid_receive_ns = received_ns
             self._publish_bits(bits)
             if self.publish_debug_image and self.debug_pub.get_subscription_count() > 0:
-                debug_image = self._draw_debug(frame, observations, roi_bounds, bits)
+                debug_image = self._draw_debug(frame, observations, roi_bounds)
                 debug_message = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
                 debug_message.header = message.header
                 self.debug_pub.publish(debug_message)
         except Exception as exc:
+            self._invalidate()
             self.get_logger().error(f'Failed to process image: {exc}')
         finally:
             self.processing = False
@@ -569,61 +578,40 @@ class BlackBoxColorBitsNode(Node):
         frame: np.ndarray,
         observations: list[BoxObservation],
         roi_bounds: tuple[int, int, int, int],
-        bits: list[int],
     ) -> np.ndarray:
-        """ROI만 복사해 현재 관측을 그린다. r/g는 원시 점수, 색은 확정 비트다.
+        """ROI만 복사해 현재 관측의 박스만 그린다. 색은 확정 비트다.
 
-        표시 인덱스는 관측 순서이며 미확정/유지 중 트랙 때문에 출력 인덱스와 다를 수 있다.
         트랙은 전체 영상 좌표를 유지하고 표시 좌표만 ROI 시작점만큼 이동한다.
         """
         roi_x0, roi_y0, roi_x1, roi_y1 = roi_bounds
         debug = frame[roi_y0:roi_y1, roi_x0:roi_x1].copy()
         if debug.size == 0:
             return debug
-        for index, observation in enumerate(observations):
+        for observation in observations:
             x0, y0, x1, y1 = observation.bbox
             x0, x1 = x0 - roi_x0, x1 - roi_x0
             y0, y1 = y0 - roi_y0, y1 - roi_y0
             if observation.stable_bit == 1:
                 color = (0, 255, 0)
-                label = 'G:1'
             elif observation.stable_bit == 0:
                 color = (0, 0, 255)
-                label = 'R:0'
             else:
                 color = (0, 165, 255)
-                label = '?:-'
             cv2.rectangle(debug, (x0, y0), (x1 - 1, y1 - 1), color, 2)
-            text = f'{index} {label} r={observation.red_score:.2f} g={observation.green_score:.2f}'
-            self._put_debug_text(debug, text, (x0, y0 - 5), color)
-        self._put_debug_text(debug, f'bits={bits}', (10, 25), (255, 255, 255))
         return debug
-
-    @staticmethod
-    def _put_debug_text(
-        debug: np.ndarray,
-        text: str,
-        origin: tuple[int, int],
-        color: tuple[int, int, int],
-    ) -> None:
-        """라벨을 크롭 영상 안으로 이동한다. 작은 ROI에서는 글꼴 크기도 줄인다."""
-        height, width = debug.shape[:2]
-        if height < 4 or width < 4:
-            return
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.45
-        (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, 1)
-        scale *= min(1.0, (width - 3) / max(text_width, 1), (height - 3) / max(text_height + baseline, 1))
-        (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, 1)
-        if text_width > width - 2 or text_height + baseline > height - 2:
-            return
-        text_x = max(1, min(origin[0], width - text_width - 1))
-        text_y = max(text_height + 1, min(origin[1], height - baseline - 1))
-        cv2.putText(debug, text, (text_x, text_y), font, scale, color, 1, cv2.LINE_AA)
 
 
 def main(args: list[str] | None = None) -> None:
     rclpy.init(args=args)
+    lock_file = open('/tmp/mando_black_box_color_bits.lock', 'w')
+    try:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print('mando_black_box_color_bits is already running; refusing duplicate process.', file=sys.stderr)
+        lock_file.close()
+        rclpy.shutdown()
+        return
+
     node = BlackBoxColorBitsNode()
     try:
         rclpy.spin(node)
@@ -631,6 +619,8 @@ def main(args: list[str] | None = None) -> None:
         pass
     finally:
         node.destroy_node()
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
         rclpy.shutdown()
 
 

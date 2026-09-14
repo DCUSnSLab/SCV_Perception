@@ -164,8 +164,11 @@ def test_default_roi_detects_only_center_top_and_preserves_global_coordinates():
 def test_debug_crop_global_to_local_and_input_unchanged():
     frame = np.zeros((370, 1254, 3), dtype=np.uint8)
     observation = BoxObservation((360, 45, 421, 106), 1.0, 0.0, stable_bit=0)
-    drawer = SimpleNamespace(_put_debug_text=BlackBoxColorBitsNode._put_debug_text)
-    debug = BlackBoxColorBitsNode._draw_debug(drawer, frame, [observation], (313, 0, 940, 185), [0])
+    drawer = SimpleNamespace()
+    debug = BlackBoxColorBitsNode._draw_debug(drawer, frame, [observation], (313, 0, 940, 185))
+    expected = frame[:185, 313:940].copy()
+    cv2.rectangle(expected, (47, 45), (107, 105), (0, 0, 255), 2)
+    np.testing.assert_array_equal(debug, expected)
     assert debug.shape == (185, 627, 3)
     np.testing.assert_array_equal(debug[-1], frame[184, 313:940])
     assert not np.any(np.all(debug == (255, 0, 255), axis=2))
@@ -189,7 +192,6 @@ def test_callback_preserves_debug_header(subscriber_count):
         detector=BlackBoxColorDetector(), publish_debug_image=True,
         debug_pub=SimpleNamespace(publish=published.append, get_subscription_count=lambda: subscriber_count),
         _publish_bits=published_bits.append,
-        _put_debug_text=BlackBoxColorBitsNode._put_debug_text,
     )
     def draw_debug(*args):
         drawn.append(True)
@@ -228,14 +230,14 @@ def test_surround_ratio_matches_ring_mask(margin):
 
 
 @pytest.mark.parametrize('shape', [(1, 1, 3), (15, 40, 3), (185, 627, 3)])
-def test_debug_text_fits_crop(shape, monkeypatch):
+def test_debug_has_no_text(shape, monkeypatch):
     calls = []
     monkeypatch.setattr(cv2, 'putText', lambda *args: calls.append(args))
-    BlackBoxColorBitsNode._put_debug_text(np.zeros(shape, dtype=np.uint8), '0 R:0 r=1.00 g=0.00', (shape[1]-1, -5), (0, 0, 255))
-    for args in calls:
-        (width, height), baseline = cv2.getTextSize(args[1], args[3], args[4], args[6])
-        assert args[2][0] >= 0 and args[2][0] + width < shape[1]
-        assert args[2][1] - height >= 0 and args[2][1] + baseline < shape[0]
+    frame = np.zeros(shape, dtype=np.uint8)
+    bounds = (0, 0, shape[1], shape[0])
+    debug = BlackBoxColorBitsNode._draw_debug(SimpleNamespace(), frame, [], bounds)
+    assert calls == []
+    np.testing.assert_array_equal(debug, frame)
 
 
 def test_new_upper_half_band_is_detected_but_lower_half_is_excluded():

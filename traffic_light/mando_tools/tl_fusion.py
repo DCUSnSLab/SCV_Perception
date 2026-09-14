@@ -9,7 +9,7 @@
     * 영상은 uint8 BGR, 박스는 원본 영상의 (x0, y0, x1, y1) 픽셀 좌표다.
       검출 ROI 내부 좌표는 _detect_candidates()에서 원본 좌표로 복원한다.
     * 판정/추적 시간은 ROS 시계, 수신 끊김과 로그 간격은 monotonic 시계를 쓴다.
-      영상 header stamp는 순서 검증용이므로 이 세 시간 기준을 혼용하지 않는다.
+      영상 header stamp는 ROS 시계와 비교해 입력의 나이와 순서를 검증한다.
     * 디버그 영상과 화면용 박스 보간은 판정 입력으로 되돌려 사용하지 않는다.
 
 실행 진입점은 main(), 핵심 조정 지점은 _decide_state()와
@@ -23,6 +23,7 @@ import math
 import sys
 import time
 import traceback
+from threading import Lock
 from collections import Counter
 from collections import deque
 from dataclasses import dataclass
@@ -45,13 +46,19 @@ import numpy as np
 import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import QoSProfile
 from rclpy.qos import ReliabilityPolicy
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
-from std_msgs.msg import Bool
 from std_msgs.msg import Int32
-from std_msgs.msg import String
+from vision_msgs.msg import Pose2D
+from vision_msgs.msg import BoundingBox2D
+from vision_msgs.msg import Detection2D
+from vision_msgs.msg import Detection2DArray
+from vision_msgs.msg import ObjectHypothesisWithPose
+from vision_msgs.msg import Point2D
 from ultralytics import YOLO
 
 try:
@@ -139,8 +146,7 @@ class ColorAnalysisResult:
 
     scores는 세 색상의 가중치 합을 정규화한 비율이며, 근거가 없으면 모두 0이다.
     valid_pixels는 보정/확대 후 정제된 마스크들의 픽셀 수 합계다.
-    decisive는 색상 확정 조건 통과 여부이고 highlighted는 표시 전용이다.
-    highlighted=None은 시각화를 생략했다는 뜻이며 판정 실패를 의미하지 않는다.
+    decisive는 색상 확정 조건 통과 여부다.
     """
 
     state: int
@@ -150,7 +156,6 @@ class ColorAnalysisResult:
     top_score: float
     score_gap: float
     scores: dict[str, float]
-    highlighted: np.ndarray | None
 
 
 @dataclass
@@ -164,10 +169,9 @@ class DecisionResult:
 
 @dataclass
 class OverlayCandidate:
-    """화면에만 쓰는 박스/라벨. 보간된 box를 검출이나 색 분석에 재사용하지 않는다."""
+    """화면에만 쓰는 박스/색상 정보. 보간된 box는 판정에 재사용하지 않는다."""
 
     box: tuple[int, int, int, int]
-    label: str
     color: tuple[int, int, int]
     selected: bool
 
@@ -175,9 +179,8 @@ class OverlayCandidate:
 class TLFusionNode(Node):
     """최신 입력 슬롯과 프레임 간 판정 이력을 소유하는 노드.
 
-    현재 main()은 기본 단일 스레드 executor를 사용한다. processing은 중복
-    처리 방지용 플래그이지 락이 아니므로, 병렬 처리 도입 시 latest_msg,
-    상태 이력, 모델 호출과 callback group의 동기화를 함께 재검토해야 한다.
+    수신과 추론은 별도 callback group에서 실행하며 최신 슬롯은 락으로 보호한다.
+    모델 호출과 상태 변경은 하나의 상호 배제 처리 그룹에서 직렬화한다.
     파라미터는 초기화 때 멤버에 복사하며 동적 갱신 콜백은 구현하지 않는다.
     """
 
@@ -276,20 +279,26 @@ class TLFusionNode(Node):
         )
         self.fallback_gamma_lut = self._build_gamma_lut(self.fallback_gamma)
 
-        # 이력 길이는 프레임 수, hold/missing/reset은 ms다. FPS 변경 시 시간 응답도 달라진다.
         # hold는 마지막 상태 전환 이후 최소 간격, missing은 짧은 미검출의 상태 유지,
         # reset은 오래 미검출됐을 때 이전 후보 위치를 버리는 기준이다.
-        self.state_window_size = int(self._declare_param('state_window_size', 5))
+        self.state_confirm_ms = float(self._declare_param('state_confirm_ms', 200.0))
+        self.state_max_gap_ms = float(self._declare_param('state_max_gap_ms', 250.0))
+        self.max_image_age_ms = float(self._declare_param('max_image_age_ms', 250.0))
+        self.future_stamp_tolerance_ms = float(self._declare_param('future_stamp_tolerance_ms', 50.0))
+        for value in (self.state_confirm_ms, self.state_max_gap_ms, self.max_image_age_ms, self.future_stamp_tolerance_ms):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError('Timing parameters must be finite and nonnegative')
+        if self.state_max_gap_ms == 0:
+            raise ValueError('state_max_gap_ms must be positive')
         self.hold_ms = int(self._declare_param('hold_ms', 250))
         self.missing_timeout_ms = int(self._declare_param('missing_timeout_ms', 400))
         self.reset_tracking_ms = int(self._declare_param('reset_tracking_ms', 1200))
         # 화면의 깜빡임/박스 흔들림만 줄이는 설정이며 실제 상태 안정화와 분리한다.
         self.overlay_hold_ms = int(self._declare_param('overlay_hold_ms', 220))
         self.overlay_smoothing_alpha = float(self._declare_param('overlay_smoothing_alpha', 0.55))
-        # 일부 rosbag은 정상 영상에도 0 stamp를 사용하므로 기본적으로 허용한다.
         # 양수 stamp의 역행은 기본적으로 거부하지만 같은 stamp의 재입력은 허용한다.
         self.require_image_header_stamp = bool(
-            self._declare_param('require_image_header_stamp', False)
+            self._declare_param('require_image_header_stamp', True)
         )
         self.require_monotonic_image_stamp = bool(
             self._declare_param('require_monotonic_image_stamp', True)
@@ -323,6 +332,9 @@ class TLFusionNode(Node):
         # 수신 콜백은 단일 슬롯을 덮어쓴다. 소비한 메시지는 타이머가 슬롯에서 제거한다.
         # DDS 내부 대기열까지 없애는 구조는 아니므로 절대적인 최신 프레임 보장은 아니다.
         self.latest_msg: Image | None = None
+        self.latest_msg_lock = Lock()
+        self.receive_group = MutuallyExclusiveCallbackGroup()
+        self.process_group = MutuallyExclusiveCallbackGroup()
         self.processing = False
         self.last_image_received_monotonic_ns = time.monotonic_ns()
         self.input_timeout_active = False
@@ -335,7 +347,10 @@ class TLFusionNode(Node):
         self.last_candidate_box: tuple[int, int, int, int] | None = None
         self.last_overlay_candidate: OverlayCandidate | None = None
         self.last_overlay_update_ns = self._now_ns()
-        self.state_history: deque[int] = deque(maxlen=max(1, self.state_window_size))
+        self.state_history: deque[int] = deque(maxlen=1)
+        self.pending_state = STATE_UNKNOWN
+        self.pending_since_ns: int | None = None
+        self.last_state_observation_ns: int | None = None
         self.processed_frames = 0
         self.last_status_log = time.monotonic()
         self.last_status_frames = 0
@@ -349,21 +364,21 @@ class TLFusionNode(Node):
             Image,
             self.image_topic,
             self._image_callback,
-            qos_profile_sensor_data,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT),
+            callback_group=self.receive_group,
         )
 
-        # 큰 디버그 영상은 깊이 1, 상태 메시지는 깊이 10의 reliable QoS를 사용한다.
-        # input_valid는 입력 처리 상태이며, 신호등 검출 성공이나 GREEN 여부가 아니다.
+        # 출력은 Planner 호환 상태, 검출 시각화, 디버그 영상 세 토픽만 사용한다.
         image_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         status_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.debug_pub = self.create_publisher(Image, '/tl/debug_image', image_qos)
         self.state_pub = self.create_publisher(Int32, self.state_topic, status_qos)
-        self.state_label_pub = self.create_publisher(String, '/tl/state_label', status_qos)
-        self.state_reason_pub = self.create_publisher(String, '/tl/state_reason', status_qos)
-        self.input_valid_pub = self.create_publisher(Bool, '/tl/input_valid', status_qos)
+        self.detection_pub = self.create_publisher(
+            Detection2DArray, '/tl/detections', image_qos,
+        )
 
         timer_period = 1.0 / max(self.max_fps, 0.1)
-        self.create_timer(timer_period, self._process_latest_frame)
+        self.create_timer(timer_period, self._process_latest_frame, callback_group=self.process_group)
 
     def _declare_param(self, name: str, default_value: Any) -> Any:
         """시작 시 ROS override를 반영한 값을 읽는다. 멤버의 실시간 갱신 기능은 아니다."""
@@ -373,8 +388,9 @@ class TLFusionNode(Node):
 
     def _image_callback(self, msg: Image) -> None:
         """추론 없이 수신 시각과 최신 슬롯만 갱신해 콜백 작업을 짧게 유지한다."""
-        self.last_image_received_monotonic_ns = time.monotonic_ns()
-        self.latest_msg = msg
+        with self.latest_msg_lock:
+            self.last_image_received_monotonic_ns = time.monotonic_ns()
+            self.latest_msg = msg
 
     def _process_latest_frame(self) -> None:
         """대기 중인 한 프레임을 처리하고 다음 호출을 위해 processing을 해제한다.
@@ -385,13 +401,13 @@ class TLFusionNode(Node):
         """
         if self.processing:
             return
-        if self.latest_msg is None:
+        with self.latest_msg_lock:
+            msg = self.latest_msg
+            self.latest_msg = None
+        if msg is None:
             self._publish_timeout_if_needed()
             return
 
-        # 처리할 입력을 확보한 뒤 슬롯을 비운다. 새 executor 설계에서는 이 교환도 보호해야 한다.
-        msg = self.latest_msg
-        self.latest_msg = None
         self.processing = True
         started = time.perf_counter()
         stage = 'decode'
@@ -402,7 +418,6 @@ class TLFusionNode(Node):
                 self._handle_invalid_input(msg, stamp_reason)
                 return
             # 프레임 시작에 시각화 수요를 한 번만 확인한다. 창 표시와 ROS 발행은 별개다.
-            # 색 분석 내부까지 이 값을 전달해야 보이지 않는 하이라이트 생성도 생략된다.
             publish_debug_image = self._should_publish_debug()
             render_debug = self.show_windows or publish_debug_image
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -437,11 +452,13 @@ class TLFusionNode(Node):
                 decision = self._decide_state(selected, analysis)
             else:
                 stage = 'analyze'
-                analysis = self._analyze_selected_candidate(
-                    frame, selected, render_debug=render_debug,
-                )
+                analysis = self._analyze_selected_candidate(frame, selected)
                 stage = 'decide'
                 decision = self._decide_state(selected, analysis)
+            stamp_reason = self._validate_input_timestamp(msg)
+            if stamp_reason is not None:
+                self._handle_invalid_input(msg, stamp_reason)
+                return
             stage = 'stabilize'
             stable_state = self._update_stable_state(decision.proposed_state, selected is not None)
             debug_image = None
@@ -453,15 +470,14 @@ class TLFusionNode(Node):
                     stable_state,
                 )
                 stage = 'render_debug'
-                debug_image = self._build_debug_image(
-                    frame,
-                    overlay_candidates,
-                    selected,
-                    analysis,
-                )
+                debug_image = self._build_debug_image(frame, overlay_candidates)
             stage = 'publish_outputs'
+            stamp_reason = self._validate_input_timestamp(msg)
+            if stamp_reason is not None:
+                self._handle_invalid_input(msg, stamp_reason)
+                return
             self._publish_outputs(
-                msg, debug_image, stable_state, decision,
+                msg, detections, debug_image, stable_state, decision,
                 publish_debug_image=publish_debug_image,
             )
 
@@ -490,9 +506,8 @@ class TLFusionNode(Node):
                         summary,
                     )
                 )
-        # 일반 처리 예외는 로그만 남긴다. 아래 별도 입력 오류/타임아웃 경로와 달리
-        # 이 경로 자체가 UNKNOWN이나 input_valid=false를 발행하지는 않는다.
         except Exception as exc:  # noqa: BLE001
+            self._publish_processing_error(msg)
             self._log_processing_error(stage, exc, msg)
         finally:
             self.processing = False
@@ -521,15 +536,13 @@ class TLFusionNode(Node):
         self.current_reason = f'no_image_for={elapsed_s:.1f}s'
         self.state_history.clear()
         self.state_history.append(STATE_UNKNOWN)
+        self.pending_since_ns = None
+        self.last_state_observation_ns = None
         self.last_candidate_box = None
         self.last_overlay_candidate = None
 
-        self.input_valid_pub.publish(Bool(data=False))
         self.state_pub.publish(Int32(data=int(STATE_UNKNOWN)))
-        self.state_label_pub.publish(String(data=STATE_LABELS[STATE_UNKNOWN]))
-        self.state_reason_pub.publish(
-            String(data=f'{STATE_LABELS[STATE_UNKNOWN]} input_timeout {self.current_reason}')
-        )
+        self.detection_pub.publish(self._empty_detection_array())
 
         if first_timeout_publish:
             self.get_logger().error(
@@ -575,12 +588,17 @@ class TLFusionNode(Node):
     def _validate_input_timestamp(self, msg: Image) -> str | None:
         """입력 시각이 허용되면 None, 거부할 경우 이유 문자열을 반환한다.
 
-        양수 stamp에 대해서만 역행을 검사하고 마지막 시각을 갱신한다.
-        같은 stamp는 허용하며, 촬영 시각이 현재보다 얼마나 오래됐는지는 검사하지 않는다.
+        ROS 시계 기준 나이, 미래 시각 및 역행을 검사한다.
+        추론 전후와 발행 직전에 호출해 처리 도중 만료된 결과도 거부한다.
         """
         stamp_ns = self._stamp_to_ns(msg)
-        if self.require_image_header_stamp and stamp_ns <= 0:
+        if (self.require_image_header_stamp or self.max_image_age_ms > 0) and stamp_ns <= 0:
             return 'invalid_image_stamp_zero'
+        age_ms = self._ns_to_ms(self._now_ns() - stamp_ns)
+        if self.max_image_age_ms > 0 and age_ms > self.max_image_age_ms:
+            return f'invalid_image_stale age_ms={age_ms:.1f}'
+        if age_ms < -self.future_stamp_tolerance_ms:
+            return f'invalid_image_future age_ms={age_ms:.1f}'
         if (
             self.require_monotonic_image_stamp
             and stamp_ns > 0
@@ -596,7 +614,7 @@ class TLFusionNode(Node):
         return None
 
     def _handle_invalid_input(self, msg: Image, reason: str) -> None:
-        """잘못된 header 입력을 처리하지 않고 상태/추적을 초기화해 입력 무효를 알린다."""
+        """잘못된 입력을 UNKNOWN과 빈 검출 배열로 처리한다."""
         now = time.monotonic()
         should_log = (
             reason != self._last_invalid_input_reason
@@ -610,13 +628,13 @@ class TLFusionNode(Node):
         self.current_reason = reason
         self.state_history.clear()
         self.state_history.append(STATE_UNKNOWN)
+        self.pending_since_ns = None
+        self.last_state_observation_ns = None
         self.last_candidate_box = None
         self.last_overlay_candidate = None
 
-        self.input_valid_pub.publish(Bool(data=False))
         self.state_pub.publish(Int32(data=int(STATE_UNKNOWN)))
-        self.state_label_pub.publish(String(data=STATE_LABELS[STATE_UNKNOWN]))
-        self.state_reason_pub.publish(String(data=f'{STATE_LABELS[STATE_UNKNOWN]} invalid_input {reason}'))
+        self.detection_pub.publish(self._empty_detection_array(msg.header))
 
         if should_log:
             header = msg.header
@@ -626,6 +644,61 @@ class TLFusionNode(Node):
                 f'stamp={header.stamp.sec}.{header.stamp.nanosec:09d} '
                 f'image_topic={self.image_topic}'
             )
+
+    def _publish_processing_error(self, msg: Image) -> None:
+        """디코딩·추론·렌더링 오류가 이전 상태와 검출을 남기지 않게 초기화한다."""
+        self.current_state = STATE_UNKNOWN
+        self.current_source = 'processing_error'
+        self.current_reason = 'processing_error'
+        self.state_history.clear()
+        self.state_history.append(STATE_UNKNOWN)
+        self.pending_state = STATE_UNKNOWN
+        self.pending_since_ns = None
+        self.last_state_observation_ns = None
+        self.last_candidate_box = None
+        self.last_overlay_candidate = None
+        self.state_pub.publish(Int32(data=STATE_UNKNOWN))
+        self.detection_pub.publish(self._empty_detection_array(msg.header))
+
+    def _empty_detection_array(self, header: Any | None = None) -> Detection2DArray:
+        """헤더만 보존한 빈 검출 배열을 만든다."""
+        output = Detection2DArray()
+        if header is not None:
+            output.header = header
+        else:
+            output.header.stamp = self.get_clock().now().to_msg()
+        return output
+
+    def _build_detection_array(
+        self,
+        header: Any,
+        detections: list[DetectionCandidate],
+    ) -> Detection2DArray:
+        """후보 박스·클래스·confidence를 vision_msgs 형식으로 변환한다."""
+        output = Detection2DArray()
+        output.header = header
+        for candidate in detections:
+            x0, y0, x1, y1 = candidate.box
+            detection = Detection2D()
+            detection.header = header
+            detection.id = str(candidate.class_id)
+            detection.bbox = BoundingBox2D(
+                center=Pose2D(
+                    position=Point2D(
+                        x=(x0 + x1) / 2.0,
+                        y=(y0 + y1) / 2.0,
+                    ),
+                    theta=0.0,
+                ),
+                size_x=float(max(0, x1 - x0)),
+                size_y=float(max(0, y1 - y0)),
+            )
+            hypothesis = ObjectHypothesisWithPose()
+            hypothesis.hypothesis.class_id = candidate.class_name
+            hypothesis.hypothesis.score = float(candidate.conf)
+            detection.results.append(hypothesis)
+            output.detections.append(detection)
+        return output
 
     # YOLO 후보 검출과 대표 후보 선택
 
@@ -759,13 +832,11 @@ class TLFusionNode(Node):
         self,
         frame: np.ndarray,
         candidate: DetectionCandidate | None,
-        *,
-        render_debug: bool = False,
     ) -> ColorAnalysisResult:
         """대표 후보의 확장 ROI에서 적/황/녹 근거를 계산한다.
 
         검출 후보를 새로 찾는 함수는 아니다. 후보가 없으면 UNKNOWN 근거를 반환한다.
-        render_debug는 시각화 생성만 제어하며 점수/decisive/판정 상태는 바꾸지 않는다.
+        디버그 영상 생성과 무관하게 판정용 색상 근거만 계산한다.
         """
         if candidate is None:
             return self._empty_analysis('no_candidate')
@@ -871,8 +942,6 @@ class TLFusionNode(Node):
             state = STATE_UNKNOWN
             reason = 'color_ambiguous'
 
-        # 이 이미지는 표시 전용이다. 디버그를 끄면 마스크 합성/복사 비용까지 없앤다.
-        highlighted = self._highlight_masks(enhanced, masks, scores) if render_debug else None
         return ColorAnalysisResult(
             state=state,
             decisive=decisive,
@@ -881,7 +950,6 @@ class TLFusionNode(Node):
             top_score=top_score,
             score_gap=score_gap,
             scores=scores,
-            highlighted=highlighted,
         )
 
     def _empty_analysis(self, reason: str) -> ColorAnalysisResult:
@@ -894,7 +962,6 @@ class TLFusionNode(Node):
             top_score=0.0,
             score_gap=0.0,
             scores={name: 0.0 for name in COLOR_ORDER},
-            highlighted=None,
         )
 
     def _decide_state(
@@ -963,13 +1030,17 @@ class TLFusionNode(Node):
     # 시간축 안정화와 외부 발행
 
     def _update_stable_state(self, proposed_state: int, has_candidate: bool) -> int:
-        """짧은 미검출 보완 -> 최근 프레임 다수결 -> 전환 간격 제한을 적용한다.
-
-        missing_timeout_ms가 지나도 바로 UNKNOWN으로 바꾸지는 않고 이력에 반영한다.
-        hold_ms는 새 후보의 지속 시간이 아니라 마지막 상태 변경 이후 경과 시간이다.
-        영상 자체의 끊김/무효 입력은 별도 경로에서 이 안정화 규칙을 우회한다.
-        """
+        """연속 관측의 경과 시간과 최소 상태 유지 시간으로 상태 전환을 결정한다."""
         now_ns = self._now_ns()
+        previous_ns = self.last_state_observation_ns
+        if previous_ns is not None and now_ns < previous_ns:
+            self.current_state = STATE_UNKNOWN
+            self.last_state_change_ns = now_ns
+            self.last_seen_candidate_ns = now_ns
+            self.last_candidate_box = None
+        if previous_ns is None or now_ns < previous_ns or self._ns_to_ms(now_ns - previous_ns) > self.state_max_gap_ms:
+            self.pending_since_ns = None
+        self.last_state_observation_ns = now_ns
         missing_ms = self._ns_to_ms(now_ns - self.last_seen_candidate_ns)
 
         if not has_candidate and missing_ms < self.missing_timeout_ms:
@@ -977,13 +1048,14 @@ class TLFusionNode(Node):
         elif not has_candidate and missing_ms >= self.reset_tracking_ms:
             self.last_candidate_box = None
 
-        # 고정 길이 deque라 FPS를 낮추면 같은 이력 길이가 더 긴 시간 범위를 나타낸다.
-        self.state_history.append(proposed_state)
-        majority_state = self._majority_state(self.state_history)
+        if self.pending_since_ns is None or proposed_state != self.pending_state:
+            self.pending_state = proposed_state
+            self.pending_since_ns = now_ns
+        confirmed = self._ns_to_ms(now_ns - self.pending_since_ns) >= self.state_confirm_ms
         can_change = self._ns_to_ms(now_ns - self.last_state_change_ns) >= self.hold_ms
 
-        if majority_state != self.current_state and can_change:
-            self.current_state = majority_state
+        if proposed_state != self.current_state and confirmed and can_change:
+            self.current_state = proposed_state
             self.last_state_change_ns = now_ns
 
         return self.current_state
@@ -991,20 +1063,16 @@ class TLFusionNode(Node):
     def _publish_outputs(
         self,
         msg: Image,
+        detections: list[DetectionCandidate],
         debug_image: np.ndarray | None,
         stable_state: int,
         decision: DecisionResult,
         *,
         publish_debug_image: bool,
     ) -> None:
-        """유효 입력 처리 결과를 발행하고, 필요한 경우에만 화면을 표시한다.
-
-        input_valid=True는 이번 프레임이 처리됐다는 뜻이며 후보 없음도 포함한다.
-        state_id/label은 안정화 결과, reason의 source/근거는 현재 프레임 결과라
-        상태 유지 중에는 서로 다른 신호를 가리킬 수 있다. 상태 토픽은 매번 발행한다.
-        """
+        """유효 입력 처리 결과를 세 개의 출력 토픽으로 발행한다."""
         self.input_timeout_active = False
-        self.input_valid_pub.publish(Bool(data=True))
+        self.detection_pub.publish(self._build_detection_array(msg.header, detections))
         # 창만 켜진 경우에는 이미지 직렬화와 ROS 발행을 하지 않는다.
         if publish_debug_image and debug_image is not None:
             debug_msg = self._numpy_to_image_msg(
@@ -1016,10 +1084,6 @@ class TLFusionNode(Node):
             self.debug_pub.publish(debug_msg)
 
         self.state_pub.publish(Int32(data=int(stable_state)))
-        self.state_label_pub.publish(String(data=STATE_LABELS[stable_state]))
-        self.state_reason_pub.publish(
-            String(data=f'{STATE_LABELS[stable_state]} {decision.source} {decision.reason}')
-        )
 
         # ROS 발행과 창 표시를 모두 요청해도 같은 렌더링 결과를 재사용한다.
         if self.show_windows and debug_image is not None:
@@ -1056,10 +1120,8 @@ class TLFusionNode(Node):
         self,
         frame: np.ndarray,
         overlay_candidates: list[OverlayCandidate],
-        selected: DetectionCandidate | None,
-        analysis: ColorAnalysisResult,
     ) -> np.ndarray:
-        """검출 ROI만 복사한다. 후보는 원본 좌표를 유지하고 표시 좌표만 이동한다."""
+        """검출 ROI만 복사하고 검출 박스 테두리만 그린다."""
         roi_x0, roi_y0, roi_x1, roi_y1 = self._window_from_ratios(
             frame.shape, self.detect_left_ratio, self.detect_right_ratio,
             self.detect_top_ratio, self.detect_bottom_ratio,
@@ -1075,13 +1137,6 @@ class TLFusionNode(Node):
                 continue
             thickness = 2 if overlay.selected else 1
             cv2.rectangle(debug, (x_a, y_a), (x_b, y_b), overlay.color, thickness)
-            self._draw_box_label(debug, overlay.label, x_a, y_a, overlay.color)
-        if selected is not None and analysis.highlighted is not None and analysis.highlighted.size > 0:
-            inset_width = min(200, debug.shape[1] - 24)
-            inset_height = min(120, debug.shape[0] - 42)
-            if inset_width > 0 and inset_height > 0:
-                inset = self._fit_to_canvas(analysis.highlighted, inset_width, inset_height)
-                self._draw_debug_inset(debug, inset, 'Color Mask')
         return debug
 
     def _build_overlay_candidates(
@@ -1105,7 +1160,6 @@ class TLFusionNode(Node):
                 smoothed_box = self._smooth_overlay_box(detection.box)
                 selected_overlay = OverlayCandidate(
                     box=smoothed_box,
-                    label=f'{detection.class_name} {detection.conf:.2f} | {STATE_LABELS[stable_state]}',
                     color=self._state_color(stable_state),
                     selected=True,
                 )
@@ -1113,7 +1167,6 @@ class TLFusionNode(Node):
                 overlays.append(
                     OverlayCandidate(
                         box=detection.box,
-                        label=f'{detection.class_name} {detection.conf:.2f}',
                         color=(0, 128, 255),
                         selected=False,
                     )
@@ -1481,131 +1534,9 @@ class TLFusionNode(Node):
             return 0
         return int(stats[1:, cv2.CC_STAT_AREA].max())
 
-    def _highlight_masks(
-        self,
-        enhanced: np.ndarray,
-        masks: dict[str, np.ndarray],
-        scores: dict[str, float],
-    ) -> np.ndarray:
-        """분석 마스크와 점수를 BGR 영상에 합성하는 표시 전용 함수.
-
-        반환 영상은 색상 값이 바뀌므로 판정에 재사용하면 안 된다. 복사/블렌딩을
-        포함하기 때문에 디버그 수요가 있을 때만 호출해야 한다.
-        """
-        highlighted = enhanced.copy()
-        dimmed = (highlighted * 0.25).astype(np.uint8)
-        highlighted = cv2.addWeighted(dimmed, 1.0, highlighted, 0.6, 0.0)
-
-        overlays = {
-            'red': (0, 0, 255),
-            'yellow': (0, 255, 255),
-            'green': (0, 255, 0),
-        }
-        for name in COLOR_ORDER:
-            mask = masks[name]
-            if np.count_nonzero(mask) == 0:
-                continue
-            color = np.zeros_like(highlighted)
-            color[:, :] = overlays[name]
-            color_strength = 0.30 + 0.50 * float(scores[name])
-            blended = cv2.addWeighted(highlighted, 1.0, color, color_strength, 0.0)
-            highlighted[mask > 0] = blended[mask > 0]
-
-        return highlighted
-
-    def _fit_to_canvas(self, image: np.ndarray, target_width: int, target_height: int) -> np.ndarray:
-        """종횡비를 유지해 표시용 canvas에 맞추고 남는 영역은 검은 여백으로 채운다."""
-        if image.size == 0:
-            return np.zeros((target_height, target_width, 3), dtype=np.uint8)
-
-        source_height, source_width = image.shape[:2]
-        scale = min(target_width / float(source_width), target_height / float(source_height))
-        new_width = max(1, int(round(source_width * scale)))
-        new_height = max(1, int(round(source_height * scale)))
-        resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
-        canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
-        x0 = (target_width - new_width) // 2
-        y0 = (target_height - new_height) // 2
-        canvas[y0:y0 + new_height, x0:x0 + new_width] = resized
-        return canvas
-
     def _state_color(self, state: int) -> tuple[int, int, int]:
         """상태의 표시용 BGR 색상을 반환한다. 미등록 ID는 UNKNOWN 색상을 사용한다."""
         return STATE_COLORS.get(state, STATE_COLORS[STATE_UNKNOWN])
-
-    def _draw_box_label(
-        self,
-        image: np.ndarray,
-        text: str,
-        x: int,
-        y: int,
-        color: tuple[int, int, int],
-    ) -> None:
-        """박스 위쪽에 배경과 텍스트를 그린다. 전달한 표시 영상에 직접 그린다."""
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = 0.42
-        thickness = 1
-        text_size, baseline = cv2.getTextSize(text, font, scale, thickness)
-        height, width = image.shape[:2]
-        if width < 20 or height < 20:
-            return
-        scale *= min(1.0, (width - 16) / max(text_size[0], 1), (height - 12) / max(text_size[1] + baseline, 1))
-        text_size, baseline = cv2.getTextSize(text, font, scale, thickness)
-        if text_size[0] + 16 > width or text_size[1] + baseline + 12 > height:
-            return
-        label_x = max(4, min(x, width - text_size[0] - 14))
-        label_y = max(text_size[1] + 6, min(y - 4, height - baseline - 3))
-        y0 = label_y - text_size[1] - 6
-        y1 = label_y + baseline + 2
-        x1 = min(image.shape[1] - 4, label_x + text_size[0] + 10)
-        cv2.rectangle(image, (label_x, y0), (x1, y1), color, -1)
-        cv2.putText(
-            image,
-            text,
-            (label_x + 5, label_y - 2),
-            font,
-            scale,
-            (16, 16, 16),
-            thickness,
-            cv2.LINE_AA,
-        )
-
-    def _draw_debug_inset(
-        self,
-        image: np.ndarray,
-        inset: np.ndarray,
-        title: str,
-    ) -> None:
-        """표시 영상 우상단에 색상 패널을 직접 합성한다.
-
-        inset 자체를 축소하지 않으므로 호출자가 영상 안에 들어갈 크기로 준비해야 한다.
-        """
-        inset_height, inset_width = inset.shape[:2]
-        title_height = 18
-        margin = 12
-        x0 = max(margin, image.shape[1] - inset_width - margin)
-        y0 = margin + title_height
-        if y0 + inset_height + margin > image.shape[0]:
-            y0 = max(margin + title_height, image.shape[0] - inset_height - margin)
-
-        panel_x0 = max(0, x0 - 4)
-        panel_y0 = max(0, y0 - 22)
-        panel_x1 = min(image.shape[1], x0 + inset_width + 4)
-        panel_y1 = min(image.shape[0], y0 + inset_height + 4)
-
-        cv2.rectangle(image, (panel_x0, panel_y0), (panel_x1, panel_y1), (10, 12, 16), -1)
-        cv2.rectangle(image, (panel_x0, panel_y0), (panel_x1, panel_y1), (120, 120, 120), 1)
-        cv2.putText(
-            image,
-            title,
-            (panel_x0 + 8, panel_y0 + 14),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (245, 247, 250),
-            1,
-            cv2.LINE_AA,
-        )
-        image[y0:y0 + inset_height, x0:x0 + inset_width] = inset
 
     # 후보 순위 계산과 시간/좌표 단위 보조 함수
 
@@ -1700,11 +1631,14 @@ def main(args: list[str] | None = None) -> None:
     """mando_tl_fusion 진입점. 생성된 노드를 spin하고 종료 시 ROS/OpenCV 자원을 정리한다."""
     rclpy.init(args=args)
     node = TLFusionNode()
+    executor = MultiThreadedExecutor(num_threads=2)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:
+        executor.shutdown()
         if node.show_windows:
             try:
                 cv2.destroyAllWindows()

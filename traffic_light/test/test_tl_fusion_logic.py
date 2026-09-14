@@ -1,7 +1,7 @@
 from collections import deque
-from dataclasses import replace
 from pathlib import Path
 import time
+from threading import Event, Thread
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -138,19 +138,18 @@ def test_image_timeout_publishes_unknown_and_invalid() -> None:
     node.last_overlay_candidate = object()
     node.image_topic = '/panorama/image_raw'
     node.state_topic = '/tl/state_id'
-    node.input_valid_pub = RecordingPublisher()
     node.state_pub = RecordingPublisher()
-    node.state_label_pub = RecordingPublisher()
-    node.state_reason_pub = RecordingPublisher()
+    node.detection_pub = RecordingPublisher()
+    node.get_clock = Mock()
+    node.get_clock.return_value.now.return_value.to_msg.return_value = Image().header.stamp
     logger = RecordingLogger()
     node.get_logger = lambda: logger
 
     node._publish_timeout_if_needed()
 
     assert node.current_state == STATE_UNKNOWN
-    assert node.input_valid_pub.messages[-1].data is False
     assert node.state_pub.messages[-1].data == STATE_UNKNOWN
-    assert 'input_timeout' in node.state_reason_pub.messages[-1].data
+    assert node.detection_pub.messages[-1].detections == []
     assert len(logger.errors) == 1
 
 
@@ -159,6 +158,7 @@ def test_image_timeout_publishes_unknown_and_invalid() -> None:
 @pytest.mark.parametrize('candidate_kind', ['absent', 'high_confidence', 'fallback'])
 def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers, candidate_kind):
     node = fusion_node
+    node.state_confirm_ms = 0
     node.show_windows = show_windows
     node.debug_pub.subscription_count = subscribers
     node.last_state_change_ns = 0
@@ -170,8 +170,8 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
     node._detect_candidates = Mock(return_value=(detections, (0, 0, 320, 160)))
     node.bridge = SimpleNamespace(imgmsg_to_cv2=Mock(return_value=frame))
     for method_name in (
-        '_highlight_masks', '_build_debug_image', '_numpy_to_image_msg',
-        '_analyze_selected_candidate', '_draw_debug_inset',
+        '_build_debug_image', '_numpy_to_image_msg',
+        '_analyze_selected_candidate',
     ):
         setattr(node, method_name, Mock(wraps=getattr(node, method_name)))
     show_image = Mock()
@@ -185,11 +185,8 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
     node._process_latest_frame()
 
     render_debug = show_windows or subscribers > 0
-    has_color_analysis = candidate_kind == 'fallback'
     assert node.debug_pub.subscription_queries == 1
     assert node._build_debug_image.call_count == int(render_debug)
-    assert node._highlight_masks.call_count == int(render_debug and has_color_analysis)
-    assert node._draw_debug_inset.call_count == int(render_debug and has_color_analysis)
     assert node._analyze_selected_candidate.call_count == int(candidate_kind != 'high_confidence')
     assert node._numpy_to_image_msg.call_count == int(subscribers > 0)
     assert len(node.debug_pub.messages) == int(subscribers > 0)
@@ -201,14 +198,14 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
         assert node.debug_pub.messages[0].header == message.header
     expected_state = STATE_UNKNOWN if candidate_kind == 'absent' else STATE_RED
     assert [message.data for message in node.state_pub.messages] == [expected_state]
-    assert [message.data for message in node.input_valid_pub.messages] == [True]
-    assert len(node.state_label_pub.messages) == len(node.state_reason_pub.messages) == 1
-    expected_reasons = {
-        'absent': 'UNKNOWN none no_candidate',
-        'high_confidence': 'RED model vehicular_red:0.90',
-        'fallback': 'RED color_fallback color_red:score=1.00',
-    }
-    assert node.state_reason_pub.messages[0].data == expected_reasons[candidate_kind]
+    assert len(node.detection_pub.messages) == 1
+    detection_array = node.detection_pub.messages[0]
+    assert detection_array.header == message.header
+    assert len(detection_array.detections) == len(detections)
+    if detections:
+        result = detection_array.detections[0].results[0]
+        assert result.hypothesis.class_id == detections[0].class_name
+        assert result.hypothesis.score == detections[0].conf
     assert node.latest_msg is None
     assert node.processing is False
     assert node.processed_frames == 1
@@ -236,19 +233,17 @@ def test_low_confidence_fast_mode_skips_color_analysis(fusion_node):
     node._process_latest_frame()
 
     node._analyze_selected_candidate.assert_not_called()
-    assert node._publish_outputs.call_args.args[3].source == 'model_low_conf'
+    assert node._publish_outputs.call_args.args[4].source == 'model_low_conf'
     node._log_processing_error.assert_not_called()
 
 
-@pytest.mark.parametrize('render_debug', [False, True])
-def test_absent_candidate_has_no_placeholder_image(fusion_node, monkeypatch, render_debug):
+def test_absent_candidate_has_no_placeholder_image(fusion_node, monkeypatch):
     draw_text = Mock()
     monkeypatch.setattr(tl_fusion.cv2, 'putText', draw_text)
     analysis = fusion_node._analyze_selected_candidate(
-        np.zeros((10, 10, 3), dtype=np.uint8), None, render_debug=render_debug,
+        np.zeros((10, 10, 3), dtype=np.uint8), None,
     )
     assert analysis == fusion_node._empty_analysis('no_candidate')
-    assert analysis.highlighted is None
     draw_text.assert_not_called()
 
 
@@ -313,22 +308,24 @@ def test_default_center_roi_reaches_model(fusion_node, monkeypatch, width, heigh
 
 
 @pytest.mark.parametrize('width,height', [(1254, 370), (1878, 555), (40, 30)])
-def test_cropped_debug_and_inset_fit(fusion_node, width, height):
+def test_cropped_debug_roi_and_box(fusion_node, monkeypatch, width, height):
     node = fusion_node
     node.detect_left_ratio, node.detect_right_ratio = .25, .75
     node.detect_bottom_ratio = 1.0 / 3.0
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     original = frame.copy()
     left = int(width * .25)
-    overlay = tl_fusion.OverlayCandidate((left+5, 5, left+25, 30), 'RED', (0, 0, 255), True)
-    analysis = replace(node._empty_analysis('test'), highlighted=np.ones((100, 100, 3), dtype=np.uint8))
-    debug = node._build_debug_image(frame, [overlay], make_candidate(), analysis)
+    overlay = tl_fusion.OverlayCandidate((left+5, 5, left+25, 30), (0, 0, 255), True)
+    draw_text = Mock()
+    monkeypatch.setattr(tl_fusion.cv2, 'putText', draw_text)
+    debug = node._build_debug_image(frame, [overlay])
     assert debug.shape == (int(height / 3), int(width*.75)-left, 3)
     np.testing.assert_array_equal(frame, original)
     assert not np.shares_memory(frame, debug)
     if height > 30:
         assert debug[25, 5].tolist() == [0, 0, 255]
     assert overlay.box == (left+5, 5, left+25, 30)
+    draw_text.assert_not_called()
 
 
 def test_fallback_expansion_stays_inside_detection_roi(fusion_node):
@@ -377,13 +374,11 @@ def test_color_analysis_preserves_results_with_debug(
     elif expected_state != STATE_UNKNOWN:
         color_node._largest_component.assert_called_once()
     rendered_analysis = color_node._analyze_selected_candidate(
-        frame, make_candidate(), render_debug=True,
+        frame, make_candidate(),
     )
     assert analysis.state == expected_state
     assert analysis.decisive == (expected_state != STATE_UNKNOWN)
-    assert analysis.highlighted is None
-    assert rendered_analysis.highlighted.shape == frame.shape
-    assert replace(rendered_analysis, highlighted=None) == analysis
+    assert rendered_analysis == analysis
 
 
 @pytest.mark.parametrize('parameter', [
@@ -410,6 +405,100 @@ def test_color_threshold_boundaries(color_node, parameter, direction):
     assert analysis.state == (STATE_RED if direction <= 0 else STATE_UNKNOWN)
     assert analysis.scores == baseline.scores
     assert analysis.valid_pixels == baseline.valid_pixels
+
+
+@pytest.mark.parametrize('age_ms,reason', [(0, None), (250, None), (251, 'invalid_image_stale'), (-51, 'invalid_image_future')])
+def test_frame_age_boundaries(fusion_node, age_ms, reason):
+    message = Image()
+    stamp_ns = 1_000_000_000 - age_ms * 1_000_000
+    message.header.stamp.sec, message.header.stamp.nanosec = divmod(stamp_ns, 1_000_000_000)
+    result = fusion_node._validate_input_timestamp(message)
+    assert result is None if reason is None else result.startswith(reason)
+
+
+def test_zero_stamp_rejected_with_age_check(fusion_node):
+    fusion_node.require_image_header_stamp = False
+    assert fusion_node._validate_input_timestamp(Image()) == 'invalid_image_stamp_zero'
+
+
+@pytest.mark.parametrize('period_ms', [25, 50, 100])
+def test_confirmation_independent_of_frame_count(fusion_node, period_ms):
+    fusion_node.hold_ms = 0
+    for elapsed_ms in range(0, 201, period_ms):
+        fusion_node._now_ns = lambda: 1_000_000_000 + elapsed_ms * 1_000_000
+        state = fusion_node._update_stable_state(STATE_RED, True)
+        assert state == (STATE_RED if elapsed_ms == 200 else STATE_UNKNOWN)
+
+
+def test_long_observation_gap_restarts_confirmation(fusion_node):
+    fusion_node.hold_ms = 0
+    fusion_node._update_stable_state(STATE_GREEN, True)
+    fusion_node._now_ns = lambda: 2_000_000_000
+    assert fusion_node._update_stable_state(STATE_GREEN, True) == STATE_UNKNOWN
+    fusion_node._now_ns = lambda: 2_200_000_000
+    assert fusion_node._update_stable_state(STATE_GREEN, True) == STATE_GREEN
+
+
+def test_receive_continues_during_inference_and_retains_latest(fusion_node):
+    entered = Event()
+    release = Event()
+    def slow_detect(frame):
+        entered.set()
+        assert release.wait(5)
+        return [], (0, 0, 20, 20)
+    fusion_node._detect_candidates = slow_detect
+    fusion_node.bridge.imgmsg_to_cv2 = Mock(return_value=np.zeros((20, 20, 3), dtype=np.uint8))
+    message = Image()
+    message.header.stamp.sec = 1
+    fusion_node._image_callback(message)
+    worker = Thread(target=fusion_node._process_latest_frame)
+    worker.start()
+    try:
+        assert entered.wait(5)
+        for index in range(3):
+            newest = Image()
+            newest.header.stamp.sec = 1
+            newest.header.stamp.nanosec = index
+            fusion_node._image_callback(newest)
+        assert fusion_node.latest_msg is newest
+    finally:
+        release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert fusion_node.latest_msg is newest
+    assert fusion_node.receive_group is not fusion_node.process_group
+
+
+def test_frame_expiring_during_inference_is_not_published_valid(fusion_node):
+    message = Image()
+    message.header.stamp.sec = 1
+    fusion_node._image_callback(message)
+    fusion_node.bridge.imgmsg_to_cv2 = Mock(return_value=np.zeros((20, 20, 3), dtype=np.uint8))
+    def expire(frame):
+        fusion_node._now_ns = lambda: 1_300_000_000
+        return [], (0, 0, 20, 20)
+    fusion_node._detect_candidates = expire
+    fusion_node._process_latest_frame()
+    assert fusion_node.processed_frames == 0
+    assert fusion_node.state_pub.messages[-1].data == STATE_UNKNOWN
+    assert fusion_node.detection_pub.messages[-1].detections == []
+
+
+def test_processing_error_clears_previous_state_and_detections(fusion_node):
+    fusion_node.current_state = STATE_GREEN
+    fusion_node.last_candidate_box = (1, 2, 3, 4)
+    fusion_node.bridge.imgmsg_to_cv2 = Mock(side_effect=RuntimeError('decode failed'))
+    fusion_node._log_processing_error = Mock()
+    message = Image()
+    message.header.stamp.sec = 1
+    fusion_node._image_callback(message)
+
+    fusion_node._process_latest_frame()
+
+    assert fusion_node.current_state == STATE_UNKNOWN
+    assert fusion_node.state_pub.messages[-1].data == STATE_UNKNOWN
+    assert fusion_node.detection_pub.messages[-1].detections == []
+    assert fusion_node.last_candidate_box is None
 
 
 def test_fixed_time_state_transitions_and_missing_candidates(fusion_node):

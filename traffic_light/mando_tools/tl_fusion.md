@@ -48,9 +48,10 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 5. 모델 클래스가 충분히 신뢰되면 그 상태를 바로 사용한다.
 6. 그렇지 않으면 ROI를 확대하고 색 분석 fallback을 수행한다.
 7. 프레임 단위 상태를 최근 이력으로 안정화한다.
-8. `/tl/state_id`, `/tl/state_label`, `/tl/state_reason`을 발행한다.
-9. 입력 영상이 3초 동안 오지 않으면 `UNKNOWN(0)`과 `/tl/input_valid=false`를 발행한다.
-9. 디버그 이미지가 필요할 때만 `/tl/debug_image`를 생성해 발행한다.
+8. `/tl/state_id`, `/tl/detections`, `/tl/debug_image` 세 토픽만 발행한다.
+9. 입력 영상이 3초 동안 오지 않으면 `UNKNOWN(0)`과 빈 `/tl/detections`를 발행한다.
+10. 디코딩·추론 오류도 즉시 `UNKNOWN(0)`과 빈 `/tl/detections`로 처리한다.
+11. 디버그 이미지가 필요할 때만 `/tl/debug_image`를 생성해 발행한다.
 
 ## 4. 입력과 출력
 
@@ -62,9 +63,7 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 
 - `/tl/debug_image`
 - `/tl/state_id`
-- `/tl/state_label`
-- `/tl/state_reason`
-- `/tl/input_valid`
+- `/tl/detections`
 
 디버그 이미지는 아래 조건에서만 생성된다.
 
@@ -72,6 +71,8 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 - `/tl/debug_image`에 실제 구독자가 존재
 
 즉 평상시에는 디버그 프레임 전체 복사와 `cv2_to_imgmsg()` 직렬화를 건너뛴다.
+`/tl/debug_image`에는 상단 1/3·중앙 1/2 ROI와 검출 박스 테두리만 표시하며,
+색상 마스크 패널과 클래스·confidence·상태 문자는 표시하지 않는다.
 
 ## 5. YOLO 후보 검출
 
@@ -166,7 +167,9 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 5. 모델 해석은 가능하지만 약하면 `model_weak`
 6. 둘 다 애매하면 `unknown`
 
-`/tl/state_reason`에는 위 source와 구체적 이유가 함께 들어간다.
+`/tl/detections`는 후보마다 원본 영상 기준 bbox, class name, confidence를
+`vision_msgs/Detection2DArray`로 발행한다. 후보가 없거나 입력이 무효이면 빈 배열이다.
+상태 전환 및 오류 상세 원인은 ROS 로그에서 확인한다.
 
 ## 10. 상태 안정화
 
@@ -213,4 +216,4 @@ ros2 launch mando_tools tl_fusion.launch.py \
 
 - 후속 노드가 바로 사용할 최종 상태가 필요할 때
 - 모델 클래스와 색 분석을 함께 활용하고 싶을 때
-- `/tl/state_reason`까지 포함해 판정 근거를 추적하고 싶을 때
+- `/tl/detections`와 `/tl/debug_image`로 검출 결과와 ROI를 추적하고 싶을 때
