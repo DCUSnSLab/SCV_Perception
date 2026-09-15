@@ -152,7 +152,10 @@ panorama_stitcher:
     # Outside the true binocular overlap, keep the smooth calibrated reference
     # projection. Inside it, reconstruct RGB from aligned depth so objects at
     # different ranges retain their physical width in the common rig frame.
-    depth_aware_color: true
+    # Keep depth/range/point-cloud reprojection unchanged, but render RGB from
+    # the stable calibrated colour warp. stop5 showed the depth-owned central
+    # band as a dark stair-step patch when the two depth views disagreed.
+    depth_aware_color: false
     # A hard switch between depth-reprojected RGB and the reference-plane RGB
     # must not run through the forward obstacle-detection area. Extend the
     # depth-color band eight degrees beyond the binocular overlap on both

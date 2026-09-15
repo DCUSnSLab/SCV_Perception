@@ -239,7 +239,12 @@ class PanoramaGroundSegmentationNode(Node):
             PointCloud2,
             self.input_topic,
             self._pointcloud_callback,
-            qos_profile_sensor_data,
+            QoSProfile(
+                history=HistoryPolicy.KEEP_LAST,
+                depth=1,
+                reliability=ReliabilityPolicy.BEST_EFFORT,
+                durability=DurabilityPolicy.VOLATILE,
+            ),
         )
         self.odom_subscription = self.create_subscription(
             Odometry,

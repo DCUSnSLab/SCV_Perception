@@ -21,6 +21,7 @@ from rgbd_panorama_torch_node import (  # noqa: E402
     RgbdPanoramaTorchNode,
     TorchPanoramaBackend,
     _edge_aware_spatial_filter,
+    _stamp_ns,
 )
 
 
@@ -105,6 +106,86 @@ def test_sync_statistics_count_success_stale_input_and_span():
     }
     assert node.sync_span_sum_ms == pytest.approx(3.0)
     assert node.sync_span_max_ms == pytest.approx(3.0)
+
+
+def test_sync_prefers_latest_complete_set_and_rejects_wide_span():
+    node = object.__new__(RgbdPanoramaTorchNode)
+    node.parameters = {"sync_slop_ms": 35.0}
+    node.queues = {
+        "left_color": deque((_image_at(100), _image_at(200)), maxlen=4),
+        "left_depth": deque((_image_at(100), _image_at(200)), maxlen=4),
+        "right_color": deque((_image_at(100), _image_at(210)), maxlen=4),
+        "right_depth": deque((_image_at(100), _image_at(210)), maxlen=4),
+    }
+    node.sync_successes = 0
+    node.sync_stale_drops = {key: 0 for key in node.queues}
+    node.sync_span_sum_ms = 0.0
+    node.sync_span_max_ms = 0.0
+
+    synchronized = node._try_synchronize()
+
+    assert synchronized is not None
+    assert [_stamp_ns(message) // 1_000_000 for message in synchronized[:4]] == [
+        200, 210, 200, 210,
+    ]
+
+    node.queues = {
+        "left_color": deque((_image_at(100),), maxlen=4),
+        "left_depth": deque((_image_at(65),), maxlen=4),
+        "right_color": deque((_image_at(135),), maxlen=4),
+        "right_depth": deque((_image_at(170),), maxlen=4),
+    }
+    assert node._try_synchronize() is None
+
+    node.queues["left_depth"].append(_image_at(135))
+    node.queues["right_depth"] = deque((_image_at(135),), maxlen=4)
+    synchronized = node._try_synchronize()
+    assert synchronized is not None
+    assert _stamp_ns(synchronized[2]) // 1_000_000 == 135
+
+
+def test_output_rate_limit_survives_early_condition_wake(monkeypatch):
+    class Condition:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        @staticmethod
+        def wait_for(predicate, timeout=None):
+            if timeout is not None:
+                assert not predicate()
+                time.sleep(timeout)
+            return predicate()
+
+    node = object.__new__(RgbdPanoramaTorchNode)
+    node.condition = Condition()
+    node.stop_worker = False
+    node.pending_sequence = 1
+    node.pending = (None, None, None, None, 0.0, 0.0)
+    node.pending_ready = True
+    node.parameters = {"max_output_rate_hz": 100.0}
+    node.last_processing_start = time.monotonic()
+    node.backend_warmed = True
+    node.image_publisher = object()
+    node.range_publisher = object()
+    node.validity_publisher = object()
+    node.pointcloud_publisher = object()
+    node._has_subscribers = lambda _publisher: True
+    node._maybe_log_diagnostics = lambda: None
+    started = time.monotonic()
+
+    def process(*_args, **_kwargs):
+        node.elapsed = time.monotonic() - started
+        node.stop_worker = True
+
+    node._process_frame = process
+    monkeypatch.setattr("rgbd_panorama_torch_node.rclpy.ok", lambda: True)
+
+    node._processing_loop()
+
+    assert node.elapsed >= 0.008
 
 
 def test_camera_profile_change_drops_old_frames():

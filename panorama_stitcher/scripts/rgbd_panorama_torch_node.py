@@ -1265,13 +1265,14 @@ class RgbdPanoramaTorchNode(Node):
 
     @staticmethod
     def _nearest(queue: Iterable[Image], stamp: int) -> Tuple[int, int]:
-        return min(
+        index, age, _ = min(
             (
-                (index, abs(_stamp_ns(message) - stamp))
+                (index, abs(_stamp_ns(message) - stamp), _stamp_ns(message))
                 for index, message in enumerate(queue)
             ),
-            key=lambda item: item[1],
+            key=lambda item: (item[1], -item[2]),
         )
+        return index, age
 
     def _try_synchronize(
         self,
@@ -1283,41 +1284,54 @@ class RgbdPanoramaTorchNode(Node):
         pairs = [
             (
                 abs(_stamp_ns(left) - _stamp_ns(right)),
-                max(_stamp_ns(left), _stamp_ns(right)),
                 li,
                 ri,
             )
             for li, left in enumerate(left_colors)
             for ri, right in enumerate(right_colors)
         ]
-        color_delta, _, left_index, right_index = min(
-            pairs, key=lambda value: (value[0], -value[1])
-        )
         slop_ns = int(float(self.parameters["sync_slop_ms"]) * 1.0e6)
-        if color_delta > slop_ns:
+        candidates = []
+        for color_delta, left_index, right_index in pairs:
+            if color_delta > slop_ns:
+                continue
+            left_color = left_colors[left_index]
+            right_color = right_colors[right_index]
+            left_depth_index, left_age = self._nearest(
+                self.queues["left_depth"], _stamp_ns(left_color)
+            )
+            right_depth_index, right_age = self._nearest(
+                self.queues["right_depth"], _stamp_ns(right_color)
+            )
+            if left_age > slop_ns or right_age > slop_ns:
+                continue
+            left_depth = self.queues["left_depth"][left_depth_index]
+            right_depth = self.queues["right_depth"][right_depth_index]
+            synchronized_messages = (
+                left_color,
+                right_color,
+                left_depth,
+                right_depth,
+            )
+            stamps = [_stamp_ns(message) for message in synchronized_messages]
+            span_ns = max(stamps) - min(stamps)
+            if span_ns <= slop_ns:
+                candidates.append((
+                    min(stamps), max(stamps), -span_ns,
+                    left_index, right_index,
+                    left_depth_index, right_depth_index,
+                    left_age, right_age, synchronized_messages,
+                ))
+        if not candidates:
             return None
-        left_color = left_colors[left_index]
-        right_color = right_colors[right_index]
-        left_depth_index, left_age = self._nearest(
-            self.queues["left_depth"], _stamp_ns(left_color)
-        )
-        right_depth_index, right_age = self._nearest(
-            self.queues["right_depth"], _stamp_ns(right_color)
-        )
-        if left_age > slop_ns or right_age > slop_ns:
-            return None
-        left_depth = self.queues["left_depth"][left_depth_index]
-        right_depth = self.queues["right_depth"][right_depth_index]
-        synchronized_messages = (
-            left_color,
-            right_color,
-            left_depth,
-            right_depth,
-        )
-        sync_span_ms = (
-            max(_stamp_ns(message) for message in synchronized_messages)
-            - min(_stamp_ns(message) for message in synchronized_messages)
-        ) / 1.0e6
+        (
+            _, _, negative_span_ns,
+            left_index, right_index,
+            left_depth_index, right_depth_index,
+            left_age, right_age, synchronized_messages,
+        ) = max(candidates, key=lambda value: value[:3])
+        left_color, right_color, left_depth, right_depth = synchronized_messages
+        sync_span_ms = -negative_span_ns / 1.0e6
         self.sync_successes += 1
         self.sync_span_sum_ms += sync_span_ms
         self.sync_span_max_ms = max(self.sync_span_max_ms, sync_span_ms)
@@ -1451,9 +1465,13 @@ class RgbdPanoramaTorchNode(Node):
                     return
                 rate = float(self.parameters["max_output_rate_hz"])
                 if rate > 0.0 and self.last_processing_start > 0.0:
-                    delay = self.last_processing_start + 1.0 / rate - time.monotonic()
+                    deadline = self.last_processing_start + 1.0 / rate
+                    delay = deadline - time.monotonic()
                     if delay > 0.0:
-                        self.condition.wait(timeout=delay)
+                        self.condition.wait_for(
+                            lambda: self.stop_worker or time.monotonic() >= deadline,
+                            timeout=delay,
+                        )
                         if self.stop_worker:
                             return
                 pending = self.pending
@@ -1542,12 +1560,12 @@ class RgbdPanoramaTorchNode(Node):
             left_depth_message,
             right_depth_message,
         ]
-        newest = max(messages, key=_stamp_ns)
-        oldest_stamp = min(_stamp_ns(message) for message in messages)
+        oldest = min(messages, key=_stamp_ns)
+        oldest_stamp = _stamp_ns(oldest)
         newest_stamp = max(_stamp_ns(message) for message in messages)
         header = Header()
-        header.stamp.sec = newest.header.stamp.sec
-        header.stamp.nanosec = newest.header.stamp.nanosec
+        header.stamp.sec = oldest.header.stamp.sec
+        header.stamp.nanosec = oldest.header.stamp.nanosec
         header.frame_id = str(self.parameters["output_frame_id"])
 
         # Queue every demanded D2H transfer first, then synchronize once. The

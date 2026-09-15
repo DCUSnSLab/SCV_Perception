@@ -126,7 +126,7 @@ def generate_launch_description():
         panorama_optical_in_rig,
         Node(
             package='panorama_stitcher',
-            executable='rgbd_panorama_stitcher_node',
+            executable='rgbd_panorama_torch_node',
             # Keep this name matched to the YAML root key.
             name='panorama_stitcher',
             output='screen',
