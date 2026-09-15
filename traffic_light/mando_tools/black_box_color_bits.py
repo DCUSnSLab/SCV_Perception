@@ -36,6 +36,9 @@ from std_msgs.msg import MultiArrayDimension
 from std_msgs.msg import MultiArrayLayout
 from std_msgs.msg import UInt8MultiArray
 
+OUTPUT_BOX_COUNT = 3
+UNKNOWN_BIT = 2
+
 
 @dataclass
 class DetectorConfig:
@@ -560,17 +563,20 @@ class BlackBoxColorBitsNode(Node):
             self.processing = False
 
     def _publish_bits(self, bits: list[int]) -> None:
-        """UInt8MultiArray로 발행한다. 빈 배열은 유효 비트 없음이며 [0]과 다르다.
+        """항상 3개인 UInt8MultiArray로 발행한다. 2는 미검출/미확정이다.
 
         메시지에는 timestamp/track_id/신뢰도가 없으므로 수신 측은 인덱스를 ID로 쓰지 않는다.
         """
         message = UInt8MultiArray()
-        message.data = [int(bit) for bit in bits]
-        if bits:
-            message.layout = MultiArrayLayout(
-                dim=[MultiArrayDimension(label='boxes', size=len(bits), stride=len(bits))],
-                data_offset=0,
-            )
+        output_bits = [int(bit) for bit in bits[:OUTPUT_BOX_COUNT]]
+        output_bits.extend([UNKNOWN_BIT] * (OUTPUT_BOX_COUNT - len(output_bits)))
+        message.data = output_bits
+        message.layout = MultiArrayLayout(
+            dim=[MultiArrayDimension(
+                label='boxes', size=OUTPUT_BOX_COUNT, stride=OUTPUT_BOX_COUNT,
+            )],
+            data_offset=0,
+        )
         self.bits_pub.publish(message)
 
     def _draw_debug(

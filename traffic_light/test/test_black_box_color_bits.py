@@ -211,6 +211,20 @@ def test_callback_preserves_debug_header(subscriber_count):
     assert drawn == [True]
 
 
+@pytest.mark.parametrize(
+    'bits, expected',
+    [([], [2, 2, 2]), ([1], [1, 2, 2]), ([0, 1, 0], [0, 1, 0]), ([1, 0, 1, 0], [1, 0, 1])],
+)
+def test_publish_bits_always_has_three_values(bits, expected):
+    published = []
+    fake = SimpleNamespace(bits_pub=SimpleNamespace(publish=published.append))
+
+    BlackBoxColorBitsNode._publish_bits(fake, bits)
+
+    assert list(published[0].data) == expected
+    assert published[0].layout.dim[0].size == 3
+
+
 @pytest.mark.parametrize('margin', [1, 4, 30])
 def test_surround_ratio_matches_ring_mask(margin):
     rng = np.random.default_rng(23)
