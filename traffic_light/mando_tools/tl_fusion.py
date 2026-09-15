@@ -33,7 +33,6 @@ from typing import Any
 from .workspace_paths import local_python_deps_path
 from .workspace_paths import default_runtime_image_topic
 from .workspace_paths import resolve_inference_device
-from .workspace_paths import workspace_root_or_none
 
 # 외부 라이브러리를 import하기 전에 프로젝트의 .deps를 우선 탐색한다.
 # 전역 Python의 torch와 노드가 실제로 사용하는 torch가 다를 수 있다.
@@ -102,20 +101,8 @@ COLOR_TO_STATE = {
 
 
 def default_tl_model_path() -> str:
-    """직접 실행 시 쓸 기본 가중치 경로를 찾는다. launch의 기본값 선택은 별도다.
-
-    workspace의 model/best.pt를 우선하며, 경로 문자열을 반환하는 것 자체가
-    파일 존재를 보장하지는 않는다. 실제 존재 검사는 노드 초기화에서 수행한다.
-    """
-    root = workspace_root_or_none()
-    if root is None:
-        return 'best.pt'
-
-    best = root / 'model' / 'best.pt'
-    if best.exists():
-        return str(best)
-    candidate = root / 'yolo11s.pt'
-    return str(candidate) if candidate.exists() else 'yolo11s.pt'
+    """직접 실행 시 사용할 고정 traffic-light 모델 경로를 반환한다."""
+    return '/home/ki/SSC/src/perception/traffic_light/model/best.pt'
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -146,7 +133,8 @@ class ColorAnalysisResult:
 
     scores는 세 색상의 가중치 합을 정규화한 비율이며, 근거가 없으면 모두 0이다.
     valid_pixels는 보정/확대 후 정제된 마스크들의 픽셀 수 합계다.
-    decisive는 색상 확정 조건 통과 여부다.
+    decisive는 색상 확정 조건 통과 여부이고 highlighted는 표시 전용이다.
+    highlighted=None은 시각화를 생략했다는 뜻이며 판정 실패를 의미하지 않는다.
     """
 
     state: int
@@ -156,6 +144,7 @@ class ColorAnalysisResult:
     top_score: float
     score_gap: float
     scores: dict[str, float]
+    highlighted: np.ndarray | None
 
 
 @dataclass
@@ -169,9 +158,10 @@ class DecisionResult:
 
 @dataclass
 class OverlayCandidate:
-    """화면에만 쓰는 박스/색상 정보. 보간된 box는 판정에 재사용하지 않는다."""
+    """화면에만 쓰는 박스/라벨. 보간된 box를 검출이나 색 분석에 재사용하지 않는다."""
 
     box: tuple[int, int, int, int]
+    label: str
     color: tuple[int, int, int]
     selected: bool
 
@@ -218,22 +208,22 @@ class TLFusionNode(Node):
             and self.color_fallback_device.lower().startswith('cuda')
             and torch.cuda.is_available()
         )
-        self.detector_image_size = int(self._declare_param('detector_image_size', 640))
-        self.detector_conf_threshold = float(self._declare_param('detector_conf_threshold', 0.10))
+        self.detector_image_size = int(self._declare_param('detector_image_size', 960))
+        self.detector_conf_threshold = float(self._declare_param('detector_conf_threshold', 0.05))
         self.detector_iou_threshold = float(self._declare_param('detector_iou_threshold', 0.45))
         self.detector_max_detections = int(self._declare_param('detector_max_detections', 50))
 
         # detect_*: YOLO에 실제로 전달할 crop 범위. 비율은 원본 영상의 0~1 기준이다.
         self.detect_top_ratio = float(self._declare_param('detect_top_ratio', 0.00))
         self.detect_bottom_ratio = float(self._declare_param('detect_bottom_ratio', 1.0 / 3.0))
-        self.detect_left_ratio = float(self._declare_param('detect_left_ratio', 0.25))
-        self.detect_right_ratio = float(self._declare_param('detect_right_ratio', 0.75))
+        self.detect_left_ratio = float(self._declare_param('detect_left_ratio', 0.20))
+        self.detect_right_ratio = float(self._declare_param('detect_right_ratio', 0.80))
 
         # preferred_*: 대표 후보 선택 시 가산점만 주는 영역. 추론 범위를 줄이지 않는다.
         self.preferred_top_ratio = float(self._declare_param('preferred_top_ratio', 0.00))
         self.preferred_bottom_ratio = float(self._declare_param('preferred_bottom_ratio', 0.50))
-        self.preferred_left_ratio = float(self._declare_param('preferred_left_ratio', 0.25))
-        self.preferred_right_ratio = float(self._declare_param('preferred_right_ratio', 0.75))
+        self.preferred_left_ratio = float(self._declare_param('preferred_left_ratio', 0.20))
+        self.preferred_right_ratio = float(self._declare_param('preferred_right_ratio', 0.80))
 
         # 크기와 경계 필터는 리사이즈된 추론 텐서가 아닌 검출 crop의 픽셀 단위다.
         self.min_box_side_px = int(self._declare_param('min_box_side_px', 5))
@@ -241,13 +231,12 @@ class TLFusionNode(Node):
         self.edge_margin_px = int(self._declare_param('edge_margin_px', 2))
 
         # detector_conf_threshold는 후보 수집 기준, 아래 두 값은 수집 후 판정 기준이다.
-        # 상위 기준 이상이면 색 분석을 생략하고, 중간 기준은 색상이 모호할 때 사용한다.
-        self.model_confidence_threshold = float(self._declare_param('model_confidence_threshold', 0.60))
+        # 색 분석은 후보가 선택되면 항상 수행하고, 상위 기준은 최종 상태 우선순위에 사용한다.
+        self.model_confidence_threshold = float(self._declare_param('model_confidence_threshold', 0.75))
         self.model_min_confidence_threshold = float(
             self._declare_param('model_min_confidence_threshold', 0.30)
         )
-        # 저신뢰 모델도 색상 fallback으로 재검증하면 정확도는 높지만 CPU 비용이 크다.
-        # 기본값은 기존 동작을 유지하고, 실시간 성능 모드에서만 fallback을 생략한다.
+        # 기존 launch/ros-args와의 호환을 위해 선언하지만 색 분석은 항상 수행한다.
         self.enable_low_confidence_color_fallback = bool(
             self._declare_param('enable_low_confidence_color_fallback', True)
         )
@@ -257,17 +246,17 @@ class TLFusionNode(Node):
         self.fallback_expand_ratio = float(self._declare_param('fallback_expand_ratio', 1.80))
         self.fallback_min_margin_px = int(self._declare_param('fallback_min_margin_px', 4))
         self.fallback_max_side_px = int(self._declare_param('fallback_max_side_px', 640))
-        self.fallback_saturation_gain = float(self._declare_param('fallback_saturation_gain', 1.80))
-        self.fallback_value_gain = float(self._declare_param('fallback_value_gain', 1.25))
-        self.fallback_gamma = float(self._declare_param('fallback_gamma', 0.85))
+        self.fallback_saturation_gain = float(self._declare_param('fallback_saturation_gain', 2.20))
+        self.fallback_value_gain = float(self._declare_param('fallback_value_gain', 1.35))
+        self.fallback_gamma = float(self._declare_param('fallback_gamma', 1.00))
         self.fallback_s_min = int(self._declare_param('fallback_s_min', 55))
         self.fallback_v_min = int(self._declare_param('fallback_v_min', 70))
         self.fallback_min_valid_pixels = int(self._declare_param('fallback_min_valid_pixels', 12))
         self.fallback_min_component_pixels = int(
-            self._declare_param('fallback_min_component_pixels', 6)
+            self._declare_param('fallback_min_component_pixels', 4)
         )
-        self.fallback_score_threshold = float(self._declare_param('fallback_score_threshold', 0.50))
-        self.fallback_score_gap = float(self._declare_param('fallback_score_gap', 0.14))
+        self.fallback_score_threshold = float(self._declare_param('fallback_score_threshold', 0.45))
+        self.fallback_score_gap = float(self._declare_param('fallback_score_gap', 0.10))
         # 프로젝트 규칙: 적색/녹색 동시 점등을 좌회전 상태로 해석한다.
         # 화살표 형상 검출이 아니므로 다른 신호등 배치에 적용할 때 별도 검증이 필요하다.
         self.fallback_red_green_red_min = float(self._declare_param('fallback_red_green_red_min', 0.30))
@@ -285,7 +274,14 @@ class TLFusionNode(Node):
         self.state_max_gap_ms = float(self._declare_param('state_max_gap_ms', 250.0))
         self.max_image_age_ms = float(self._declare_param('max_image_age_ms', 250.0))
         self.future_stamp_tolerance_ms = float(self._declare_param('future_stamp_tolerance_ms', 50.0))
-        for value in (self.state_confirm_ms, self.state_max_gap_ms, self.max_image_age_ms, self.future_stamp_tolerance_ms):
+        self.uncertain_hold_ms = float(self._declare_param('uncertain_hold_ms', 300.0))
+        for value in (
+            self.state_confirm_ms,
+            self.state_max_gap_ms,
+            self.max_image_age_ms,
+            self.future_stamp_tolerance_ms,
+            self.uncertain_hold_ms,
+        ):
             if not math.isfinite(value) or value < 0:
                 raise ValueError('Timing parameters must be finite and nonnegative')
         if self.state_max_gap_ms == 0:
@@ -350,6 +346,7 @@ class TLFusionNode(Node):
         self.state_history: deque[int] = deque(maxlen=1)
         self.pending_state = STATE_UNKNOWN
         self.pending_since_ns: int | None = None
+        self.uncertain_since_ns: int | None = None
         self.last_state_observation_ns: int | None = None
         self.processed_frames = 0
         self.last_status_log = time.monotonic()
@@ -418,6 +415,7 @@ class TLFusionNode(Node):
                 self._handle_invalid_input(msg, stamp_reason)
                 return
             # 프레임 시작에 시각화 수요를 한 번만 확인한다. 창 표시와 ROS 발행은 별개다.
+            # 색 분석 내부까지 이 값을 전달해야 보이지 않는 하이라이트 생성도 생략된다.
             publish_debug_image = self._should_publish_debug()
             render_debug = self.show_windows or publish_debug_image
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -431,36 +429,30 @@ class TLFusionNode(Node):
                 self.last_seen_candidate_ns = self._now_ns()
                 self.last_candidate_box = selected.box
 
-            # confidence가 높아도 클래스가 상태로 해석되지 않으면 색상 fallback이 필요하다.
-            # 이 빠른 경로의 기준은 _decide_state()의 첫 모델 분기와 동일하게 유지한다.
-            if selected is not None and selected.model_resolved and selected.conf >= self.model_confidence_threshold:
-                stage = 'model_high_conf'
-                analysis = self._empty_analysis('model_high_conf_skip')
-                decision = DecisionResult(
-                    proposed_state=selected.model_state,
-                    source='model',
-                    reason=f'{selected.class_name}:{selected.conf:.2f}',
-                )
-            elif (
-                selected is not None
-                and selected.model_resolved
-                and selected.conf >= self.model_min_confidence_threshold
-                and not self.enable_low_confidence_color_fallback
-            ):
-                stage = 'model_low_conf_fast'
-                analysis = self._empty_analysis('model_low_conf_fallback_disabled')
-                decision = self._decide_state(selected, analysis)
-            else:
-                stage = 'analyze'
-                analysis = self._analyze_selected_candidate(frame, selected)
-                stage = 'decide'
-                decision = self._decide_state(selected, analysis)
+            # 후보가 있든 없든 같은 경로를 사용한다. 후보가 있으면 confidence와 무관하게
+            # 색 보정을 수행하고, 최종 상태의 우선순위만 _decide_state()가 결정한다.
+            stage = 'analyze'
+            analysis = self._analyze_selected_candidate(
+                frame, selected, render_debug=render_debug,
+            )
+            stage = 'decide'
+            decision = self._decide_state(selected, analysis)
             stamp_reason = self._validate_input_timestamp(msg)
             if stamp_reason is not None:
                 self._handle_invalid_input(msg, stamp_reason)
                 return
             stage = 'stabilize'
-            stable_state = self._update_stable_state(decision.proposed_state, selected is not None)
+            stable_state = self._update_stable_state(
+                decision.proposed_state,
+                selected is not None,
+                uncertain=decision.source == 'unknown',
+                immediate=(
+                    decision.source == 'model'
+                    and selected is not None
+                    and selected.conf >= self.model_confidence_threshold
+                    and self.current_state == STATE_UNKNOWN
+                ),
+            )
             debug_image = None
             if render_debug:
                 stage = 'build_overlay'
@@ -470,7 +462,12 @@ class TLFusionNode(Node):
                     stable_state,
                 )
                 stage = 'render_debug'
-                debug_image = self._build_debug_image(frame, overlay_candidates)
+                debug_image = self._build_debug_image(
+                    frame,
+                    overlay_candidates,
+                    selected,
+                    analysis,
+                )
             stage = 'publish_outputs'
             stamp_reason = self._validate_input_timestamp(msg)
             if stamp_reason is not None:
@@ -537,6 +534,7 @@ class TLFusionNode(Node):
         self.state_history.clear()
         self.state_history.append(STATE_UNKNOWN)
         self.pending_since_ns = None
+        self.uncertain_since_ns = None
         self.last_state_observation_ns = None
         self.last_candidate_box = None
         self.last_overlay_candidate = None
@@ -654,6 +652,7 @@ class TLFusionNode(Node):
         self.state_history.append(STATE_UNKNOWN)
         self.pending_state = STATE_UNKNOWN
         self.pending_since_ns = None
+        self.uncertain_since_ns = None
         self.last_state_observation_ns = None
         self.last_candidate_box = None
         self.last_overlay_candidate = None
@@ -832,11 +831,13 @@ class TLFusionNode(Node):
         self,
         frame: np.ndarray,
         candidate: DetectionCandidate | None,
+        *,
+        render_debug: bool = False,
     ) -> ColorAnalysisResult:
         """대표 후보의 확장 ROI에서 적/황/녹 근거를 계산한다.
 
         검출 후보를 새로 찾는 함수는 아니다. 후보가 없으면 UNKNOWN 근거를 반환한다.
-        디버그 영상 생성과 무관하게 판정용 색상 근거만 계산한다.
+        render_debug는 시각화 생성만 제어하며 점수/decisive/판정 상태는 바꾸지 않는다.
         """
         if candidate is None:
             return self._empty_analysis('no_candidate')
@@ -861,8 +862,8 @@ class TLFusionNode(Node):
             weights = 0.25 + 0.40 * saturation + 0.35 * value
 
             # uint8 OpenCV HSV의 H는 0~179다. 적색은 hue 경계 양쪽에 있어 두 구간을 합친다.
-            red_mask_1 = cv2.inRange(hsv, (0, self.fallback_s_min, self.fallback_v_min), (9, 255, 255))
-            red_mask_2 = cv2.inRange(hsv, (165, self.fallback_s_min, self.fallback_v_min), (179, 255, 255))
+            red_mask_1 = cv2.inRange(hsv, (0, self.fallback_s_min, self.fallback_v_min), (13, 255, 255))
+            red_mask_2 = cv2.inRange(hsv, (160, self.fallback_s_min, self.fallback_v_min), (179, 255, 255))
             red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
             yellow_mask = cv2.inRange(
                 hsv,
@@ -942,6 +943,7 @@ class TLFusionNode(Node):
             state = STATE_UNKNOWN
             reason = 'color_ambiguous'
 
+        highlighted = self._highlight_masks(enhanced, masks, scores) if render_debug else None
         return ColorAnalysisResult(
             state=state,
             decisive=decisive,
@@ -950,6 +952,7 @@ class TLFusionNode(Node):
             top_score=top_score,
             score_gap=score_gap,
             scores=scores,
+            highlighted=highlighted,
         )
 
     def _empty_analysis(self, reason: str) -> ColorAnalysisResult:
@@ -962,6 +965,7 @@ class TLFusionNode(Node):
             top_score=0.0,
             score_gap=0.0,
             scores={name: 0.0 for name in COLOR_ORDER},
+            highlighted=None,
         )
 
     def _decide_state(
@@ -1029,8 +1033,21 @@ class TLFusionNode(Node):
 
     # 시간축 안정화와 외부 발행
 
-    def _update_stable_state(self, proposed_state: int, has_candidate: bool) -> int:
-        """연속 관측의 경과 시간과 최소 상태 유지 시간으로 상태 전환을 결정한다."""
+    def _update_stable_state(
+        self,
+        proposed_state: int,
+        has_candidate: bool,
+        *,
+        uncertain: bool = False,
+        immediate: bool = False,
+    ) -> int:
+        """연속 관측의 경과 시간과 최소 상태 유지 시간으로 상태 전환을 결정한다.
+
+        후보는 있지만 모델 클래스와 색 근거가 일시적으로 모호한 경우에는
+        짧은 시간 동안 직전 상태를 유지한다. 입력 오류/타임아웃은 이 함수에
+        들어오기 전에 상태를 즉시 UNKNOWN으로 초기화하므로 같은 보호를 받지 않는다.
+        UNKNOWN에서 고신뢰 모델 상태로 회복하는 첫 프레임은 즉시 확정한다.
+        """
         now_ns = self._now_ns()
         previous_ns = self.last_state_observation_ns
         if previous_ns is not None and now_ns < previous_ns:
@@ -1038,10 +1055,28 @@ class TLFusionNode(Node):
             self.last_state_change_ns = now_ns
             self.last_seen_candidate_ns = now_ns
             self.last_candidate_box = None
+            self.uncertain_since_ns = None
         if previous_ns is None or now_ns < previous_ns or self._ns_to_ms(now_ns - previous_ns) > self.state_max_gap_ms:
             self.pending_since_ns = None
         self.last_state_observation_ns = now_ns
         missing_ms = self._ns_to_ms(now_ns - self.last_seen_candidate_ns)
+
+        if immediate and has_candidate and proposed_state != STATE_UNKNOWN:
+            self.current_state = proposed_state
+            self.pending_state = proposed_state
+            self.pending_since_ns = now_ns
+            self.last_state_change_ns = now_ns
+            self.uncertain_since_ns = None
+            return self.current_state
+
+        if uncertain and has_candidate and self.current_state != STATE_UNKNOWN:
+            if self.uncertain_since_ns is None:
+                self.uncertain_since_ns = now_ns
+            uncertain_ms = self._ns_to_ms(now_ns - self.uncertain_since_ns)
+            if uncertain_ms < self.uncertain_hold_ms:
+                proposed_state = self.current_state
+        else:
+            self.uncertain_since_ns = None
 
         if not has_candidate and missing_ms < self.missing_timeout_ms:
             proposed_state = self.current_state
@@ -1120,8 +1155,10 @@ class TLFusionNode(Node):
         self,
         frame: np.ndarray,
         overlay_candidates: list[OverlayCandidate],
+        selected: DetectionCandidate | None,
+        analysis: ColorAnalysisResult,
     ) -> np.ndarray:
-        """검출 ROI만 복사하고 검출 박스 테두리만 그린다."""
+        """검출 ROI만 복사한다. 후보는 원본 좌표를 유지하고 표시 좌표만 이동한다."""
         roi_x0, roi_y0, roi_x1, roi_y1 = self._window_from_ratios(
             frame.shape, self.detect_left_ratio, self.detect_right_ratio,
             self.detect_top_ratio, self.detect_bottom_ratio,
@@ -1137,6 +1174,13 @@ class TLFusionNode(Node):
                 continue
             thickness = 2 if overlay.selected else 1
             cv2.rectangle(debug, (x_a, y_a), (x_b, y_b), overlay.color, thickness)
+            self._draw_box_label(debug, overlay.label, x_a, y_a, overlay.color)
+        if selected is not None and analysis.highlighted is not None and analysis.highlighted.size > 0:
+            inset_width = min(200, debug.shape[1] - 24)
+            inset_height = min(120, debug.shape[0] - 42)
+            if inset_width > 0 and inset_height > 0:
+                inset = self._fit_to_canvas(analysis.highlighted, inset_width, inset_height)
+                self._draw_debug_inset(debug, inset, 'Color Mask')
         return debug
 
     def _build_overlay_candidates(
@@ -1160,6 +1204,7 @@ class TLFusionNode(Node):
                 smoothed_box = self._smooth_overlay_box(detection.box)
                 selected_overlay = OverlayCandidate(
                     box=smoothed_box,
+                    label=f'{detection.class_name} {detection.conf:.2f} | {STATE_LABELS[stable_state]}',
                     color=self._state_color(stable_state),
                     selected=True,
                 )
@@ -1167,6 +1212,7 @@ class TLFusionNode(Node):
                 overlays.append(
                     OverlayCandidate(
                         box=detection.box,
+                        label=f'{detection.class_name} {detection.conf:.2f}',
                         color=(0, 128, 255),
                         selected=False,
                     )
@@ -1534,9 +1580,131 @@ class TLFusionNode(Node):
             return 0
         return int(stats[1:, cv2.CC_STAT_AREA].max())
 
+    def _highlight_masks(
+        self,
+        enhanced: np.ndarray,
+        masks: dict[str, np.ndarray],
+        scores: dict[str, float],
+    ) -> np.ndarray:
+        """분석 마스크와 점수를 BGR 영상에 합성하는 표시 전용 함수.
+
+        반환 영상은 색상 값이 바뀌므로 판정에 재사용하면 안 된다. 복사/블렌딩을
+        포함하기 때문에 디버그 수요가 있을 때만 호출해야 한다.
+        """
+        highlighted = enhanced.copy()
+        dimmed = (highlighted * 0.25).astype(np.uint8)
+        highlighted = cv2.addWeighted(dimmed, 1.0, highlighted, 0.6, 0.0)
+
+        overlays = {
+            'red': (0, 0, 255),
+            'yellow': (0, 255, 255),
+            'green': (0, 255, 0),
+        }
+        for name in COLOR_ORDER:
+            mask = masks[name]
+            if np.count_nonzero(mask) == 0:
+                continue
+            color = np.zeros_like(highlighted)
+            color[:, :] = overlays[name]
+            color_strength = 0.30 + 0.50 * float(scores[name])
+            blended = cv2.addWeighted(highlighted, 1.0, color, color_strength, 0.0)
+            highlighted[mask > 0] = blended[mask > 0]
+
+        return highlighted
+
+    def _fit_to_canvas(self, image: np.ndarray, target_width: int, target_height: int) -> np.ndarray:
+        """종횡비를 유지해 표시용 canvas에 맞추고 남는 영역은 검은 여백으로 채운다."""
+        if image.size == 0:
+            return np.zeros((target_height, target_width, 3), dtype=np.uint8)
+
+        source_height, source_width = image.shape[:2]
+        scale = min(target_width / float(source_width), target_height / float(source_height))
+        new_width = max(1, int(round(source_width * scale)))
+        new_height = max(1, int(round(source_height * scale)))
+        resized = cv2.resize(image, (new_width, new_height), interpolation=cv2.INTER_CUBIC)
+        canvas = np.zeros((target_height, target_width, 3), dtype=np.uint8)
+        x0 = (target_width - new_width) // 2
+        y0 = (target_height - new_height) // 2
+        canvas[y0:y0 + new_height, x0:x0 + new_width] = resized
+        return canvas
+
     def _state_color(self, state: int) -> tuple[int, int, int]:
         """상태의 표시용 BGR 색상을 반환한다. 미등록 ID는 UNKNOWN 색상을 사용한다."""
         return STATE_COLORS.get(state, STATE_COLORS[STATE_UNKNOWN])
+
+    def _draw_box_label(
+        self,
+        image: np.ndarray,
+        text: str,
+        x: int,
+        y: int,
+        color: tuple[int, int, int],
+    ) -> None:
+        """박스 위쪽에 배경과 텍스트를 그린다. 전달한 표시 영상에 직접 그린다."""
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 0.42
+        thickness = 1
+        text_size, baseline = cv2.getTextSize(text, font, scale, thickness)
+        height, width = image.shape[:2]
+        if width < 20 or height < 20:
+            return
+        scale *= min(1.0, (width - 16) / max(text_size[0], 1), (height - 12) / max(text_size[1] + baseline, 1))
+        text_size, baseline = cv2.getTextSize(text, font, scale, thickness)
+        if text_size[0] + 16 > width or text_size[1] + baseline + 12 > height:
+            return
+        label_x = max(4, min(x, width - text_size[0] - 14))
+        label_y = max(text_size[1] + 6, min(y - 4, height - baseline - 3))
+        y0 = label_y - text_size[1] - 6
+        y1 = label_y + baseline + 2
+        x1 = min(image.shape[1] - 4, label_x + text_size[0] + 10)
+        cv2.rectangle(image, (label_x, y0), (x1, y1), color, -1)
+        cv2.putText(
+            image,
+            text,
+            (label_x + 5, label_y - 2),
+            font,
+            scale,
+            (16, 16, 16),
+            thickness,
+            cv2.LINE_AA,
+        )
+
+    def _draw_debug_inset(
+        self,
+        image: np.ndarray,
+        inset: np.ndarray,
+        title: str,
+    ) -> None:
+        """표시 영상 우상단에 색상 패널을 직접 합성한다.
+
+        inset 자체를 축소하지 않으므로 호출자가 영상 안에 들어갈 크기로 준비해야 한다.
+        """
+        inset_height, inset_width = inset.shape[:2]
+        title_height = 18
+        margin = 12
+        x0 = max(margin, image.shape[1] - inset_width - margin)
+        y0 = margin + title_height
+        if y0 + inset_height + margin > image.shape[0]:
+            y0 = max(margin + title_height, image.shape[0] - inset_height - margin)
+
+        panel_x0 = max(0, x0 - 4)
+        panel_y0 = max(0, y0 - 22)
+        panel_x1 = min(image.shape[1], x0 + inset_width + 4)
+        panel_y1 = min(image.shape[0], y0 + inset_height + 4)
+
+        cv2.rectangle(image, (panel_x0, panel_y0), (panel_x1, panel_y1), (10, 12, 16), -1)
+        cv2.rectangle(image, (panel_x0, panel_y0), (panel_x1, panel_y1), (120, 120, 120), 1)
+        cv2.putText(
+            image,
+            title,
+            (panel_x0 + 8, panel_y0 + 14),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (245, 247, 250),
+            1,
+            cv2.LINE_AA,
+        )
+        image[y0:y0 + inset_height, x0:x0 + inset_width] = inset
 
     # 후보 순위 계산과 시간/좌표 단위 보조 함수
 

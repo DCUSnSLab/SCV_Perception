@@ -45,8 +45,8 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 2. 타이머가 `max_fps` 주기로 최신 프레임만 처리한다.
 3. detection window 안에서 YOLO 후보를 검출한다.
 4. 후보 중 대표 신호등 하나를 선택한다.
-5. 모델 클래스가 충분히 신뢰되면 그 상태를 바로 사용한다.
-6. 그렇지 않으면 ROI를 확대하고 색 분석 fallback을 수행한다.
+5. 선택된 후보의 confidence와 무관하게 ROI를 확대하고 색상 보정을 수행한다.
+6. 모델 confidence와 색상 분석 결과의 우선순위를 적용해 상태를 결정한다.
 7. 프레임 단위 상태를 최근 이력으로 안정화한다.
 8. `/tl/state_id`, `/tl/detections`, `/tl/debug_image` 세 토픽만 발행한다.
 9. 입력 영상이 3초 동안 오지 않으면 `UNKNOWN(0)`과 빈 `/tl/detections`를 발행한다.
@@ -71,8 +71,6 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 - `/tl/debug_image`에 실제 구독자가 존재
 
 즉 평상시에는 디버그 프레임 전체 복사와 `cv2_to_imgmsg()` 직렬화를 건너뛴다.
-`/tl/debug_image`에는 상단 1/3·중앙 1/2 ROI와 검출 박스 테두리만 표시하며,
-색상 마스크 패널과 클래스·confidence·상태 문자는 표시하지 않는다.
 
 ## 5. YOLO 후보 검출
 
@@ -129,7 +127,7 @@ tracking 유사도는 중심점 거리와 IoU를 함께 사용한다.
 
 ## 8. 색 분석 fallback
 
-대표 후보가 선택되었지만 모델 confidence가 충분하지 않거나 클래스가 일반적이면 색 분석을 수행한다.
+대표 후보가 선택되면 모델 confidence와 무관하게 색 분석을 수행한다.
 
 ### 8.1 ROI 확장과 보정
 
@@ -178,11 +176,13 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `state_window_size`
 - `hold_ms`
 - `missing_timeout_ms`
+- `uncertain_hold_ms`
 - `reset_tracking_ms`
 
 동작 요약:
 
 - 후보가 잠깐 사라져도 `missing_timeout_ms` 이내면 직전 상태를 유지한다.
+- 후보는 있지만 모델/색상 근거가 모호하면 `uncertain_hold_ms` 이내 직전 상태를 유지한다.
 - 최근 상태 버퍼에서 다수결을 구한다.
 - `hold_ms`가 지나기 전에는 쉽게 상태를 바꾸지 않는다.
 - 후보가 오래 없으면 tracking 기준 박스를 초기화한다.
@@ -202,6 +202,14 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `model_confidence_threshold`
 - `enable_low_confidence_color_fallback`
 - `fallback_score_threshold`
+- `fallback_score_gap`
+- `uncertain_hold_ms`
+- `fallback_saturation_gain`
+- `fallback_value_gain`
+- `fallback_gamma`
+
+현재 기본값은 YOLO 입력 크기 `960`, 후보 confidence `0.05`, 색상 score `0.45`, 색상 score gap `0.10`, 모델 신뢰도 `0.75`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다.
+색상 보정은 모든 선택 후보에 항상 적용되며, 모델 confidence가 `0.75` 미만이면 색상 fallback이 최종 판단에 더 적극적으로 사용된다.
 
 예시:
 

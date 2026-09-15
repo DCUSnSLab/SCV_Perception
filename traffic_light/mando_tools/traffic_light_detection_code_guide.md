@@ -26,7 +26,7 @@
 - 기본 bag profile은 `stop_points`다.
 - `stop_points`의 기본 이미지 토픽은 `/zed/zed_node/left/image_rect_color`다.
 - `mando_ros2`의 기본 이미지 토픽은 `/zed_node/left/image_rect_color`다.
-- 기본 모델은 `model/best.pt`를 먼저 찾고, 없으면 `yolo11s.pt`를 사용한다.
+- `tl_fusion` 기본 모델은 `/home/ki/SSC/src/perception/traffic_light/model/best.pt`를 사용한다.
 
 기본 환경 확인:
 
@@ -139,7 +139,7 @@ ros2 launch mando_tools tl_roi_hist.launch.py
 
 - `/tl/debug_image`는 구독자가 있거나 `show_windows=true`일 때만 생성/발행한다.
 - `show_windows=true`면 OpenCV 디버그 창을 띄운다.
-- 상단 1/3·중앙 1/2 ROI와 검출 박스 테두리만 표시하며, 색상 마스크 패널과 문자 오버레이는 표시하지 않는다.
+- 별도 zoom/panel 창 이미지는 현재 publish하지 않는다.
 
 실행:
 

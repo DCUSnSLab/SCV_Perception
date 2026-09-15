@@ -1,4 +1,5 @@
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 import time
 from threading import Event, Thread
@@ -170,8 +171,8 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
     node._detect_candidates = Mock(return_value=(detections, (0, 0, 320, 160)))
     node.bridge = SimpleNamespace(imgmsg_to_cv2=Mock(return_value=frame))
     for method_name in (
-        '_build_debug_image', '_numpy_to_image_msg',
-        '_analyze_selected_candidate',
+        '_highlight_masks', '_build_debug_image', '_numpy_to_image_msg',
+        '_analyze_selected_candidate', '_draw_debug_inset',
     ):
         setattr(node, method_name, Mock(wraps=getattr(node, method_name)))
     show_image = Mock()
@@ -185,9 +186,12 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
     node._process_latest_frame()
 
     render_debug = show_windows or subscribers > 0
+    has_color_analysis = candidate_kind != 'absent'
     assert node.debug_pub.subscription_queries == 1
     assert node._build_debug_image.call_count == int(render_debug)
-    assert node._analyze_selected_candidate.call_count == int(candidate_kind != 'high_confidence')
+    assert node._highlight_masks.call_count == int(render_debug and has_color_analysis)
+    assert node._draw_debug_inset.call_count == int(render_debug and has_color_analysis)
+    assert node._analyze_selected_candidate.call_count == 1
     assert node._numpy_to_image_msg.call_count == int(subscribers > 0)
     assert len(node.debug_pub.messages) == int(subscribers > 0)
     assert show_image.call_count == int(show_windows)
@@ -212,7 +216,7 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
     node._log_processing_error.assert_not_called()
 
 
-def test_low_confidence_fast_mode_skips_color_analysis(fusion_node):
+def test_color_analysis_remains_enabled_when_legacy_switch_is_false(fusion_node):
     node = fusion_node
     node.enable_low_confidence_color_fallback = False
     node.show_windows = False
@@ -222,7 +226,7 @@ def test_low_confidence_fast_mode_skips_color_analysis(fusion_node):
     candidate = make_candidate(0.4, STATE_RED, 'vehicular_red')
     node._detect_candidates = Mock(return_value=([candidate], (0, 0, 320, 160)))
     node._analyze_selected_candidate = Mock(
-        side_effect=AssertionError('low-confidence fast mode ran color analysis')
+        return_value=node._empty_analysis('test_color_analysis')
     )
     node.bridge = SimpleNamespace(imgmsg_to_cv2=Mock(return_value=frame))
     node._publish_outputs = Mock()
@@ -232,18 +236,20 @@ def test_low_confidence_fast_mode_skips_color_analysis(fusion_node):
 
     node._process_latest_frame()
 
-    node._analyze_selected_candidate.assert_not_called()
+    node._analyze_selected_candidate.assert_called_once()
     assert node._publish_outputs.call_args.args[4].source == 'model_low_conf'
     node._log_processing_error.assert_not_called()
 
 
-def test_absent_candidate_has_no_placeholder_image(fusion_node, monkeypatch):
+@pytest.mark.parametrize('render_debug', [False, True])
+def test_absent_candidate_has_no_placeholder_image(fusion_node, monkeypatch, render_debug):
     draw_text = Mock()
     monkeypatch.setattr(tl_fusion.cv2, 'putText', draw_text)
     analysis = fusion_node._analyze_selected_candidate(
-        np.zeros((10, 10, 3), dtype=np.uint8), None,
+        np.zeros((10, 10, 3), dtype=np.uint8), None, render_debug=render_debug,
     )
     assert analysis == fusion_node._empty_analysis('no_candidate')
+    assert analysis.highlighted is None
     draw_text.assert_not_called()
 
 
@@ -276,8 +282,8 @@ def test_detection_bulk_transfer_preserves_filtering(fusion_node, rows, expected
     assert [candidate.model_state for candidate in detections] == expected_states
     assert all(candidate.box == (15, 12, 40, 45) for candidate in detections)
     arguments = fusion_node.model.predict.call_args.kwargs
-    assert arguments['imgsz'] == 640
-    assert arguments['conf'] == 0.10
+    assert arguments['imgsz'] == 960
+    assert arguments['conf'] == 0.05
     assert arguments['iou'] == 0.45
     assert arguments['max_det'] == 50
     selected = fusion_node._select_candidate(detections, frame.shape)
@@ -294,7 +300,7 @@ def test_detection_without_boxes(fusion_node):
     )
 
 
-@pytest.mark.parametrize('width,height,expected', [(1254, 370, (123, 627)), (1878, 555, (185, 939))])
+@pytest.mark.parametrize('width,height,expected', [(1254, 370, (123, 753)), (1878, 555, (185, 1127))])
 def test_default_center_roi_reaches_model(fusion_node, monkeypatch, width, height, expected):
     monkeypatch.setattr(TLFusionNode, '_declare_param', lambda self, name, default: str(Path(__file__)) if name == 'model_path' else default)
     node = TLFusionNode()
@@ -304,28 +310,32 @@ def test_default_center_roi_reaches_model(fusion_node, monkeypatch, width, heigh
     source = node.model.predict.call_args.kwargs['source']
     assert source.shape[:2] == expected
     assert np.shares_memory(frame, source)
-    assert bounds == (int(width * .25), 0, int(width * .75), int(height / 3))
+    assert bounds == (int(width * .20), 0, int(width * .80), int(height / 3))
+
+
+def test_default_model_path_is_fixed_best_pt():
+    assert tl_fusion.default_tl_model_path() == (
+        '/home/ki/SSC/src/perception/traffic_light/model/best.pt'
+    )
 
 
 @pytest.mark.parametrize('width,height', [(1254, 370), (1878, 555), (40, 30)])
-def test_cropped_debug_roi_and_box(fusion_node, monkeypatch, width, height):
+def test_cropped_debug_and_inset_fit(fusion_node, width, height):
     node = fusion_node
     node.detect_left_ratio, node.detect_right_ratio = .25, .75
     node.detect_bottom_ratio = 1.0 / 3.0
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     original = frame.copy()
     left = int(width * .25)
-    overlay = tl_fusion.OverlayCandidate((left+5, 5, left+25, 30), (0, 0, 255), True)
-    draw_text = Mock()
-    monkeypatch.setattr(tl_fusion.cv2, 'putText', draw_text)
-    debug = node._build_debug_image(frame, [overlay])
+    overlay = tl_fusion.OverlayCandidate((left+5, 5, left+25, 30), 'RED', (0, 0, 255), True)
+    analysis = replace(node._empty_analysis('test'), highlighted=np.ones((100, 100, 3), dtype=np.uint8))
+    debug = node._build_debug_image(frame, [overlay], make_candidate(), analysis)
     assert debug.shape == (int(height / 3), int(width*.75)-left, 3)
     np.testing.assert_array_equal(frame, original)
     assert not np.shares_memory(frame, debug)
     if height > 30:
         assert debug[25, 5].tolist() == [0, 0, 255]
     assert overlay.box == (left+5, 5, left+25, 30)
-    draw_text.assert_not_called()
 
 
 def test_fallback_expansion_stays_inside_detection_roi(fusion_node):
@@ -374,11 +384,13 @@ def test_color_analysis_preserves_results_with_debug(
     elif expected_state != STATE_UNKNOWN:
         color_node._largest_component.assert_called_once()
     rendered_analysis = color_node._analyze_selected_candidate(
-        frame, make_candidate(),
+        frame, make_candidate(), render_debug=True,
     )
     assert analysis.state == expected_state
     assert analysis.decisive == (expected_state != STATE_UNKNOWN)
-    assert rendered_analysis == analysis
+    assert analysis.highlighted is None
+    assert rendered_analysis.highlighted.shape == frame.shape
+    assert replace(rendered_analysis, highlighted=None) == analysis
 
 
 @pytest.mark.parametrize('parameter', [
@@ -405,6 +417,39 @@ def test_color_threshold_boundaries(color_node, parameter, direction):
     assert analysis.state == (STATE_RED if direction <= 0 else STATE_UNKNOWN)
     assert analysis.scores == baseline.scores
     assert analysis.valid_pixels == baseline.valid_pixels
+
+
+def test_uncertain_candidate_temporarily_keeps_last_state(fusion_node):
+    node = fusion_node
+    clock_ns = [1_000_000_000]
+    node._now_ns = lambda: clock_ns[0]
+    node.current_state = STATE_RED
+    node.pending_state = STATE_RED
+    node.last_state_change_ns = clock_ns[0]
+    node.last_seen_candidate_ns = clock_ns[0]
+    node.state_confirm_ms = 0.0
+    node.hold_ms = 0
+    node.uncertain_hold_ms = 300.0
+
+    assert node._update_stable_state(STATE_UNKNOWN, True, uncertain=True) == STATE_RED
+
+    clock_ns[0] += 250_000_000
+    assert node._update_stable_state(STATE_UNKNOWN, True, uncertain=True) == STATE_RED
+
+    clock_ns[0] += 100_000_000
+    assert node._update_stable_state(STATE_UNKNOWN, True, uncertain=True) == STATE_UNKNOWN
+
+
+def test_high_confidence_model_recovers_from_unknown_immediately(fusion_node):
+    node = fusion_node
+    node.state_confirm_ms = 200.0
+    node.hold_ms = 250
+    node.current_state = STATE_UNKNOWN
+    node.last_state_change_ns = 1_000_000_000
+    node.last_seen_candidate_ns = 1_000_000_000
+    node._now_ns = lambda: 1_000_000_001
+
+    assert node._update_stable_state(STATE_RED, True, immediate=True) == STATE_RED
 
 
 @pytest.mark.parametrize('age_ms,reason', [(0, None), (250, None), (251, 'invalid_image_stale'), (-51, 'invalid_image_future')])

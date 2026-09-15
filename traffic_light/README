@@ -29,7 +29,7 @@ source install/setup.bash
 기본 모델 위치:
 
 ```text
-/home/ssc/SSC/src/perception/traffic_light/model/best.pt
+/home/ki/SSC/src/perception/traffic_light/model/best.pt
 /home/ssc/SSC/src/perception/traffic_light/model/arrow_best.pt
 /home/ssc/SSC/src/perception/traffic_light/model/mando_arrow_best.pt
 ```
@@ -64,14 +64,13 @@ GPU를 사용하지 않을 때:
 ros2 launch mando_tools tl_fusion.launch.py detector_device:=cpu
 ```
 
-10 FPS 성능 프로파일이 필요하면, 저신뢰 모델 프레임의 CPU 색상 재검증을 끈다. 이 옵션은 저신뢰 색상 보정 동작이 생략되므로 정확도 확인 후 사용한다.
+색상 보정은 선택된 후보마다 항상 수행한다. `enable_low_confidence_color_fallback` 인자는 기존 실행 명령과의 호환을 위해 남아 있지만 색상 분석을 끄지 않는다.
 
 ```bash
 /home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh \\
   detector_device:=cuda:0 \\
   color_fallback_device:=cuda:0 \\
-  fallback_max_side_px:=640 \\
-  enable_low_confidence_color_fallback:=false
+  fallback_max_side_px:=640
 ```
 
 입력 영상이 3초 동안 갱신되지 않으면 다음을 발행한다.
@@ -211,11 +210,10 @@ ros2 launch mando_tools play_mando_bag.launch.py \
 
 ## 토픽 소유권
 
-`tl_fusion`도 기본적으로 중앙 상단(x=25~75%, y=0~1/3)만 YOLO에 전달하며,
+`tl_fusion`도 기본적으로 중앙 상단(x=20~80%, y=0~1/3)만 YOLO에 전달하며,
 색상 fallback의 확장 범위 역시 이 ROI 안으로 제한한다. 후보/추적 좌표는 원본 영상 기준이다.
-`/tl/debug_image`와 OpenCV 창은 ROI 크롭만 표시한다(1254×370 → 627×123).
+`/tl/debug_image`와 OpenCV 창은 ROI 크롭만 표시한다(1254×370 → 753×123).
 원본 header와 Reliable QoS는 유지하지만 디버그 픽셀 좌표는 원본과 다르다.
-디버그에는 검출 박스 테두리만 표시하며 색상 마스크 패널과 클래스·confidence·상태 문자는 표시하지 않는다.
 `tl_fusion.launch.py`, `traffic_light.launch.py`에서 `detect_top_ratio`, `detect_bottom_ratio`,
 `detect_left_ratio`, `detect_right_ratio`를 조절할 수 있다. 전체 화면 복귀는 각각 0, 1, 0, 1이다.
 기존 `preferred_*`는 원본 좌표 기준 후보 우선순위이며 크롭 설정과 별개다.

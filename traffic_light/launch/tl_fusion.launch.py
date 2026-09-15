@@ -3,37 +3,17 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-from pathlib import Path
-import os
-
-def _default_tl_model() -> str:
-    # Installed launch files live outside the source tree, so the walk-up
-    # search below finds nothing; MANDO_WS pins the package directory.
-    search_roots: list[Path] = []
-    for env_name in ('MANDO_WS', 'MANDO_WORKSPACE'):
-        env_root = os.environ.get(env_name)
-        if env_root:
-            search_roots.append(Path(env_root).expanduser())
-
-    launch_file = Path(__file__).resolve()
-    search_roots.extend([launch_file.parent, *launch_file.parents])
-
-    for root in search_roots:
-        candidate = root / 'model' / 'best.pt'
-        if candidate.exists():
-            return str(candidate)
-        if root.name == 'traffic_light':
-            return str(candidate)
-    return 'best.pt'
+DEFAULT_TL_MODEL = '/home/ki/SSC/src/perception/traffic_light/model/best.pt'
 
 def generate_launch_description() -> LaunchDescription:
     parameter_defaults = {
         'detect_top_ratio': 0.0, 'detect_bottom_ratio': 1.0 / 3.0,
-        'detect_left_ratio': 0.25, 'detect_right_ratio': 0.75,
+        'detect_left_ratio': 0.20, 'detect_right_ratio': 0.80,
         'max_image_age_ms': 250.0,
         'future_stamp_tolerance_ms': 50.0,
         'state_confirm_ms': 200.0,
         'state_max_gap_ms': 250.0,
+        'uncertain_hold_ms': 300.0,
     }
     parameter_args = [
         DeclareLaunchArgument(name, default_value=str(value), description='Detection ROI ratio or timing threshold in milliseconds, as indicated by the parameter name.')
@@ -42,7 +22,7 @@ def generate_launch_description() -> LaunchDescription:
     sim_time_arg = DeclareLaunchArgument('use_sim_time', default_value='false', description='Use the ROS clock published during bag playback.')
     model_arg = DeclareLaunchArgument(
         'model_path',
-        default_value=_default_tl_model(),
+        default_value=DEFAULT_TL_MODEL,
         description='YOLO detector model for traffic-light fusion.',
     )
     image_topic_arg = DeclareLaunchArgument(
@@ -82,31 +62,45 @@ def generate_launch_description() -> LaunchDescription:
     )
     detector_conf_arg = DeclareLaunchArgument(
         'detector_conf_threshold',
-        default_value='0.10',
-        description='Minimum YOLO confidence for signal candidates.',
+        default_value='0.05',
+        description='Minimum YOLO confidence for signal candidates, tuned for small lights.',
     )
     detector_size_arg = DeclareLaunchArgument(
         'detector_image_size',
-        default_value='640',
-        description='Inference image size for YOLO.',
+        default_value='960',
+        description='Inference image size for YOLO small-object recall.',
     )
     model_conf_arg = DeclareLaunchArgument(
         'model_confidence_threshold',
-        default_value='0.60',
+        default_value='0.75',
         description='Confidence above which the model state is trusted directly.',
     )
     low_conf_fallback_arg = DeclareLaunchArgument(
         'enable_low_confidence_color_fallback',
         default_value='true',
         description=(
-            'Recheck low-confidence resolved detections with color analysis. '
-            'Disable for the real-time performance profile.'
+            'Legacy compatibility parameter. Color analysis is always enabled.'
         ),
     )
     fallback_score_arg = DeclareLaunchArgument(
         'fallback_score_threshold',
-        default_value='0.50',
+        default_value='0.45',
         description='Normalized color score required for the fallback state.',
+    )
+    fallback_saturation_arg = DeclareLaunchArgument(
+        'fallback_saturation_gain',
+        default_value='2.20',
+        description='Saturation gain applied before color fallback analysis.',
+    )
+    fallback_value_arg = DeclareLaunchArgument(
+        'fallback_value_gain',
+        default_value='1.35',
+        description='Brightness gain applied before color fallback analysis.',
+    )
+    fallback_gamma_arg = DeclareLaunchArgument(
+        'fallback_gamma',
+        default_value='1.00',
+        description='Gamma applied before color fallback analysis.',
     )
     fallback_max_side_arg = DeclareLaunchArgument(
         'fallback_max_side_px',
@@ -159,6 +153,18 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration('fallback_score_threshold'),
                     value_type=float,
                 ),
+                'fallback_saturation_gain': ParameterValue(
+                    LaunchConfiguration('fallback_saturation_gain'),
+                    value_type=float,
+                ),
+                'fallback_value_gain': ParameterValue(
+                    LaunchConfiguration('fallback_value_gain'),
+                    value_type=float,
+                ),
+                'fallback_gamma': ParameterValue(
+                    LaunchConfiguration('fallback_gamma'),
+                    value_type=float,
+                ),
                 'fallback_max_side_px': ParameterValue(
                     LaunchConfiguration('fallback_max_side_px'),
                     value_type=int,
@@ -184,6 +190,9 @@ def generate_launch_description() -> LaunchDescription:
             model_conf_arg,
             low_conf_fallback_arg,
             fallback_score_arg,
+            fallback_saturation_arg,
+            fallback_value_arg,
+            fallback_gamma_arg,
             fallback_max_side_arg,
             tl_fusion,
         ]

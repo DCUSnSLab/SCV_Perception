@@ -9,11 +9,12 @@ def generate_launch_description() -> LaunchDescription:
     image_topic = LaunchConfiguration('image_topic')
     parameter_defaults = {
         'detect_top_ratio': 0.0, 'detect_bottom_ratio': 1.0 / 3.0,
-        'detect_left_ratio': 0.25, 'detect_right_ratio': 0.75,
+        'detect_left_ratio': 0.20, 'detect_right_ratio': 0.80,
         'max_image_age_ms': 250.0,
         'future_stamp_tolerance_ms': 50.0,
         'state_confirm_ms': 200.0,
         'state_max_gap_ms': 250.0,
+        'uncertain_hold_ms': 300.0,
     }
 
     return LaunchDescription(
@@ -36,6 +37,21 @@ def generate_launch_description() -> LaunchDescription:
                 description='YOLO inference device.',
             ),
             DeclareLaunchArgument(
+                'detector_conf_threshold',
+                default_value='0.05',
+                description='Minimum YOLO confidence for small signal candidates.',
+            ),
+            DeclareLaunchArgument(
+                'detector_image_size',
+                default_value='960',
+                description='YOLO inference size for small-object recall.',
+            ),
+            DeclareLaunchArgument(
+                'model_path',
+                default_value='/home/ki/SSC/src/perception/traffic_light/model/best.pt',
+                description='Fixed YOLO traffic-light model.',
+            ),
+            DeclareLaunchArgument(
                 'color_fallback_device',
                 default_value='auto',
                 description='PyTorch device for color fallback. auto follows detector_device.',
@@ -44,9 +60,38 @@ def generate_launch_description() -> LaunchDescription:
                 'enable_low_confidence_color_fallback',
                 default_value='true',
                 description=(
-                    'Recheck low-confidence resolved detections with color analysis. '
-                    'Disable for the real-time performance profile.'
+                    'Legacy compatibility parameter. Color analysis is always enabled.'
                 ),
+            ),
+            DeclareLaunchArgument(
+                'model_confidence_threshold',
+                default_value='0.75',
+                description='Confidence above which the model state is trusted directly.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_score_threshold',
+                default_value='0.45',
+                description='Normalized color score required for the fallback state.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_score_gap',
+                default_value='0.10',
+                description='Minimum score gap between the top two colors.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_saturation_gain',
+                default_value='2.20',
+                description='Saturation gain applied before color fallback analysis.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_value_gain',
+                default_value='1.35',
+                description='Brightness gain applied before color fallback analysis.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_gamma',
+                default_value='1.00',
+                description='Gamma applied before color fallback analysis.',
             ),
             DeclareLaunchArgument(
                 'fallback_max_side_px',
@@ -62,6 +107,7 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         'image_topic': image_topic,
                         'state_topic': '/tl/state_id',
+                        'model_path': LaunchConfiguration('model_path'),
                         **{name: ParameterValue(LaunchConfiguration(name), value_type=float) for name in parameter_defaults},
                         'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
                         'input_timeout_s': ParameterValue(
@@ -69,10 +115,42 @@ def generate_launch_description() -> LaunchDescription:
                             value_type=float,
                         ),
                         'detector_device': LaunchConfiguration('detector_device'),
+                        'detector_conf_threshold': ParameterValue(
+                            LaunchConfiguration('detector_conf_threshold'),
+                            value_type=float,
+                        ),
+                        'detector_image_size': ParameterValue(
+                            LaunchConfiguration('detector_image_size'),
+                            value_type=int,
+                        ),
                         'color_fallback_device': LaunchConfiguration('color_fallback_device'),
                         'enable_low_confidence_color_fallback': ParameterValue(
                             LaunchConfiguration('enable_low_confidence_color_fallback'),
                             value_type=bool,
+                        ),
+                        'model_confidence_threshold': ParameterValue(
+                            LaunchConfiguration('model_confidence_threshold'),
+                            value_type=float,
+                        ),
+                        'fallback_score_threshold': ParameterValue(
+                            LaunchConfiguration('fallback_score_threshold'),
+                            value_type=float,
+                        ),
+                        'fallback_score_gap': ParameterValue(
+                            LaunchConfiguration('fallback_score_gap'),
+                            value_type=float,
+                        ),
+                        'fallback_saturation_gain': ParameterValue(
+                            LaunchConfiguration('fallback_saturation_gain'),
+                            value_type=float,
+                        ),
+                        'fallback_value_gain': ParameterValue(
+                            LaunchConfiguration('fallback_value_gain'),
+                            value_type=float,
+                        ),
+                        'fallback_gamma': ParameterValue(
+                            LaunchConfiguration('fallback_gamma'),
+                            value_type=float,
                         ),
                         'fallback_max_side_px': ParameterValue(
                             LaunchConfiguration('fallback_max_side_px'),

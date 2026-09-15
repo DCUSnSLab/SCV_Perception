@@ -31,8 +31,8 @@
 2. 타이머 기반으로 `max_fps` 주기마다 최신 프레임만 처리한다.
 3. `_detect_candidates()`로 신호등 후보를 검출한다.
 4. `_select_candidate()`로 대표 후보 하나를 고른다.
-5. 모델 confidence가 높으면 모델 상태를 우선 사용한다.
-6. 그렇지 않으면 `_analyze_selected_candidate()`로 색 분석 fallback을 수행한다.
+5. 선택된 후보는 confidence와 무관하게 `_analyze_selected_candidate()`를 거친다.
+6. 모델 confidence와 색상 분석 결과의 우선순위를 적용해 상태를 결정한다.
 7. `_decide_state()`와 `_update_stable_state()`로 최종 상태를 정한다.
 8. 결과를 publish하고, 필요할 때만 디버그 이미지를 생성한다.
 9. 입력 영상이 3초 동안 오지 않으면 `UNKNOWN(0)`과 빈 `/tl/detections`를 발행한다.
@@ -44,11 +44,11 @@
 - `traffic light`와 `etc` 계열은 상태를 직접 해석하지 않는다.
 - `LEFT ARROW`는 `green_arrow`, `left+arrow`, `red+green` 조합으로 해석한다.
 - 종료분기용 `green_arrow(down)`은 주행 신호 상태에서 제외한다.
-- 디버그 영상은 구독자가 있거나 `show_windows=true`일 때만 만든다.
+- 디버그 영상과 색상 하이라이트는 구독자가 있거나 `show_windows=true`일 때만 만든다.
 - `/tl/debug_image` 메시지 변환과 발행은 구독자가 있을 때만 수행한다. 창만 켜면 화면에만 표시하며, 창과 구독자를 함께 사용할 때는 같은 영상을 재사용한다.
-- 디버그 영상은 상단 1/3·중앙 1/2 ROI와 검출 박스 테두리만 표시한다. 색상 마스크 패널과 모든 문자 오버레이는 표시하지 않는다.
+- 후보가 없으면 색상 inset용 빈 이미지를 만들지 않는다.
 - 검출 박스는 한 번에 CPU로 가져온 뒤 기존 순서와 필터 조건대로 처리한다.
-- 빨강+초록 조합이 확정되면 판정에 사용되지 않는 연결요소 분석을 생략한다. 모델, 판정 임계값, FPS, 상태 안정화와 타임아웃 규칙은 유지한다.
+- 빨강+초록 조합이 확정되면 판정에 사용되지 않는 연결요소 분석을 생략한다. 작은 신호등의 색상 경계 누락을 줄이도록 색상 score 기준은 `0.45`, score gap 기준은 `0.10`을 사용한다.
 
 ## 5. launch에서 자주 조절하는 인자
 
@@ -61,6 +61,8 @@
 - `model_confidence_threshold`
 - `enable_low_confidence_color_fallback`
 - `fallback_score_threshold`
+- `fallback_score_gap`
+- `uncertain_hold_ms`
 
 실행:
 
@@ -85,10 +87,6 @@ ros2 launch mando_tools tl_fusion.launch.py \\
   color_fallback_device:=cuda:0
 ```
 
-저신뢰 모델 프레임에서 CPU 색상 fallback을 생략하는 성능 프로파일은 다음과 같이 실행한다. 기본값은 `true`이며, 이 옵션은 정확도 확인 후 사용한다.
-
-```bash
-/home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh enable_low_confidence_color_fallback:=false
-```
+색상 보정은 항상 활성화되므로 `enable_low_confidence_color_fallback:=false` 설정도 호환성만 유지하고 실제 분석을 끄지 않는다.
 
 의존성 교체 후에는 실행 중이던 노드를 재시작해야 새 PyTorch가 로드된다.
