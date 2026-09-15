@@ -211,18 +211,18 @@ def test_callback_preserves_debug_header(subscriber_count):
     assert drawn == [True]
 
 
-@pytest.mark.parametrize(
-    'bits, expected',
-    [([], [2, 2, 2]), ([1], [1, 2, 2]), ([0, 1, 0], [0, 1, 0]), ([1, 0, 1, 0], [1, 0, 1])],
-)
-def test_publish_bits_always_has_three_values(bits, expected):
+@pytest.mark.parametrize('bits', [[], [1], [0, 1, 0]])
+def test_publish_bits_preserves_detected_values(bits):
     published = []
     fake = SimpleNamespace(bits_pub=SimpleNamespace(publish=published.append))
 
     BlackBoxColorBitsNode._publish_bits(fake, bits)
 
-    assert list(published[0].data) == expected
-    assert published[0].layout.dim[0].size == 3
+    assert list(published[0].data) == bits
+    if bits:
+        assert published[0].layout.dim[0].size == len(bits)
+    else:
+        assert published[0].layout.dim == []
 
 
 @pytest.mark.parametrize('margin', [1, 4, 30])

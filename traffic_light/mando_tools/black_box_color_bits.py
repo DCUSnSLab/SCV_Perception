@@ -36,10 +36,6 @@ from std_msgs.msg import MultiArrayDimension
 from std_msgs.msg import MultiArrayLayout
 from std_msgs.msg import UInt8MultiArray
 
-OUTPUT_BOX_COUNT = 3
-UNKNOWN_BIT = 2
-
-
 @dataclass
 class DetectorConfig:
     """검출/추적 설정. ROS 기본값 변경 시 노드의 파라미터 선언도 함께 맞춘다.
@@ -563,20 +559,17 @@ class BlackBoxColorBitsNode(Node):
             self.processing = False
 
     def _publish_bits(self, bits: list[int]) -> None:
-        """항상 3개인 UInt8MultiArray로 발행한다. 2는 미검출/미확정이다.
+        """확정된 비트만 가변 길이 UInt8MultiArray로 발행한다.
 
         메시지에는 timestamp/track_id/신뢰도가 없으므로 수신 측은 인덱스를 ID로 쓰지 않는다.
         """
         message = UInt8MultiArray()
-        output_bits = [int(bit) for bit in bits[:OUTPUT_BOX_COUNT]]
-        output_bits.extend([UNKNOWN_BIT] * (OUTPUT_BOX_COUNT - len(output_bits)))
-        message.data = output_bits
-        message.layout = MultiArrayLayout(
-            dim=[MultiArrayDimension(
-                label='boxes', size=OUTPUT_BOX_COUNT, stride=OUTPUT_BOX_COUNT,
-            )],
-            data_offset=0,
-        )
+        message.data = [int(bit) for bit in bits]
+        if bits:
+            message.layout = MultiArrayLayout(
+                dim=[MultiArrayDimension(label='boxes', size=len(bits), stride=len(bits))],
+                data_offset=0,
+            )
         self.bits_pub.publish(message)
 
     def _draw_debug(
