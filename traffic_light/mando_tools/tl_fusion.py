@@ -24,8 +24,6 @@ import sys
 import time
 import traceback
 from threading import Lock
-from collections import Counter
-from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -208,7 +206,7 @@ class TLFusionNode(Node):
             and self.color_fallback_device.lower().startswith('cuda')
             and torch.cuda.is_available()
         )
-        self.detector_image_size = int(self._declare_param('detector_image_size', 960))
+        self.detector_image_size = int(self._declare_param('detector_image_size', 640))
         self.detector_conf_threshold = float(self._declare_param('detector_conf_threshold', 0.05))
         self.detector_iou_threshold = float(self._declare_param('detector_iou_threshold', 0.45))
         self.detector_max_detections = int(self._declare_param('detector_max_detections', 50))
@@ -241,7 +239,7 @@ class TLFusionNode(Node):
             self._declare_param('enable_low_confidence_color_fallback', True)
         )
 
-        # 색상 fallback: 박스 주변 확장 -> 명암/채도 보정 -> HSV 마스크 분석.
+        # 색상 fallback: 박스 주변 확장 -> 명암/채도 보정 -> 후보 박스 내부 HSV 마스크 분석.
         # S/V는 OpenCV uint8의 0~255 범위이며, 픽셀 수 기준은 보정된 ROI에 적용된다.
         self.fallback_expand_ratio = float(self._declare_param('fallback_expand_ratio', 1.80))
         self.fallback_min_margin_px = int(self._declare_param('fallback_min_margin_px', 4))
@@ -251,11 +249,27 @@ class TLFusionNode(Node):
         self.fallback_gamma = float(self._declare_param('fallback_gamma', 1.00))
         self.fallback_s_min = int(self._declare_param('fallback_s_min', 55))
         self.fallback_v_min = int(self._declare_param('fallback_v_min', 70))
+        self.fallback_green_h_min = float(self._declare_param('fallback_green_h_min', 39.0))
+        self.fallback_green_h_max = float(self._declare_param('fallback_green_h_max', 100.0))
+        self.fallback_green_s_min = int(self._declare_param('fallback_green_s_min', 50))
+        self.fallback_green_v_min = int(self._declare_param('fallback_green_v_min', 68))
+        self.fallback_green_top_weight = float(
+            self._declare_param('fallback_green_top_weight', 0.20)
+        )
+        self.fallback_green_middle_weight = float(
+            self._declare_param('fallback_green_middle_weight', 1.30)
+        )
+        self.fallback_green_bottom_weight = float(
+            self._declare_param('fallback_green_bottom_weight', 0.20)
+        )
         self.fallback_min_valid_pixels = int(self._declare_param('fallback_min_valid_pixels', 12))
         self.fallback_min_component_pixels = int(
             self._declare_param('fallback_min_component_pixels', 4)
         )
         self.fallback_score_threshold = float(self._declare_param('fallback_score_threshold', 0.45))
+        self.fallback_green_score_threshold = float(
+            self._declare_param('fallback_green_score_threshold', 0.40)
+        )
         self.fallback_score_gap = float(self._declare_param('fallback_score_gap', 0.10))
         # 프로젝트 규칙: 적색/녹색 동시 점등을 좌회전 상태로 해석한다.
         # 화살표 형상 검출이 아니므로 다른 신호등 배치에 적용할 때 별도 검증이 필요하다.
@@ -272,7 +286,7 @@ class TLFusionNode(Node):
         # reset은 오래 미검출됐을 때 이전 후보 위치를 버리는 기준이다.
         self.state_confirm_ms = float(self._declare_param('state_confirm_ms', 200.0))
         self.state_max_gap_ms = float(self._declare_param('state_max_gap_ms', 250.0))
-        self.max_image_age_ms = float(self._declare_param('max_image_age_ms', 250.0))
+        self.max_image_age_ms = float(self._declare_param('max_image_age_ms', 500.0))
         self.future_stamp_tolerance_ms = float(self._declare_param('future_stamp_tolerance_ms', 50.0))
         self.uncertain_hold_ms = float(self._declare_param('uncertain_hold_ms', 300.0))
         for value in (
@@ -343,7 +357,6 @@ class TLFusionNode(Node):
         self.last_candidate_box: tuple[int, int, int, int] | None = None
         self.last_overlay_candidate: OverlayCandidate | None = None
         self.last_overlay_update_ns = self._now_ns()
-        self.state_history: deque[int] = deque(maxlen=1)
         self.pending_state = STATE_UNKNOWN
         self.pending_since_ns: int | None = None
         self.uncertain_since_ns: int | None = None
@@ -531,8 +544,6 @@ class TLFusionNode(Node):
         self.current_state = STATE_UNKNOWN
         self.current_source = 'input_timeout'
         self.current_reason = f'no_image_for={elapsed_s:.1f}s'
-        self.state_history.clear()
-        self.state_history.append(STATE_UNKNOWN)
         self.pending_since_ns = None
         self.uncertain_since_ns = None
         self.last_state_observation_ns = None
@@ -624,8 +635,6 @@ class TLFusionNode(Node):
         self.current_state = STATE_UNKNOWN
         self.current_source = 'invalid_input'
         self.current_reason = reason
-        self.state_history.clear()
-        self.state_history.append(STATE_UNKNOWN)
         self.pending_since_ns = None
         self.last_state_observation_ns = None
         self.last_candidate_box = None
@@ -648,8 +657,6 @@ class TLFusionNode(Node):
         self.current_state = STATE_UNKNOWN
         self.current_source = 'processing_error'
         self.current_reason = 'processing_error'
-        self.state_history.clear()
-        self.state_history.append(STATE_UNKNOWN)
         self.pending_state = STATE_UNKNOWN
         self.pending_since_ns = None
         self.uncertain_since_ns = None
@@ -834,7 +841,7 @@ class TLFusionNode(Node):
         *,
         render_debug: bool = False,
     ) -> ColorAnalysisResult:
-        """대표 후보의 확장 ROI에서 적/황/녹 근거를 계산한다.
+        """대표 후보의 확장 crop에서 후보 박스 내부의 적/황/녹 근거를 계산한다.
 
         검출 후보를 새로 찾는 함수는 아니다. 후보가 없으면 UNKNOWN 근거를 반환한다.
         render_debug는 시각화 생성만 제어하며 점수/decisive/판정 상태는 바꾸지 않는다.
@@ -842,11 +849,19 @@ class TLFusionNode(Node):
         if candidate is None:
             return self._empty_analysis('no_candidate')
 
-        crop = self._expanded_crop(frame, candidate.box)
+        crop, signal_mask = self._expanded_crop_and_mask(frame, candidate.box)
         enhanced = self._enhance_crop(crop)
+        if signal_mask.shape[:2] != enhanced.shape[:2]:
+            signal_mask = cv2.resize(
+                signal_mask,
+                (enhanced.shape[1], enhanced.shape[0]),
+                interpolation=cv2.INTER_NEAREST,
+            )
         if self.use_torch_color_fallback:
             try:
-                raw_scores, valid_pixels, masks = self._torch_color_measurements(enhanced)
+                raw_scores, valid_pixels, masks = self._torch_color_measurements(
+                    enhanced, signal_mask,
+                )
             except Exception as exc:  # noqa: BLE001
                 self.use_torch_color_fallback = False
                 self.get_logger().warning(
@@ -872,21 +887,36 @@ class TLFusionNode(Node):
             )
             green_mask = cv2.inRange(
                 hsv,
-                (40, self.fallback_s_min, self.fallback_v_min),
-                (95, 255, 255),
+                (
+                    self.fallback_green_h_min,
+                    self.fallback_green_s_min,
+                    self.fallback_green_v_min,
+                ),
+                (self.fallback_green_h_max, 255, 255),
             )
-
             red_mask = self._clean_mask(red_mask)
             yellow_mask = self._clean_mask(yellow_mask)
             green_mask = self._clean_mask(green_mask)
+            red_mask = cv2.bitwise_and(red_mask, signal_mask)
+            yellow_mask = cv2.bitwise_and(yellow_mask, signal_mask)
+            green_mask = cv2.bitwise_and(green_mask, signal_mask)
 
             masks = {
                 'red': red_mask,
                 'yellow': yellow_mask,
                 'green': green_mask,
             }
+            green_vertical_weights = self._green_vertical_weights(
+                signal_mask, enhanced.shape[:2],
+            )
             raw_scores = {
-                name: float(weights[mask > 0].sum())
+                name: float(
+                    (
+                        weights * green_vertical_weights
+                        if name == 'green'
+                        else weights
+                    )[mask > 0].sum()
+                )
                 for name, mask in masks.items()
             }
             valid_pixels = int(sum(int(np.count_nonzero(mask)) for mask in masks.values()))
@@ -905,6 +935,11 @@ class TLFusionNode(Node):
             default=0.0,
         )
         score_gap = top_score - second_score
+        score_threshold = (
+            self.fallback_green_score_threshold
+            if top_color == 'green'
+            else self.fallback_score_threshold
+        )
 
         # 동시 적/녹 점등은 단일 우세 색상보다 먼저 해석하는 프로젝트별 좌회전 규칙이다.
         red_green_decisive = (
@@ -920,14 +955,14 @@ class TLFusionNode(Node):
         if (
             not red_green_decisive
             and valid_pixels >= self.fallback_min_valid_pixels
-            and top_score >= self.fallback_score_threshold
+            and top_score >= score_threshold
             and score_gap >= self.fallback_score_gap
         ):
             component_size = self._largest_component(masks[top_color])
 
         decisive = (
             valid_pixels >= self.fallback_min_valid_pixels
-            and top_score >= self.fallback_score_threshold
+            and top_score >= score_threshold
             and score_gap >= self.fallback_score_gap
             and component_size >= self.fallback_min_component_pixels
         )
@@ -943,7 +978,11 @@ class TLFusionNode(Node):
             state = STATE_UNKNOWN
             reason = 'color_ambiguous'
 
-        highlighted = self._highlight_masks(enhanced, masks, scores) if render_debug else None
+        highlighted = (
+            self._highlight_masks(enhanced, masks, scores, signal_mask)
+            if render_debug
+            else None
+        )
         return ColorAnalysisResult(
             state=state,
             decisive=decisive,
@@ -1348,15 +1387,14 @@ class TLFusionNode(Node):
             return STATE_RED, True
         return STATE_UNKNOWN, False
 
-    def _expanded_crop(
+    def _expanded_crop_bounds(
         self,
         frame: np.ndarray,
         box: tuple[int, int, int, int],
-    ) -> np.ndarray:
+    ) -> tuple[int, int, int, int]:
         """등화 주변을 함께 보기 위해 비율 확장과 최소 양쪽 여백 중 큰 값을 적용한다.
 
-        유효한 범위에서는 원본의 view를 반환하므로 호출자는 직접 덮어쓰지 않는다.
-        잘못된 범위는 검은 영상으로 대체해 이후 색상 근거가 없도록 처리한다.
+        반환 범위는 검출 ROI 안으로 제한한다.
         """
         x_a, y_a, x_b, y_b = box
         width = x_b - x_a
@@ -1377,9 +1415,30 @@ class TLFusionNode(Node):
         y0 = max(roi_y0, y0)
         x1 = min(roi_x1, x1)
         y1 = min(roi_y1, y1)
+        return x0, y0, x1, y1
+
+    def _expanded_crop_and_mask(
+        self,
+        frame: np.ndarray,
+        box: tuple[int, int, int, int],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """확장 crop과 원래 후보 박스 내부를 표시하는 마스크를 반환한다."""
+        x0, y0, x1, y1 = self._expanded_crop_bounds(frame, box)
         if x1 <= x0 or y1 <= y0:
-            return np.zeros((64, 64, 3), dtype=np.uint8)
-        return frame[y0:y1, x0:x1]
+            return (
+                np.zeros((64, 64, 3), dtype=np.uint8),
+                np.zeros((64, 64), dtype=np.uint8),
+            )
+
+        crop = frame[y0:y1, x0:x1]
+        signal_mask = np.zeros(crop.shape[:2], dtype=np.uint8)
+        signal_x0 = max(x0, box[0]) - x0
+        signal_y0 = max(y0, box[1]) - y0
+        signal_x1 = min(x1, box[2]) - x0
+        signal_y1 = min(y1, box[3]) - y0
+        if signal_x1 > signal_x0 and signal_y1 > signal_y0:
+            signal_mask[signal_y0:signal_y1, signal_x0:signal_x1] = 255
+        return crop, signal_mask
 
     def _enhance_crop(self, crop: np.ndarray) -> np.ndarray:
         """작은 ROI 확대 -> LAB 명암 보정 -> HSV 채도/밝기 보정 -> 감마 -> 선명화.
@@ -1451,6 +1510,7 @@ class TLFusionNode(Node):
     def _torch_color_measurements(
         self,
         enhanced: np.ndarray,
+        signal_mask: np.ndarray | None = None,
     ) -> tuple[dict[str, float], int, dict[str, np.ndarray]]:
         """PyTorch CUDA로 HSV 마스크와 색상 점수를 계산한다.
 
@@ -1490,6 +1550,9 @@ class TLFusionNode(Node):
             )
             value = max_value * 255.0
             weights = 0.25 + 0.40 * (saturation / 255.0) + 0.35 * (value / 255.0)
+            green_vertical_weights = torch.from_numpy(
+                self._green_vertical_weights(signal_mask, enhanced.shape[:2])
+            ).to(device=weights.device, dtype=weights.dtype)
 
             red_mask = (
                 ((hue >= 0.0) & (hue <= 9.0))
@@ -1501,18 +1564,33 @@ class TLFusionNode(Node):
                 & (value >= self.fallback_v_min)
             )
             green_mask = (
-                (hue >= 40.0) & (hue <= 95.0)
-                & (saturation >= self.fallback_s_min)
-                & (value >= self.fallback_v_min)
+                (hue >= self.fallback_green_h_min) & (hue <= self.fallback_green_h_max)
+                & (saturation >= self.fallback_green_s_min)
+                & (value >= self.fallback_green_v_min)
             )
-
             masks_gpu = {
                 'red': self._torch_clean_mask(red_mask),
                 'yellow': self._torch_clean_mask(yellow_mask),
                 'green': self._torch_clean_mask(green_mask),
             }
+            if signal_mask is not None:
+                signal_region = torch.from_numpy(signal_mask).to(
+                    device=bgr.device,
+                    non_blocking=True,
+                ) > 0
+                masks_gpu = {
+                    name: mask & signal_region for name, mask in masks_gpu.items()
+                }
             raw_values = torch.stack([
-                (weights * masks_gpu[name].to(dtype=weights.dtype)).sum()
+                (
+                    weights
+                    * (
+                        green_vertical_weights
+                        if name == 'green'
+                        else 1.0
+                    )
+                    * masks_gpu[name].to(dtype=weights.dtype)
+                ).sum()
                 for name in COLOR_ORDER
             ])
             valid_value = torch.stack([
@@ -1529,6 +1607,51 @@ class TLFusionNode(Node):
         }
         valid_pixels = int(metrics[-1])
         return raw_scores, valid_pixels, masks
+
+    def _green_vertical_weights(
+        self,
+        signal_mask: np.ndarray | None,
+        shape: tuple[int, int],
+    ) -> np.ndarray:
+        """후보 박스를 상·중·하로 나눠 초록색 점수를 보정한다."""
+        height = shape[0]
+        weight_rows = self._green_weight_rows(signal_mask, shape)
+        if weight_rows is None:
+            return np.ones((height, 1), dtype=np.float32)
+
+        top_row, bottom_row = weight_rows
+        if bottom_row == top_row:
+            vertical_ratio = np.full((height, 1), 0.5, dtype=np.float32)
+        else:
+            row_indices = np.arange(height, dtype=np.float32).reshape(height, 1)
+            vertical_ratio = np.clip(
+                (row_indices - top_row) / float(bottom_row - top_row),
+                0.0,
+                1.0,
+            )
+        vertical_weights = np.where(
+            vertical_ratio < (1.0 / 3.0),
+            self.fallback_green_top_weight,
+            np.where(
+                vertical_ratio < (2.0 / 3.0),
+                self.fallback_green_middle_weight,
+                self.fallback_green_bottom_weight,
+            ),
+        )
+        return vertical_weights.astype(np.float32, copy=True)
+
+    def _green_weight_rows(
+        self,
+        signal_mask: np.ndarray | None,
+        shape: tuple[int, int],
+    ) -> tuple[int, int] | None:
+        if signal_mask is None or signal_mask.shape[:2] != shape:
+            return None
+
+        signal_rows = np.flatnonzero(np.any(signal_mask > 0, axis=1))
+        if signal_rows.size == 0:
+            return None
+        return int(signal_rows[0]), int(signal_rows[-1])
 
     def _torch_clean_mask(self, mask: Any) -> Any:
         """OpenCV 3x3 타원 커널과 같은 십자형 morphology를 PyTorch로 수행한다."""
@@ -1585,6 +1708,7 @@ class TLFusionNode(Node):
         enhanced: np.ndarray,
         masks: dict[str, np.ndarray],
         scores: dict[str, float],
+        signal_mask: np.ndarray | None = None,
     ) -> np.ndarray:
         """분석 마스크와 점수를 BGR 영상에 합성하는 표시 전용 함수.
 
@@ -1609,6 +1733,38 @@ class TLFusionNode(Node):
             color_strength = 0.30 + 0.50 * float(scores[name])
             blended = cv2.addWeighted(highlighted, 1.0, color, color_strength, 0.0)
             highlighted[mask > 0] = blended[mask > 0]
+
+        weight_rows = self._green_weight_rows(signal_mask, highlighted.shape[:2])
+        if weight_rows is not None:
+            top_row, bottom_row = weight_rows
+            row_span = bottom_row - top_row
+            boundary_rows = (
+                round(top_row + row_span / 3.0),
+                round(top_row + 2.0 * row_span / 3.0),
+            )
+            for boundary_row in boundary_rows:
+                cv2.line(
+                    highlighted,
+                    (0, boundary_row),
+                    (highlighted.shape[1] - 1, boundary_row),
+                    (255, 255, 255),
+                    1,
+                    cv2.LINE_8,
+                )
+            cv2.putText(
+                highlighted,
+                (
+                    f"green weight {self.fallback_green_top_weight:.2f}"
+                    f" / {self.fallback_green_middle_weight:.2f}"
+                    f" / {self.fallback_green_bottom_weight:.2f}"
+                ),
+                (4, max(14, boundary_rows[0] - 4)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.32,
+                (255, 255, 255),
+                1,
+                cv2.LINE_AA,
+            )
 
         return highlighted
 
@@ -1769,17 +1925,6 @@ class TLFusionNode(Node):
         if union <= 0:
             return 0.0
         return float(inter_area) / float(union)
-
-    def _majority_state(self, values: deque[int]) -> int:
-        """최빈 상태를 고르며 동률이면 UNKNOWN보다 알려진 상태를 우선한다.
-
-        알려진 상태끼리 동률이면 이력에서 먼저 등장한 상태가 유지된다.
-        상태 ID 크기나 적색 우선 규칙으로 동률을 해소하는 구현은 아니다.
-        """
-        if not values:
-            return STATE_UNKNOWN
-        counts = Counter(values)
-        return max(counts.items(), key=lambda item: (item[1], item[0] != STATE_UNKNOWN))[0]
 
     def _now_ns(self) -> int:
         """판정/추적용 ROS 시각(ns). use_sim_time의 정지/점프 영향을 받는다."""

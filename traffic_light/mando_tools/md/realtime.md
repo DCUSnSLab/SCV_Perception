@@ -7,7 +7,7 @@
 
 | 파라미터 | 기본값 | 의미 |
 |---|---:|---|
-| max_image_age_ms | 250 | 촬영 header stamp 이후 허용 경과 시간; 0은 나이 검사 비활성화 |
+| max_image_age_ms | 500 | 촬영 header stamp 이후 허용 경과 시간; 0은 나이 검사 비활성화 |
 | future_stamp_tolerance_ms | 50 | 미래 타임스탬프 허용 오차 |
 | require_image_header_stamp | true | 0/음수 타임스탬프 거부 |
 | state_confirm_ms | 200 | 동일 제안 상태가 지속 관측되어야 하는 시간 |
@@ -28,7 +28,7 @@ ROS 시각이 역행하면 상태 확인을 다시 시작하고 기존 확정 �
 
 ```bash
 ros2 launch mando_tools tl_fusion.launch.py \
-  max_image_age_ms:=250.0 future_stamp_tolerance_ms:=50.0 \
+  max_image_age_ms:=500.0 future_stamp_tolerance_ms:=50.0 \
   state_confirm_ms:=200.0 state_max_gap_ms:=250.0
 ```
 

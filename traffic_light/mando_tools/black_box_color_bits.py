@@ -425,7 +425,7 @@ class BlackBoxColorBitsNode(Node):
         self.processing = False
         self.last_valid_receive_ns = None
         self.latest_receive_ns = None
-        self.max_image_age_ms = float(self._declare_param('max_image_age_ms', 250.0))
+        self.max_image_age_ms = float(self._declare_param('max_image_age_ms', 500.0))
         self.input_timeout_s = float(self._declare_param('input_timeout_s', 0.5))
         if not np.isfinite(self.max_image_age_ms) or self.max_image_age_ms <= 0:
             raise ValueError('max_image_age_ms must be finite and positive')

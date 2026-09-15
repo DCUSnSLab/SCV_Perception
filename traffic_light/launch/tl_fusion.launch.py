@@ -9,7 +9,7 @@ def generate_launch_description() -> LaunchDescription:
     parameter_defaults = {
         'detect_top_ratio': 0.0, 'detect_bottom_ratio': 1.0 / 3.0,
         'detect_left_ratio': 0.20, 'detect_right_ratio': 0.80,
-        'max_image_age_ms': 250.0,
+        'max_image_age_ms': 500.0,
         'future_stamp_tolerance_ms': 50.0,
         'state_confirm_ms': 200.0,
         'state_max_gap_ms': 250.0,
@@ -67,7 +67,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     detector_size_arg = DeclareLaunchArgument(
         'detector_image_size',
-        default_value='960',
+        default_value='640',
         description='Inference image size for YOLO small-object recall.',
     )
     model_conf_arg = DeclareLaunchArgument(
@@ -86,6 +86,38 @@ def generate_launch_description() -> LaunchDescription:
         'fallback_score_threshold',
         default_value='0.45',
         description='Normalized color score required for the fallback state.',
+    )
+    fallback_green_h_min_arg = DeclareLaunchArgument(
+        'fallback_green_h_min', default_value='39.0',
+        description='Lower HSV hue bound for green fallback pixels.',
+    )
+    fallback_green_h_max_arg = DeclareLaunchArgument(
+        'fallback_green_h_max', default_value='100.0',
+        description='Upper HSV hue bound for green fallback pixels.',
+    )
+    fallback_green_s_min_arg = DeclareLaunchArgument(
+        'fallback_green_s_min', default_value='50',
+        description='Minimum HSV saturation for green fallback pixels.',
+    )
+    fallback_green_v_min_arg = DeclareLaunchArgument(
+        'fallback_green_v_min', default_value='68',
+        description='Minimum HSV value for green fallback pixels.',
+    )
+    fallback_green_score_arg = DeclareLaunchArgument(
+        'fallback_green_score_threshold', default_value='0.40',
+        description='Normalized score required for a green fallback state.',
+    )
+    fallback_green_top_weight_arg = DeclareLaunchArgument(
+        'fallback_green_top_weight', default_value='0.20',
+        description='Green score weight at the top of the candidate box.',
+    )
+    fallback_green_middle_weight_arg = DeclareLaunchArgument(
+        'fallback_green_middle_weight', default_value='1.30',
+        description='Green score weight in the middle of the candidate box.',
+    )
+    fallback_green_bottom_weight_arg = DeclareLaunchArgument(
+        'fallback_green_bottom_weight', default_value='0.20',
+        description='Green score weight at the bottom of the candidate box.',
     )
     fallback_saturation_arg = DeclareLaunchArgument(
         'fallback_saturation_gain',
@@ -153,6 +185,30 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration('fallback_score_threshold'),
                     value_type=float,
                 ),
+                'fallback_green_h_min': ParameterValue(
+                    LaunchConfiguration('fallback_green_h_min'), value_type=float,
+                ),
+                'fallback_green_h_max': ParameterValue(
+                    LaunchConfiguration('fallback_green_h_max'), value_type=float,
+                ),
+                'fallback_green_s_min': ParameterValue(
+                    LaunchConfiguration('fallback_green_s_min'), value_type=int,
+                ),
+                'fallback_green_v_min': ParameterValue(
+                    LaunchConfiguration('fallback_green_v_min'), value_type=int,
+                ),
+                'fallback_green_score_threshold': ParameterValue(
+                    LaunchConfiguration('fallback_green_score_threshold'), value_type=float,
+                ),
+                'fallback_green_top_weight': ParameterValue(
+                    LaunchConfiguration('fallback_green_top_weight'), value_type=float,
+                ),
+                'fallback_green_middle_weight': ParameterValue(
+                    LaunchConfiguration('fallback_green_middle_weight'), value_type=float,
+                ),
+                'fallback_green_bottom_weight': ParameterValue(
+                    LaunchConfiguration('fallback_green_bottom_weight'), value_type=float,
+                ),
                 'fallback_saturation_gain': ParameterValue(
                     LaunchConfiguration('fallback_saturation_gain'),
                     value_type=float,
@@ -190,6 +246,14 @@ def generate_launch_description() -> LaunchDescription:
             model_conf_arg,
             low_conf_fallback_arg,
             fallback_score_arg,
+            fallback_green_h_min_arg,
+            fallback_green_h_max_arg,
+            fallback_green_s_min_arg,
+            fallback_green_v_min_arg,
+            fallback_green_score_arg,
+            fallback_green_top_weight_arg,
+            fallback_green_middle_weight_arg,
+            fallback_green_bottom_weight_arg,
             fallback_saturation_arg,
             fallback_value_arg,
             fallback_gamma_arg,

@@ -62,6 +62,14 @@
 - `enable_low_confidence_color_fallback`
 - `fallback_score_threshold`
 - `fallback_score_gap`
+- `fallback_green_score_threshold`
+- `fallback_green_h_min`
+- `fallback_green_h_max`
+- `fallback_green_s_min`
+- `fallback_green_v_min`
+- `fallback_green_top_weight`
+- `fallback_green_middle_weight`
+- `fallback_green_bottom_weight`
 - `uncertain_hold_ms`
 
 실행:

@@ -70,6 +70,8 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 - `show_windows=true`
 - `/tl/debug_image`에 실제 구독자가 존재
 
+컬러 마스크 inset에는 원본 YOLO 후보 박스를 상·중·하 3등분하는 흰색 기준선 2개와 상단→중단→하단 가중치가 표시된다.
+
 즉 평상시에는 디버그 프레임 전체 복사와 `cv2_to_imgmsg()` 직렬화를 건너뛴다.
 
 ## 5. YOLO 후보 검출
@@ -131,7 +133,8 @@ tracking 유사도는 중심점 거리와 IoU를 함께 사용한다.
 
 ### 8.1 ROI 확장과 보정
 
-- 박스를 `fallback_expand_ratio`와 `fallback_min_margin_px` 기준으로 넓혀 crop한다.
+- 박스를 `fallback_expand_ratio`와 `fallback_min_margin_px` 기준으로 넓혀 crop하되,
+  색상 마스크와 점수는 원래 YOLO 후보 박스 내부로 제한한다.
 - 작은 ROI는 최소 한 변 64px 기준으로 확대한다.
 - CLAHE, saturation/value gain, gamma LUT, sharpen을 적용한다.
 
@@ -145,8 +148,14 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 
 - `fallback_min_valid_pixels`
 - `fallback_score_threshold`
+- `fallback_green_score_threshold`
 - `fallback_score_gap`
 - `fallback_min_component_pixels`
+
+초록색은 녹색 신호의 색 바램·저조도 편차를 흡수하기 위해 별도 범위를 사용한다.
+기본값은 HSV H `39~100`, S `50` 이상, V `68` 이상, score `0.40`이다.
+후보 박스 내부에서 초록색 score는 위쪽 `0.70`에서 아래쪽 `1.30`까지 세로로 선형 보정한다.
+빨강·노랑 기준과 score gap `0.10`은 변경하지 않아 녹색처럼 보이는 배경의 확정을 제한한다.
 
 `LEFT ARROW` 색 규칙은 아래 조건을 동시에 볼 때 사용한다.
 
@@ -202,13 +211,21 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `model_confidence_threshold`
 - `enable_low_confidence_color_fallback`
 - `fallback_score_threshold`
+- `fallback_green_score_threshold`
 - `fallback_score_gap`
+- `fallback_green_h_min`
+- `fallback_green_h_max`
+- `fallback_green_s_min`
+- `fallback_green_v_min`
+- `fallback_green_top_weight`
+- `fallback_green_middle_weight`
+- `fallback_green_bottom_weight`
 - `uncertain_hold_ms`
 - `fallback_saturation_gain`
 - `fallback_value_gain`
 - `fallback_gamma`
 
-현재 기본값은 YOLO 입력 크기 `960`, 후보 confidence `0.05`, 색상 score `0.45`, 색상 score gap `0.10`, 모델 신뢰도 `0.75`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다.
+현재 기본값은 YOLO 입력 크기 `640`, 후보 confidence `0.05`, 일반 색상 score `0.45`, 초록색 score `0.40`, 색상 score gap `0.10`, 모델 신뢰도 `0.75`, 초록색 상·중·하 가중치 `0.20`·`1.30`·`0.20`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다.
 색상 보정은 모든 선택 후보에 항상 적용되며, 모델 confidence가 `0.75` 미만이면 색상 fallback이 최종 판단에 더 적극적으로 사용된다.
 
 예시:

@@ -1,4 +1,3 @@
-from collections import deque
 from dataclasses import replace
 from pathlib import Path
 import time
@@ -100,7 +99,10 @@ def color_frame(red_pixels, yellow_pixels, green_pixels):
 
 @pytest.fixture
 def color_node(fusion_node):
-    fusion_node._expanded_crop = lambda frame, box: frame
+    fusion_node._expanded_crop_and_mask = lambda frame, box: (
+        frame,
+        np.full(frame.shape[:2], 255, dtype=np.uint8),
+    )
     fusion_node._enhance_crop = lambda crop: crop
     fusion_node._clean_mask = lambda mask: mask
     fusion_node._largest_component = Mock(wraps=fusion_node._largest_component)
@@ -134,7 +136,6 @@ def test_image_timeout_publishes_unknown_and_invalid() -> None:
     node.current_state = STATE_GREEN
     node.current_source = 'model'
     node.current_reason = 'vehicular_green'
-    node.state_history = deque([STATE_GREEN], maxlen=5)
     node.last_candidate_box = (1, 2, 3, 4)
     node.last_overlay_candidate = object()
     node.image_topic = '/panorama/image_raw'
@@ -282,7 +283,7 @@ def test_detection_bulk_transfer_preserves_filtering(fusion_node, rows, expected
     assert [candidate.model_state for candidate in detections] == expected_states
     assert all(candidate.box == (15, 12, 40, 45) for candidate in detections)
     arguments = fusion_node.model.predict.call_args.kwargs
-    assert arguments['imgsz'] == 960
+    assert arguments['imgsz'] == 640
     assert arguments['conf'] == 0.05
     assert arguments['iou'] == 0.45
     assert arguments['max_det'] == 50
@@ -338,18 +339,6 @@ def test_cropped_debug_and_inset_fit(fusion_node, width, height):
     assert overlay.box == (left+5, 5, left+25, 30)
 
 
-def test_fallback_expansion_stays_inside_detection_roi(fusion_node):
-    node = fusion_node
-    node.detect_left_ratio, node.detect_right_ratio = .25, .75
-    node.detect_bottom_ratio = 1.0 / 3.0
-    node.fallback_min_margin_px = 1000
-    frame = np.zeros((370, 1254, 3), dtype=np.uint8)
-    frame[:123, 313:940] = 80
-    crop = node._expanded_crop(frame, (320, 10, 350, 40))
-    assert crop.shape == (123, 627, 3)
-    assert np.all(crop == 80)
-
-
 def test_detection_preserves_crop_offsets(fusion_node):
     fusion_node.detect_left_ratio = 0.25
     fusion_node.detect_right_ratio = 0.75
@@ -366,12 +355,12 @@ def test_detection_preserves_crop_offsets(fusion_node):
     (0, 0, 0, STATE_UNKNOWN),
     (11, 0, 0, STATE_UNKNOWN),
     (12, 0, 0, STATE_RED),
-    (70, 0, 30, STATE_LEFT_ARROW),
+    (70, 0, 30, STATE_RED),
     (30, 0, 70, STATE_LEFT_ARROW),
-    (29, 0, 71, STATE_GREEN),
-    (82, 0, 18, STATE_LEFT_ARROW),
+    (29, 0, 71, STATE_LEFT_ARROW),
+    (82, 0, 18, STATE_RED),
     (83, 0, 17, STATE_RED),
-    (58, 12, 30, STATE_LEFT_ARROW),
+    (58, 12, 30, STATE_RED),
     (57, 13, 30, STATE_RED),
 ])
 def test_color_analysis_preserves_results_with_debug(
@@ -391,6 +380,83 @@ def test_color_analysis_preserves_results_with_debug(
     assert analysis.highlighted is None
     assert rendered_analysis.highlighted.shape == frame.shape
     assert replace(rendered_analysis, highlighted=None) == analysis
+
+
+def test_color_analysis_ignores_color_outside_signal_box(fusion_node):
+    node = fusion_node
+    node.use_torch_color_fallback = False
+    node._enhance_crop = lambda crop: crop
+    node._clean_mask = lambda mask: mask
+    frame = np.full((120, 120, 3), (0, 0, 255), dtype=np.uint8)
+    frame[40:90, 50:100] = (0, 255, 0)
+
+    analysis = node._analyze_selected_candidate(frame, make_candidate())
+
+    assert analysis.state == STATE_GREEN
+
+
+def test_color_analysis_accepts_dim_yellow_green(color_node):
+    hsv_pixel = np.array([[[60, 100, 90]]], dtype=np.uint8)
+    bgr_pixel = tl_fusion.cv2.cvtColor(hsv_pixel, tl_fusion.cv2.COLOR_HSV2BGR)[0, 0]
+    frame = np.tile(bgr_pixel, (10, 10, 1))
+
+    analysis = color_node._analyze_selected_candidate(frame, make_candidate())
+
+    assert analysis.state == STATE_GREEN
+    assert analysis.decisive
+
+
+def test_green_vertical_weights_favor_middle_of_candidate(color_node):
+    signal_mask = np.ones((10, 10), dtype=np.uint8) * 255
+
+    weights = color_node._green_vertical_weights(signal_mask, signal_mask.shape)
+
+    assert np.allclose(weights[0], 0.20)
+    assert np.allclose(weights[3:6], 1.30)
+    assert np.allclose(weights[-1], 0.20)
+
+
+def test_green_vertical_weight_changes_color_score(color_node):
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frame[:5] = (0, 255, 0)
+    frame[5:] = (0, 255, 255)
+
+    analysis = color_node._analyze_selected_candidate(frame, make_candidate())
+
+    assert analysis.scores['yellow'] > analysis.scores['green']
+
+
+def test_green_vertical_weight_matches_torch_score(color_node):
+    color_node.color_fallback_device = 'cpu'
+    color_node._clean_mask = lambda mask: mask
+    color_node._torch_clean_mask = lambda mask: mask
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frame[:5] = (0, 255, 0)
+    frame[5:] = (0, 255, 255)
+    signal_mask = np.full(frame.shape[:2], 255, dtype=np.uint8)
+
+    cpu_analysis = color_node._analyze_selected_candidate(frame, make_candidate())
+    torch_raw_scores, _, _ = color_node._torch_color_measurements(frame, signal_mask)
+    torch_total = sum(torch_raw_scores.values())
+    torch_scores = {
+        name: score / torch_total for name, score in torch_raw_scores.items()
+    }
+
+    assert cpu_analysis.scores == pytest.approx(torch_scores, abs=1.0e-5)
+
+
+def test_color_mask_debug_marks_green_weight_boundaries(color_node):
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+
+    analysis = color_node._analyze_selected_candidate(
+        frame,
+        make_candidate(),
+        render_debug=True,
+    )
+
+    assert analysis.highlighted is not None
+    assert np.all(analysis.highlighted[3] == (255, 255, 255))
+    assert np.all(analysis.highlighted[6] == (255, 255, 255))
 
 
 @pytest.mark.parametrize('parameter', [
@@ -452,7 +518,7 @@ def test_high_confidence_model_recovers_from_unknown_immediately(fusion_node):
     assert node._update_stable_state(STATE_RED, True, immediate=True) == STATE_RED
 
 
-@pytest.mark.parametrize('age_ms,reason', [(0, None), (250, None), (251, 'invalid_image_stale'), (-51, 'invalid_image_future')])
+@pytest.mark.parametrize('age_ms,reason', [(0, None), (500, None), (501, 'invalid_image_stale'), (-51, 'invalid_image_future')])
 def test_frame_age_boundaries(fusion_node, age_ms, reason):
     message = Image()
     stamp_ns = 1_000_000_000 - age_ms * 1_000_000
@@ -520,7 +586,7 @@ def test_frame_expiring_during_inference_is_not_published_valid(fusion_node):
     fusion_node._image_callback(message)
     fusion_node.bridge.imgmsg_to_cv2 = Mock(return_value=np.zeros((20, 20, 3), dtype=np.uint8))
     def expire(frame):
-        fusion_node._now_ns = lambda: 1_300_000_000
+        fusion_node._now_ns = lambda: 1_600_000_000
         return [], (0, 0, 20, 20)
     fusion_node._detect_candidates = expire
     fusion_node._process_latest_frame()

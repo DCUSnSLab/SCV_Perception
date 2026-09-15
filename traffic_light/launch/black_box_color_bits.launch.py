@@ -10,7 +10,7 @@ def generate_launch_description() -> LaunchDescription:
     root = workspace_root_or_none()
     model_default = str(root / 'model' / 'box_best.pt') if root is not None else 'box_best.pt'
     model_args = [
-        DeclareLaunchArgument('max_image_age_ms', default_value='250.0'),
+        DeclareLaunchArgument('max_image_age_ms', default_value='500.0'),
         DeclareLaunchArgument('input_timeout_s', default_value='0.5'),
         DeclareLaunchArgument('use_sim_time', default_value='false'),
         DeclareLaunchArgument('box_confidence', default_value='0.25'),
