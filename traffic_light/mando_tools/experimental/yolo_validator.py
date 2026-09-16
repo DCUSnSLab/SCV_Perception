@@ -6,10 +6,10 @@ import sys
 import traceback
 from typing import Any
 
-from .workspace_paths import default_image_topic
-from .workspace_paths import default_model_path
-from .workspace_paths import local_python_deps_path
-from .workspace_paths import resolve_inference_device
+from ..workspace_paths import default_image_topic
+from ..workspace_paths import default_model_path
+from ..workspace_paths import local_python_deps_path
+from ..workspace_paths import resolve_inference_device
 
 # 워크스페이스 로컬 의존성을 우선 로드해 전역 ROS/시스템 환경을 건드리지 않고
 # 런타임 import를 만족시킨다.

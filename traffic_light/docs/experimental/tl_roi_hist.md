@@ -1,9 +1,11 @@
 # tl_roi_hist
 
+실험용 노드이며 현재 사용하는 두 노드의 실행 경로에는 포함되지 않는다.
+
 대상 코드:
 
-- `src/mando_tools/mando_tools/tl_roi_hist.py`
-- `src/mando_tools/launch/tl_roi_hist.launch.py`
+- [코드](../../mando_tools/experimental/tl_roi_hist.py)
+- [런치](../../launch/experimental/tl_roi_hist.launch.py)
 
 ## 1. 역할
 
@@ -41,7 +43,6 @@
 ## 5. launch 특징
 
 - `tl_roi_hist.launch.py`는 노드만 실행하며 bag은 별도로 재생한다.
-- `start_offset`으로 bag 시작 지점을 조절할 수 있다.
 - `max_fps`와 `pub_hist_image`를 launch 인자로 바로 바꿀 수 있다.
 
 실행:

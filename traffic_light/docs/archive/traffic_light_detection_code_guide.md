@@ -1,5 +1,8 @@
 # 신호등 검출 코드 가이드
 
+이 문서는 이전 실험 노드 비교 기록이다. 현재 사용하는 코드는 `tl_fusion`과
+`black_box_color_bits`이며, 최신 경로와 실행 방법은 [실행 가이드](../RUN.md)를 따른다.
+
 `mando_tools` 안에서 신호등을 검출하거나 최종 상태로 변환하는 핵심 코드는 아래 3개다.
 
 - `src/mando_tools/mando_tools/yolo_validator.py`

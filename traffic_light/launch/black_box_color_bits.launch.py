@@ -38,7 +38,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     fps_arg = DeclareLaunchArgument(
         'max_fps',
-        default_value='15.0',
+        default_value='5.0',
         description='Maximum number of processed frames per second.',
     )
     roi_bottom_arg = DeclareLaunchArgument(

@@ -32,6 +32,21 @@ def generate_launch_description() -> LaunchDescription:
                 description='Publish UNKNOWN after this input timeout.',
             ),
             DeclareLaunchArgument(
+                'publish_debug_image',
+                default_value='false',
+                description='Publish the debug image topic.',
+            ),
+            DeclareLaunchArgument(
+                'debug_image_max_side_px',
+                default_value='640',
+                description='Maximum side length of the debug image; 0 keeps the source size.',
+            ),
+            DeclareLaunchArgument(
+                'debug_publish_period_ms',
+                default_value='200.0',
+                description='Minimum interval between debug renders; 0 renders every frame.',
+            ),
+            DeclareLaunchArgument(
                 'detector_device',
                 default_value='cuda:0',
                 description='YOLO inference device.',
@@ -101,17 +116,17 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 'fallback_green_top_weight',
                 default_value='0.20',
-                description='Green score weight at the top of the candidate box.',
+                description='Common color score weight at the top of the candidate box.',
             ),
             DeclareLaunchArgument(
                 'fallback_green_middle_weight',
                 default_value='1.30',
-                description='Green score weight in the middle of the candidate box.',
+                description='Common color score weight in the middle of the candidate box.',
             ),
             DeclareLaunchArgument(
                 'fallback_green_bottom_weight',
                 default_value='0.20',
-                description='Green score weight at the bottom of the candidate box.',
+                description='Common color score weight at the bottom of the candidate box.',
             ),
             DeclareLaunchArgument(
                 'fallback_score_gap',
@@ -152,6 +167,18 @@ def generate_launch_description() -> LaunchDescription:
                         'use_sim_time': ParameterValue(LaunchConfiguration('use_sim_time'), value_type=bool),
                         'input_timeout_s': ParameterValue(
                             LaunchConfiguration('input_timeout_s'),
+                            value_type=float,
+                        ),
+                        'publish_debug_image': ParameterValue(
+                            LaunchConfiguration('publish_debug_image'),
+                            value_type=bool,
+                        ),
+                        'debug_image_max_side_px': ParameterValue(
+                            LaunchConfiguration('debug_image_max_side_px'),
+                            value_type=int,
+                        ),
+                        'debug_publish_period_ms': ParameterValue(
+                            LaunchConfiguration('debug_publish_period_ms'),
                             value_type=float,
                         ),
                         'detector_device': LaunchConfiguration('detector_device'),
