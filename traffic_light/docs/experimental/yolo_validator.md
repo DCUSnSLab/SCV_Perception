@@ -1,9 +1,11 @@
 # yolo_validator
 
+실험용 노드이며 현재 사용하는 두 노드의 실행 경로에는 포함되지 않는다.
+
 대상 코드:
 
-- `src/mando_tools/mando_tools/yolo_validator.py`
-- `src/mando_tools/launch/validate_mando_bag.launch.py`
+- [코드](../../mando_tools/experimental/yolo_validator.py)
+- [런치](../../launch/experimental/validate_mando_bag.launch.py)
 
 ## 1. 역할
 

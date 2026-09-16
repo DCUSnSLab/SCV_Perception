@@ -438,7 +438,7 @@ class BlackBoxColorBitsNode(Node):
             self._declare_param('debug_image_topic', '/tl/box_color_bits/debug')
         )
         self.publish_debug_image = bool(self._declare_param('publish_debug_image', False))
-        self.max_fps = float(self._declare_param('max_fps', 15.0))
+        self.max_fps = float(self._declare_param('max_fps', 5.0))
         opencv_threads = int(self._declare_param('opencv_threads', 1))
         if opencv_threads < 1:
             raise ValueError('opencv_threads must be positive')

@@ -1,5 +1,8 @@
 # tl_fusion
 
+이 문서는 이전 요약본을 보관한 것이다. 현재 문서는 [코드 설명](../tl_fusion.md)과
+[실행 가이드](../RUN.md)로 통합했다. 아래 경로와 옵션은 이전 기록이다.
+
 대상 코드:
 
 - `src/mando_tools/mando_tools/tl_fusion.py`
@@ -61,6 +64,8 @@
 - `detector_image_size`
 - `model_confidence_threshold`
 - `enable_low_confidence_color_fallback`
+- `debug_image_max_side_px`
+- `debug_publish_period_ms`
 - `fallback_score_threshold`
 - `fallback_score_gap`
 - `fallback_green_score_threshold`
@@ -71,6 +76,8 @@
 - `fallback_green_top_weight`
 - `fallback_green_middle_weight`
 - `fallback_green_bottom_weight`
+
+`fallback_green_*_weight`는 기존 파라미터 이름을 유지한 공통 색상 가중치이며, 빨강·노랑·초록 점수 모두에 적용된다.
 - `uncertain_hold_ms`
 
 실행:

@@ -1,4 +1,7 @@
-# traffic_light
+# 이전 traffic_light README (보관본)
+
+이 문서는 파일 정리 이전 기록이다. 경로·기본값·실행 예시는 현재 코드와 다를 수 있다.
+현재 실행 방법은 [두 노드 실행 가이드](../RUN.md), 파일 구성은 [README](../../README.md)를 따른다.
 
 카메라 또는 파노라마 영상에서 차량 신호등을 검출하는 ROS 2 `mando_tools` 패키지다.
 최종 주행 상태와 시각화 결과는 `tl_fusion` 한 노드가 `/tl/state_id`,

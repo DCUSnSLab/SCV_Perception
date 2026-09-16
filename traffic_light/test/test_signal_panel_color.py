@@ -1,10 +1,10 @@
 import cv2
 import numpy as np
 
-from mando_tools.green_down_arrow import GREEN_ARROW
-from mando_tools.green_down_arrow import RED_X
-from mando_tools.green_down_arrow import classify_panel
-from mando_tools.green_down_arrow import find_three_panel_rig
+from mando_tools.experimental.green_down_arrow import GREEN_ARROW
+from mando_tools.experimental.green_down_arrow import RED_X
+from mando_tools.experimental.green_down_arrow import classify_panel
+from mando_tools.experimental.green_down_arrow import find_three_panel_rig
 
 
 def test_color_only_three_panel_detection() -> None:

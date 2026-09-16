@@ -70,6 +70,16 @@ def generate_launch_description() -> LaunchDescription:
         default_value='true',
         description='Publish /tl/debug_image when a subscriber is connected.',
     )
+    debug_image_max_side_arg = DeclareLaunchArgument(
+        'debug_image_max_side_px',
+        default_value='640',
+        description='Maximum side length of the debug image; 0 keeps the source size.',
+    )
+    debug_publish_period_arg = DeclareLaunchArgument(
+        'debug_publish_period_ms',
+        default_value='200.0',
+        description='Minimum interval between debug renders; 0 renders every frame.',
+    )
     fps_arg = DeclareLaunchArgument(
         'max_fps',
         default_value='30.0',
@@ -143,15 +153,15 @@ def generate_launch_description() -> LaunchDescription:
     )
     fallback_green_top_weight_arg = DeclareLaunchArgument(
         'fallback_green_top_weight', default_value='0.20',
-        description='Green score weight at the top of the candidate box.',
+        description='Common color score weight at the top of the candidate box.',
     )
     fallback_green_middle_weight_arg = DeclareLaunchArgument(
         'fallback_green_middle_weight', default_value='1.30',
-        description='Green score weight in the middle of the candidate box.',
+        description='Common color score weight in the middle of the candidate box.',
     )
     fallback_green_bottom_weight_arg = DeclareLaunchArgument(
         'fallback_green_bottom_weight', default_value='0.20',
-        description='Green score weight at the bottom of the candidate box.',
+        description='Common color score weight at the bottom of the candidate box.',
     )
     fallback_saturation_arg = DeclareLaunchArgument(
         'fallback_saturation_gain',
@@ -194,6 +204,14 @@ def generate_launch_description() -> LaunchDescription:
                 'publish_debug_image': ParameterValue(
                     LaunchConfiguration('publish_debug_image'),
                     value_type=bool,
+                ),
+                'debug_image_max_side_px': ParameterValue(
+                    LaunchConfiguration('debug_image_max_side_px'),
+                    value_type=int,
+                ),
+                'debug_publish_period_ms': ParameterValue(
+                    LaunchConfiguration('debug_publish_period_ms'),
+                    value_type=float,
                 ),
                 'max_fps': ParameterValue(
                     LaunchConfiguration('max_fps'),
@@ -281,6 +299,8 @@ def generate_launch_description() -> LaunchDescription:
             input_timeout_arg,
             show_windows_arg,
             publish_debug_arg,
+            debug_image_max_side_arg,
+            debug_publish_period_arg,
             fps_arg,
             detector_device_arg,
             color_fallback_device_arg,

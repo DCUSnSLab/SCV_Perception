@@ -19,7 +19,8 @@ SSC 자율주행 스택에서 사용하는 ROS 2 기반 인지 패키지 모음�
 ## Documentation
 
 - [Panorama stitcher guide](panorama_stitcher/README.md)
-- [Traffic light guide](traffic_light/README)
+- [Traffic light guide](traffic_light/README.md)
+- [tl_fusion / black_box execution guide](traffic_light/docs/RUN.md)
 
 ## License
 

@@ -200,7 +200,15 @@ class TLFusionNode(Node):
         self.publish_debug_image = bool(
             self._declare_param('publish_debug_image', True)
         )
+        self.debug_image_max_side_px = int(
+            self._declare_param('debug_image_max_side_px', 640)
+        )
+        self.debug_publish_period_ms = float(
+            self._declare_param('debug_publish_period_ms', 200.0)
+        )
         self.input_timeout_s = float(self._declare_param('input_timeout_s', 3.0))
+        if not math.isfinite(self.debug_publish_period_ms) or self.debug_publish_period_ms < 0.0:
+            raise ValueError('debug_publish_period_ms must be finite and nonnegative')
 
         # max_fps는 처리 타이머의 목표 주기다. 실제 처리율은 추론 시간에도 제한된다.
         # CUDA를 요청해도 사용 불가능하면 helper가 CPU로 전환하므로 시작 로그를 확인한다.
@@ -393,6 +401,7 @@ class TLFusionNode(Node):
         self.processed_frames = 0
         self.last_status_log = time.monotonic()
         self.last_status_frames = 0
+        self.last_debug_render_ns = 0
         self.last_image_stamp_ns: int | None = None
         self.last_timestamp_check_ros_ns: int | None = None
         self._last_error_signature: tuple[str, str] | None = None
@@ -470,8 +479,11 @@ class TLFusionNode(Node):
                 return
             # 프레임 시작에 시각화 수요를 한 번만 확인한다. 창 표시와 ROS 발행은 별개다.
             # 색 분석 내부까지 이 값을 전달해야 보이지 않는 하이라이트 생성도 생략된다.
-            publish_debug_image = self._should_publish_debug()
-            render_debug = self.show_windows or publish_debug_image
+            publish_debug_image = (
+                self.publish_debug_image and self._should_publish_debug()
+            )
+            debug_publish_due = self._debug_render_due(publish_debug_image)
+            render_debug = self.show_windows or debug_publish_due
             frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             stage = 'detect'
             detections, _ = self._detect_candidates(frame)
@@ -528,8 +540,12 @@ class TLFusionNode(Node):
                 self._handle_invalid_input(msg, stamp_reason)
                 return
             self._publish_outputs(
-                msg, detections, debug_image, stable_state, decision,
-                publish_debug_image=publish_debug_image,
+                msg,
+                detections,
+                debug_image,
+                stable_state,
+                decision,
+                publish_debug_image=debug_publish_due,
             )
 
             # latency는 이 콜백의 처리 시간이다. 촬영/전송/DDS 대기를 포함한 지연이 아니다.
@@ -1006,16 +1022,12 @@ class TLFusionNode(Node):
                 'yellow': yellow_mask,
                 'green': green_mask,
             }
-            green_vertical_weights = self._green_vertical_weights(
+            color_vertical_weights = self._color_vertical_weights(
                 signal_mask, enhanced.shape[:2],
             )
             raw_scores = {
                 name: float(
-                    (
-                        weights * green_vertical_weights
-                        if name == 'green'
-                        else weights
-                    )[mask > 0].sum()
+                    (weights * color_vertical_weights)[mask > 0].sum()
                 )
                 for name, mask in masks.items()
             }
@@ -1326,13 +1338,32 @@ class TLFusionNode(Node):
             frame.shape, self.detect_left_ratio, self.detect_right_ratio,
             self.detect_top_ratio, self.detect_bottom_ratio,
         )
-        debug = frame[roi_y0:roi_y1, roi_x0:roi_x1].copy()
+        source_debug = frame[roi_y0:roi_y1, roi_x0:roi_x1]
+        if source_debug.size == 0:
+            return source_debug.copy()
+
+        scale = 1.0
+        max_side = self.debug_image_max_side_px
+        if max_side > 0 and max(source_debug.shape[:2]) > max_side:
+            scale = max_side / float(max(source_debug.shape[:2]))
+            debug = cv2.resize(
+                source_debug,
+                (
+                    max(1, int(round(source_debug.shape[1] * scale))),
+                    max(1, int(round(source_debug.shape[0] * scale))),
+                ),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            debug = source_debug.copy()
         if debug.size == 0:
             return debug
         for overlay in overlay_candidates:
             x_a, y_a, x_b, y_b = overlay.box
-            x_a, x_b = x_a - roi_x0, x_b - roi_x0
-            y_a, y_b = y_a - roi_y0, y_b - roi_y0
+            x_a = int(round((x_a - roi_x0) * scale))
+            x_b = int(round((x_b - roi_x0) * scale))
+            y_a = int(round((y_a - roi_y0) * scale))
+            y_b = int(round((y_b - roi_y0) * scale))
             if x_b <= 0 or y_b <= 0 or x_a >= debug.shape[1] or y_a >= debug.shape[0]:
                 continue
             thickness = 2 if overlay.selected else 1
@@ -1633,6 +1664,19 @@ class TLFusionNode(Node):
             # 구독 수 조회 API가 없는 대체 publisher에서는 기존 표시 호환성을 보존한다.
             return True
 
+    def _debug_render_due(self, publish_debug_image: bool) -> bool:
+        if not publish_debug_image:
+            return False
+        if self.debug_publish_period_ms <= 0.0:
+            return True
+
+        now_ns = time.monotonic_ns()
+        period_ns = int(self.debug_publish_period_ms * 1_000_000.0)
+        if now_ns - self.last_debug_render_ns < period_ns:
+            return False
+        self.last_debug_render_ns = now_ns
+        return True
+
     def _torch_color_measurements(
         self,
         enhanced: np.ndarray,
@@ -1676,8 +1720,8 @@ class TLFusionNode(Node):
             )
             value = max_value * 255.0
             weights = 0.25 + 0.40 * (saturation / 255.0) + 0.35 * (value / 255.0)
-            green_vertical_weights = torch.from_numpy(
-                self._green_vertical_weights(signal_mask, enhanced.shape[:2])
+            color_vertical_weights = torch.from_numpy(
+                self._color_vertical_weights(signal_mask, enhanced.shape[:2])
             ).to(device=weights.device, dtype=weights.dtype)
 
             red_mask = (
@@ -1710,11 +1754,7 @@ class TLFusionNode(Node):
             raw_values = torch.stack([
                 (
                     weights
-                    * (
-                        green_vertical_weights
-                        if name == 'green'
-                        else 1.0
-                    )
+                    * color_vertical_weights
                     * masks_gpu[name].to(dtype=weights.dtype)
                 ).sum()
                 for name in COLOR_ORDER
@@ -1734,14 +1774,14 @@ class TLFusionNode(Node):
         valid_pixels = int(metrics[-1])
         return raw_scores, valid_pixels, masks
 
-    def _green_vertical_weights(
+    def _color_vertical_weights(
         self,
         signal_mask: np.ndarray | None,
         shape: tuple[int, int],
     ) -> np.ndarray:
-        """후보 박스를 상·중·하로 나눠 초록색 점수를 보정한다."""
+        """후보 박스를 상·중·하로 나눠 모든 색상 점수를 보정한다."""
         height = shape[0]
-        weight_rows = self._green_weight_rows(signal_mask, shape)
+        weight_rows = self._color_weight_rows(signal_mask, shape)
         if weight_rows is None:
             return np.ones((height, 1), dtype=np.float32)
 
@@ -1766,7 +1806,7 @@ class TLFusionNode(Node):
         )
         return vertical_weights.astype(np.float32, copy=True)
 
-    def _green_weight_rows(
+    def _color_weight_rows(
         self,
         signal_mask: np.ndarray | None,
         shape: tuple[int, int],
@@ -1860,7 +1900,7 @@ class TLFusionNode(Node):
             blended = cv2.addWeighted(highlighted, 1.0, color, color_strength, 0.0)
             highlighted[mask > 0] = blended[mask > 0]
 
-        weight_rows = self._green_weight_rows(signal_mask, highlighted.shape[:2])
+        weight_rows = self._color_weight_rows(signal_mask, highlighted.shape[:2])
         if weight_rows is not None:
             top_row, bottom_row = weight_rows
             row_span = bottom_row - top_row
@@ -1880,7 +1920,7 @@ class TLFusionNode(Node):
             cv2.putText(
                 highlighted,
                 (
-                    f"green weight {self.fallback_green_top_weight:.2f}"
+                    f"color weight {self.fallback_green_top_weight:.2f}"
                     f" / {self.fallback_green_middle_weight:.2f}"
                     f" / {self.fallback_green_bottom_weight:.2f}"
                 ),

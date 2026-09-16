@@ -4,8 +4,9 @@
 
 대상 파일:
 
-- `src/perception/traffic_light/mando_tools/tl_fusion.py`
-- `src/perception/traffic_light/launch/tl_fusion.launch.py`
+- [노드 코드](../mando_tools/tl_fusion.py)
+- [런치](../launch/tl_fusion.launch.py)
+- [두 노드 실행 명령 및 옵션](RUN.md)
 
 ## 1. 출력 상태
 
@@ -33,7 +34,8 @@ ros2 launch mando_tools tl_fusion.launch.py
 
 `tl_fusion.launch.py`는 bag를 직접 재생하지 않는다. launch의 기본 입력 토픽은 `/panorama/image_raw`이고, `ros2 run`으로 직접 띄우면 `default_runtime_image_topic()`이 정하는 `/mando/input/image`를 사용한다(`MANDO_IMAGE_TOPIC`으로 덮어쓸 수 있다).
 
-install space에서 실행할 때는 노드가 소스 트리를 찾지 못하므로, 기본 `model_path` 해석을 위해 `MANDO_WS`를 지정하거나 `model_path`를 직접 넘긴다.
+다른 워크스페이스에서 실행할 때는 로컬 의존성 탐색을 위해 `MANDO_WS`를 지정하고,
+모델 위치가 기본 경로와 다르면 `model_path`를 직접 넘긴다.
 
 ```bash
 export MANDO_WS=/home/ssc/SSC/src/perception/traffic_light
@@ -71,7 +73,7 @@ export MANDO_WS=/home/ssc/SSC/src/perception/traffic_light
 - `show_windows=true`
 - `publish_debug_image=true`이고 `/tl/debug_image`에 실제 구독자가 존재
 
-컬러 마스크 inset에는 원본 YOLO 후보 박스를 상·중·하 3등분하는 흰색 기준선 2개와 상단→중단→하단 가중치가 표시된다.
+컬러 마스크 inset에는 원본 YOLO 후보 박스를 상·중·하 3등분하는 흰색 기준선 2개와 모든 색상에 적용되는 상단→중단→하단 가중치가 표시된다.
 
 즉 평상시에는 디버그 프레임 전체 복사와 `cv2_to_imgmsg()` 직렬화를 건너뛴다.
 디버그 토픽은 RViz 기본 구독 설정과 호환되도록 Reliable QoS로 발행한다.
@@ -201,7 +203,9 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 
 ## 11. launch에서 바로 조절할 수 있는 주요 인자
 
-`tl_fusion.launch.py`가 기본으로 노출하는 인자는 아래와 같다.
+아래는 주요 노드 파라미터다. 런치에서 노출하는 전체 인자와 기본값은
+[실행 가이드](RUN.md)에 정리했다. `fallback_score_gap`은 `tl_fusion.launch.py`의
+인자가 아니므로 `ros2 run --ros-args -p`로 지정한다.
 
 - `model_path`
 - `image_topic`
@@ -215,6 +219,9 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `detector_retry_gamma` (`1.0`이면 조건부 재시도 비활성화)
 - `model_confidence_threshold`
 - `enable_low_confidence_color_fallback`
+- `debug_image_max_side_px`
+- `debug_publish_period_ms`
+- `publish_debug_image`
 - `fallback_score_threshold`
 - `fallback_green_score_threshold`
 - `fallback_score_gap`
@@ -230,7 +237,7 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `fallback_value_gain`
 - `fallback_gamma`
 
-현재 기본값은 YOLO 입력 크기 `640`, 후보 confidence `0.05`, 일반 색상 score `0.45`, 초록색 score `0.40`, 색상 score gap `0.10`, 모델 신뢰도 `0.75`, 초록색 상·중·하 가중치 `0.20`·`1.30`·`0.20`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다.
+현재 기본값은 YOLO 입력 크기 `640`, 디버그 영상 최대 변 길이 `640`, 디버그 최소 출력 간격 `200ms`, 후보 confidence `0.05`, 일반 색상 score `0.45`, 초록색 score `0.40`, 색상 score gap `0.10`, 모델 신뢰도 `0.75`, 공통 색상 상·중·하 가중치 `0.20`·`1.30`·`0.20`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다. 기존 `fallback_green_*_weight` 파라미터 이름은 호환성을 위해 유지한다.
 색상 보정은 모든 선택 후보에 항상 적용되며, 모델 confidence가 `0.75` 미만이면 색상 fallback이 최종 판단에 더 적극적으로 사용된다.
 
 예시:

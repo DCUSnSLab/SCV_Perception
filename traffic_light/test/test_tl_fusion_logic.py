@@ -161,11 +161,20 @@ def test_image_timeout_publishes_unknown_and_invalid() -> None:
 
 @pytest.mark.parametrize('show_windows', [False, True])
 @pytest.mark.parametrize('subscribers', [0, 1])
+@pytest.mark.parametrize('publish_debug_image', [False, True])
 @pytest.mark.parametrize('candidate_kind', ['absent', 'high_confidence', 'fallback'])
-def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers, candidate_kind):
+def test_frame_debug_demand(
+    fusion_node,
+    monkeypatch,
+    show_windows,
+    subscribers,
+    publish_debug_image,
+    candidate_kind,
+):
     node = fusion_node
     node.state_confirm_ms = 0
     node.show_windows = show_windows
+    node.publish_debug_image = publish_debug_image
     node.debug_pub.subscription_count = subscribers
     node.last_state_change_ns = 0
     frame = np.full((160, 320, 3), (0, 0, 255), dtype=np.uint8)
@@ -194,20 +203,21 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
 
     node._process_latest_frame()
 
-    render_debug = show_windows or subscribers > 0
+    debug_requested = publish_debug_image and subscribers > 0
+    render_debug = show_windows or debug_requested
     has_color_analysis = candidate_kind != 'absent'
-    assert node.debug_pub.subscription_queries == 1
+    assert node.debug_pub.subscription_queries == int(publish_debug_image)
     assert node._build_debug_image.call_count == int(render_debug)
     assert node._highlight_masks.call_count == int(render_debug and has_color_analysis)
     assert node._draw_debug_inset.call_count == int(render_debug and has_color_analysis)
     assert node._analyze_selected_candidate.call_count == 1
-    assert node._numpy_to_image_msg.call_count == int(subscribers > 0)
-    assert len(node.debug_pub.messages) == int(subscribers > 0)
+    assert node._numpy_to_image_msg.call_count == int(debug_requested)
+    assert len(node.debug_pub.messages) == int(debug_requested)
     assert show_image.call_count == int(show_windows)
     assert wait_key.call_count == int(show_windows)
-    if show_windows and subscribers:
+    if show_windows and debug_requested:
         assert show_image.call_args.args[1] is node._numpy_to_image_msg.call_args.args[0]
-    if subscribers:
+    if debug_requested:
         assert node.debug_pub.messages[0].header == message.header
     expected_state = STATE_UNKNOWN if candidate_kind == 'absent' else STATE_RED
     assert [message.data for message in node.state_pub.messages] == [expected_state]
@@ -383,6 +393,7 @@ def test_default_center_roi_reaches_model(fusion_node, monkeypatch, width, heigh
 @pytest.mark.parametrize('width,height', [(1254, 370), (1878, 555), (40, 30)])
 def test_cropped_debug_and_inset_fit(fusion_node, width, height):
     node = fusion_node
+    node.debug_image_max_side_px = 0
     node.detect_left_ratio, node.detect_right_ratio = .25, .75
     node.detect_bottom_ratio = 1.0 / 3.0
     frame = np.zeros((height, width, 3), dtype=np.uint8)
@@ -397,6 +408,19 @@ def test_cropped_debug_and_inset_fit(fusion_node, width, height):
     if height > 30:
         assert debug[25, 5].tolist() == [0, 0, 255]
     assert overlay.box == (left+5, 5, left+25, 30)
+
+
+def test_debug_image_is_downsampled_without_changing_source(fusion_node):
+    node = fusion_node
+    node.debug_image_max_side_px = 100
+    frame = np.zeros((160, 320, 3), dtype=np.uint8)
+    original = frame.copy()
+    analysis = replace(node._empty_analysis('test'), highlighted=None)
+
+    debug = node._build_debug_image(frame, [], None, analysis)
+
+    assert max(debug.shape[:2]) <= 100
+    np.testing.assert_array_equal(frame, original)
 
 
 def test_detection_preserves_crop_offsets(fusion_node):
@@ -416,8 +440,8 @@ def test_detection_preserves_crop_offsets(fusion_node):
     (11, 0, 0, STATE_UNKNOWN),
     (12, 0, 0, STATE_RED),
     (70, 0, 30, STATE_RED),
-    (30, 0, 70, STATE_LEFT_ARROW),
-    (29, 0, 71, STATE_LEFT_ARROW),
+    (30, 0, 70, STATE_GREEN),
+    (29, 0, 71, STATE_GREEN),
     (82, 0, 18, STATE_RED),
     (83, 0, 17, STATE_RED),
     (58, 12, 30, STATE_RED),
@@ -466,27 +490,34 @@ def test_color_analysis_accepts_dim_yellow_green(color_node):
     assert analysis.decisive
 
 
-def test_green_vertical_weights_favor_middle_of_candidate(color_node):
+def test_color_vertical_weights_favor_middle_of_candidate(color_node):
     signal_mask = np.ones((10, 10), dtype=np.uint8) * 255
 
-    weights = color_node._green_vertical_weights(signal_mask, signal_mask.shape)
+    weights = color_node._color_vertical_weights(signal_mask, signal_mask.shape)
 
     assert np.allclose(weights[0], 0.20)
     assert np.allclose(weights[3:6], 1.30)
     assert np.allclose(weights[-1], 0.20)
 
 
-def test_green_vertical_weight_changes_color_score(color_node):
+@pytest.mark.parametrize('edge_pixel, central_pixel, edge_name, central_name', [
+    ((0, 255, 0), (0, 0, 255), 'green', 'red'),
+    ((0, 255, 0), (0, 255, 255), 'green', 'yellow'),
+    ((0, 0, 255), (0, 255, 0), 'red', 'green'),
+])
+def test_color_vertical_weight_favors_middle_for_all_colors(
+    color_node, edge_pixel, central_pixel, edge_name, central_name,
+):
     frame = np.zeros((10, 10, 3), dtype=np.uint8)
-    frame[:5] = (0, 255, 0)
-    frame[5:] = (0, 255, 255)
+    frame[:3] = edge_pixel
+    frame[3:6] = central_pixel
 
     analysis = color_node._analyze_selected_candidate(frame, make_candidate())
 
-    assert analysis.scores['yellow'] > analysis.scores['green']
+    assert analysis.scores[central_name] > analysis.scores[edge_name]
 
 
-def test_green_vertical_weight_matches_torch_score(color_node):
+def test_color_vertical_weight_matches_torch_score(color_node):
     color_node.color_fallback_device = 'cpu'
     color_node._clean_mask = lambda mask: mask
     color_node._torch_clean_mask = lambda mask: mask

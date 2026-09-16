@@ -7,8 +7,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
-from .workspace_paths import default_runtime_image_topic
-from .workspace_paths import local_python_deps_path
+from ..workspace_paths import default_runtime_image_topic
+from ..workspace_paths import local_python_deps_path
 
 deps_path = local_python_deps_path()
 if deps_path is not None and deps_path.exists():

@@ -3,10 +3,10 @@
 
 import sys
 
-from .workspace_paths import local_python_deps_path
-from .workspace_paths import default_runtime_image_topic
-from .workspace_paths import resolve_inference_device
-from .workspace_paths import workspace_root_or_none
+from ..workspace_paths import local_python_deps_path
+from ..workspace_paths import default_runtime_image_topic
+from ..workspace_paths import resolve_inference_device
+from ..workspace_paths import workspace_root_or_none
 
 deps_path = local_python_deps_path()
 if deps_path is not None and deps_path.exists():
