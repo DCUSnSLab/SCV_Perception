@@ -137,9 +137,9 @@ ros2 launch mando_tools tl_roi_hist.launch.py
 
 ### 6.4 현재 디버그 동작
 
-- `/tl/debug_image`는 구독자가 있거나 `show_windows=true`일 때만 생성/발행한다.
-- `show_windows=true`면 OpenCV 디버그 창을 띄운다.
-- 별도 zoom/panel 창 이미지는 현재 publish하지 않는다.
+- `/tl/debug_image`는 `publish_debug_image=true`이고 구독자가 있을 때만 생성하며 RViz 기본 설정과 호환되는 Reliable QoS로 발행한다.
+- `show_windows=true`일 때는 ROS 디버그 발행 설정과 별개로 같은 ROI 영상을 창에 표시한다.
+- 상단 1/3·중앙 1/4 ROI에 검출 박스와 선택 후보의 색상 마스크 inset을 표시한다.
 
 실행:
 

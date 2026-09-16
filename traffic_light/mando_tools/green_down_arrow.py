@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 import sys
 import time
 from collections import deque
@@ -24,509 +25,439 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
 from std_msgs.msg import Float32
+from std_msgs.msg import Int32
 from std_msgs.msg import String
+
+
+GREEN_ARROW = 0
+RED_X = 1
+NAMES = {GREEN_ARROW: 'GREEN_ARROW', RED_X: 'RED_X'}
+COLORS = {GREEN_ARROW: (0, 255, 0), RED_X: (0, 0, 255)}
 
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
 
 
-@dataclass
-class ArrowCandidate:
-    detected: bool
+@dataclass(frozen=True)
+class ColorCandidate:
+    class_id: int
+    center: tuple[float, float]
+    side: float
     score: float
-    reason: str
-    bbox: tuple[int, int, int, int] | None = None
-    contour: np.ndarray | None = None
-    tip_point: tuple[int, int] | None = None
-    area: float = 0.0
+
+
+@dataclass(frozen=True)
+class RigCandidate:
+    boxes: tuple[tuple[int, int, int, int], ...]
+    score: float
+
+
+@dataclass(frozen=True)
+class PanelColor:
+    class_id: int | None
+    red_ratio: float
+    green_ratio: float
+    vivid_green_ratio: float
+    confidence: float
+
+
+def build_color_masks(image: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    red = cv2.inRange(hsv, (0, 70, 65), (15, 255, 255)) | cv2.inRange(
+        hsv, (165, 70, 65), (179, 255, 255)
+    )
+    green = cv2.inRange(hsv, (30, 70, 65), (100, 255, 255))
+    vivid_green = cv2.inRange(hsv, (30, 90, 65), (100, 255, 255))
+    return red, green, vivid_green
+
+
+def _color_candidates(
+    mask: np.ndarray,
+    class_id: int,
+    offset: tuple[int, int],
+    min_pixels: int,
+    max_side_px: int,
+) -> list[ColorCandidate]:
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    connected = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    connected = cv2.dilate(connected, np.ones((3, 3), np.uint8), iterations=1)
+    count, _, stats, _ = cv2.connectedComponentsWithStats(connected, connectivity=8)
+    candidates = []
+    for component in range(1, count):
+        x, y, width, height, area = (int(value) for value in stats[component])
+        side = float(max(width, height))
+        if area < min_pixels or side < 7 or side > max_side_px:
+            continue
+        aspect = width / max(float(height), 1.0)
+        if not 0.32 <= aspect <= 3.2:
+            continue
+        raw_pixels = cv2.countNonZero(mask[y : y + height, x : x + width])
+        if raw_pixels < min_pixels:
+            continue
+        candidates.append(
+            ColorCandidate(
+                class_id=class_id,
+                center=(x + offset[0] + width / 2.0, y + offset[1] + height / 2.0),
+                side=side,
+                score=min(1.0, raw_pixels / max(side * side * 0.20, 1.0)),
+            )
+        )
+    return sorted(candidates, key=lambda candidate: candidate.score, reverse=True)[:24]
+
+
+def find_three_panel_rig(
+    image: np.ndarray,
+    roi: tuple[int, int, int, int],
+    min_pixels: int = 10,
+    max_side_px: int = 180,
+) -> RigCandidate | None:
+    left, top, right, bottom = roi
+    crop = image[top:bottom, left:right]
+    if crop.size == 0:
+        return None
+    red, _, vivid_green = build_color_masks(crop)
+    candidates = _color_candidates(red, RED_X, (left, top), min_pixels, max_side_px)
+    candidates += _color_candidates(
+        vivid_green,
+        GREEN_ARROW,
+        (left, top),
+        min_pixels,
+        max_side_px,
+    )
+
+    best: RigCandidate | None = None
+    for group in itertools.combinations(candidates, 3):
+        ordered = sorted(group, key=lambda candidate: candidate.center[0])
+        classes = [candidate.class_id for candidate in ordered]
+        if classes.count(GREEN_ARROW) != 1 or classes.count(RED_X) != 2:
+            continue
+        if classes[-1] == GREEN_ARROW:
+            continue
+
+        sides = np.array([candidate.side for candidate in ordered], dtype=np.float32)
+        centers_x = np.array([candidate.center[0] for candidate in ordered], dtype=np.float32)
+        centers_y = np.array([candidate.center[1] for candidate in ordered], dtype=np.float32)
+        mean_side = float(sides.mean())
+        gaps = np.diff(centers_x)
+        if centers_x[-1] - centers_x[0] < 100.0:
+            continue
+        if sides.max() / max(float(sides.min()), 1.0) > 2.2:
+            continue
+        if centers_y.max() - centers_y.min() > max(12.0, mean_side * 0.75):
+            continue
+        if not all(mean_side * 1.25 <= gap <= mean_side * 5.2 for gap in gaps):
+            continue
+        if abs(float(gaps[0] - gaps[1])) / max(float(gaps.mean()), 1.0) > 0.28:
+            continue
+
+        alignment = 1.0 - clamp(
+            float(centers_y.max() - centers_y.min()) / max(mean_side * 0.75, 1.0),
+            0.0,
+            1.0,
+        )
+        spacing = 1.0 - clamp(
+            abs(float(gaps[0] - gaps[1])) / max(float(gaps.mean()), 1.0),
+            0.0,
+            1.0,
+        )
+        size_match = 1.0 - clamp(
+            float(sides.max() - sides.min()) / max(mean_side, 1.0),
+            0.0,
+            1.0,
+        )
+        color_strength = float(np.mean([candidate.score for candidate in ordered]))
+        score = 0.32 * alignment + 0.30 * spacing + 0.23 * size_match + 0.15 * color_strength
+        if score < 0.62:
+            continue
+
+        panel_side = max(14, min(int(round(mean_side * 1.28)), max_side_px))
+        boxes = tuple(
+            (
+                round(candidate.center[0] - panel_side / 2),
+                round(candidate.center[1] - panel_side / 2),
+                panel_side,
+                panel_side,
+            )
+            for candidate in ordered
+        )
+        rig = RigCandidate(boxes, score)
+        if best is None or rig.score > best.score:
+            best = rig
+    return best
+
+
+def classify_panel(image: np.ndarray, box: tuple[int, int, int, int]) -> PanelColor:
+    x, y, width, height = box
+    image_height, image_width = image.shape[:2]
+    x1, y1 = max(0, x), max(0, y)
+    x2, y2 = min(image_width, x + width), min(image_height, y + height)
+    crop = image[y1:y2, x1:x2]
+    if crop.size == 0:
+        return PanelColor(None, 0.0, 0.0, 0.0, 0.0)
+
+    red, green, vivid_green = build_color_masks(crop)
+    red_ratio = cv2.countNonZero(red) / red.size
+    green_ratio = cv2.countNonZero(green) / green.size
+    vivid_green_ratio = cv2.countNonZero(vivid_green) / vivid_green.size
+
+    class_id = None
+    confidence = 0.0
+    if red_ratio >= 0.040 and red_ratio >= green_ratio * 1.35:
+        class_id = RED_X
+        confidence = min(1.0, red_ratio / 0.20)
+    elif vivid_green_ratio >= 0.030 and green_ratio >= red_ratio * 1.35:
+        class_id = GREEN_ARROW
+        confidence = min(1.0, vivid_green_ratio / 0.12)
+    return PanelColor(class_id, red_ratio, green_ratio, vivid_green_ratio, confidence)
+
+
+def rigs_are_close(first: RigCandidate, second: RigCandidate) -> bool:
+    first_center = np.mean(
+        [(x + width / 2, y + height / 2) for x, y, width, height in first.boxes],
+        axis=0,
+    )
+    second_center = np.mean(
+        [(x + width / 2, y + height / 2) for x, y, width, height in second.boxes],
+        axis=0,
+    )
+    first_side = float(np.mean([box[2] for box in first.boxes]))
+    second_side = float(np.mean([box[2] for box in second.boxes]))
+    center_distance = float(np.linalg.norm(first_center - second_center))
+    size_ratio = max(first_side, second_side) / max(min(first_side, second_side), 1.0)
+    return center_distance <= max(30.0, first_side * 1.2) and size_ratio <= 1.8
 
 
 class GreenDownArrowNode(Node):
     def __init__(self) -> None:
         super().__init__('green_down_arrow_detector')
-
         self.bridge = CvBridge()
         self.latest_msg: Image | None = None
         self.processing = False
-        self.last_positive_ns: int | None = None
+        self.last_image_ns = time.monotonic_ns()
 
-        self.image_topic = str(self._declare_param('image_topic', default_runtime_image_topic()))
-        self.show_windows = bool(self._declare_param('show_windows', False))
-        self.publish_debug_image = bool(self._declare_param('publish_debug_image', True))
-        self.max_fps = float(self._declare_param('max_fps', 15.0))
-
-        self.roi_top_ratio = float(self._declare_param('roi_top_ratio', 0.00))
-        self.roi_bottom_ratio = float(self._declare_param('roi_bottom_ratio', 0.70))
-        self.roi_left_ratio = float(self._declare_param('roi_left_ratio', 0.00))
-        self.roi_right_ratio = float(self._declare_param('roi_right_ratio', 1.00))
-
-        self.h_min = int(self._declare_param('h_min', 40))
-        self.h_max = int(self._declare_param('h_max', 95))
-        self.s_min = int(self._declare_param('s_min', 90))
-        self.s_max = int(self._declare_param('s_max', 255))
-        self.v_min = int(self._declare_param('v_min', 90))
-        self.v_max = int(self._declare_param('v_max', 255))
-
-        self.morph_open_iterations = int(self._declare_param('morph_open_iterations', 1))
-        self.morph_close_iterations = int(self._declare_param('morph_close_iterations', 2))
-        self.dilate_iterations = int(self._declare_param('dilate_iterations', 1))
-        self.kernel_size = int(self._declare_param('kernel_size', 5))
-
-        self.min_area_px = int(self._declare_param('min_area_px', 120))
-        self.min_side_px = int(self._declare_param('min_side_px', 12))
-        self.min_bbox_fill_ratio = float(self._declare_param('min_bbox_fill_ratio', 0.12))
-        self.max_bbox_fill_ratio = float(self._declare_param('max_bbox_fill_ratio', 0.78))
-        self.min_aspect_ratio = float(self._declare_param('min_aspect_ratio', 0.70))
-        self.max_aspect_ratio = float(self._declare_param('max_aspect_ratio', 1.80))
-        self.min_tip_prominence = float(self._declare_param('min_tip_prominence', 0.12))
-        self.max_tip_center_offset = float(self._declare_param('max_tip_center_offset', 0.45))
-        self.min_bottom_top_width_ratio = float(
-            self._declare_param('min_bottom_top_width_ratio', 1.25)
-        )
-        self.min_template_iou = float(self._declare_param('min_template_iou', 0.28))
-        self.min_shape_score = float(self._declare_param('min_shape_score', 0.30))
-        self.detection_score_threshold = float(
-            self._declare_param('detection_score_threshold', 0.58)
-        )
-
-        self.template_size = int(self._declare_param('template_size', 96))
-        self.majority_window = int(self._declare_param('majority_window', 5))
-        self.required_positive_count = int(self._declare_param('required_positive_count', 3))
-        self.hold_ms = int(self._declare_param('hold_ms', 250))
+        self.image_topic = str(self._param('image_topic', default_runtime_image_topic()))
+        self.show_windows = bool(self._param('show_windows', False))
+        self.publish_debug_image = bool(self._param('publish_debug_image', True))
+        self.max_fps = float(self._param('max_fps', 15.0))
+        self.input_timeout_s = float(self._param('input_timeout_s', 3.0))
+        self.roi_top_ratio = float(self._param('roi_top_ratio', 0.00))
+        self.roi_bottom_ratio = float(self._param('roi_bottom_ratio', 0.38))
+        self.roi_left_ratio = float(self._param('roi_left_ratio', 0.30))
+        self.roi_right_ratio = float(self._param('roi_right_ratio', 0.75))
+        self.min_pixels = int(self._param('min_pixels', 10))
+        self.max_panel_side_px = int(self._param('max_panel_side_px', 180))
+        self.rig_hold_s = float(self._param('rig_hold_s', 1.0))
+        self.majority_window = int(self._param('majority_window', 5))
+        self.required_positive_count = int(self._param('required_positive_count', 2))
 
         self.detected_topic = str(
-            self._declare_param('detected_topic', '/tl/green_down_arrow_detected')
+            self._param('detected_topic', '/tl/green_down_arrow_detected')
         )
-        self.score_topic = str(self._declare_param('score_topic', '/tl/green_down_arrow_score'))
-        self.reason_topic = str(self._declare_param('reason_topic', '/tl/green_down_arrow_reason'))
+        self.score_topic = str(self._param('score_topic', '/tl/green_down_arrow_score'))
+        self.reason_topic = str(self._param('reason_topic', '/tl/green_down_arrow_reason'))
         self.debug_image_topic = str(
-            self._declare_param('debug_image_topic', '/tl/green_down_arrow_debug')
+            self._param('debug_image_topic', '/tl/green_down_arrow_debug')
         )
+        self.red_x_topic = str(self._param('red_x_topic', '/tl/red_x_detected'))
+        self.red_x_count_topic = str(self._param('red_x_count_topic', '/tl/red_x_count'))
 
-        kernel_size = max(3, self.kernel_size)
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-        self.morph_kernel = cv2.getStructuringElement(
-            cv2.MORPH_ELLIPSE,
-            (kernel_size, kernel_size),
-        )
-        self.template_mask, self.template_contour = self._build_down_arrow_template(
-            self.template_size
-        )
-        self.history: deque[int] = deque(maxlen=max(1, self.majority_window))
-
-        self.get_logger().info(f'Subscribing to image topic: {self.image_topic}')
-        self.get_logger().info(
-            'Green down arrow detector uses HSV+shape rules only, without model inference.'
-        )
-
-        self.create_subscription(
-            Image,
-            self.image_topic,
-            self._image_callback,
-            qos_profile_sensor_data,
-        )
+        self.green_history: deque[int] = deque(maxlen=max(1, self.majority_window))
+        self.red_history: deque[int] = deque(maxlen=max(1, self.majority_window))
+        self.rig: RigCandidate | None = None
+        self.pending_rig: RigCandidate | None = None
+        self.pending_rig_count = 0
+        self.rig_misses = 0
 
         status_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         image_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
-        self.detected_pub = self.create_publisher(Bool, self.detected_topic, status_qos)
+        self.green_pub = self.create_publisher(Bool, self.detected_topic, status_qos)
         self.score_pub = self.create_publisher(Float32, self.score_topic, status_qos)
         self.reason_pub = self.create_publisher(String, self.reason_topic, status_qos)
+        self.red_pub = self.create_publisher(Bool, self.red_x_topic, status_qos)
+        self.red_count_pub = self.create_publisher(Int32, self.red_x_count_topic, status_qos)
         self.debug_pub = self.create_publisher(Image, self.debug_image_topic, image_qos)
 
-        timer_period = 1.0 / max(self.max_fps, 0.1)
-        self.create_timer(timer_period, self._process_latest_frame)
+        self.create_subscription(Image, self.image_topic, self._image_callback, qos_profile_sensor_data)
+        self.create_timer(1.0 / max(self.max_fps, 0.1), self._process_latest_frame)
+        self.create_timer(0.5, self._publish_timeout_if_needed)
+        self.get_logger().info(
+            f'Color-only three-panel detector subscribing to {self.image_topic}'
+        )
 
-    def _declare_param(self, name: str, default_value: Any) -> Any:
-        return self.declare_parameter(name, default_value).value
+    def _param(self, name: str, default: Any) -> Any:
+        return self.declare_parameter(name, default).value
 
     def _image_callback(self, msg: Image) -> None:
         self.latest_msg = msg
+        self.last_image_ns = time.monotonic_ns()
+
+    def _roi(self, image: np.ndarray) -> tuple[int, int, int, int]:
+        height, width = image.shape[:2]
+        left = int(clamp(self.roi_left_ratio, 0.0, 1.0) * width)
+        right = int(clamp(self.roi_right_ratio, 0.0, 1.0) * width)
+        top = int(clamp(self.roi_top_ratio, 0.0, 1.0) * height)
+        bottom = int(clamp(self.roi_bottom_ratio, 0.0, 1.0) * height)
+        return left, top, max(left + 1, right), max(top + 1, bottom)
 
     def _process_latest_frame(self) -> None:
         if self.processing or self.latest_msg is None:
             return
-
         msg = self.latest_msg
         self.latest_msg = None
         self.processing = True
-
         try:
-            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            if frame is None or frame.size == 0:
-                self._publish(False, 0.0, 'invalid_frame empty_image')
-                return
+            image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            roi = self._roi(image)
+            acquired = find_three_panel_rig(
+                image,
+                roi,
+                min_pixels=self.min_pixels,
+                max_side_px=self.max_panel_side_px,
+            )
+            if self.rig is None and acquired is not None:
+                if self.pending_rig is not None and rigs_are_close(self.pending_rig, acquired):
+                    self.pending_rig_count += 1
+                else:
+                    self.pending_rig_count = 1
+                self.pending_rig = acquired
+                if self.pending_rig_count >= 2:
+                    self.rig = acquired
+                    self.rig_misses = 0
+            elif self.rig is not None and acquired is not None and rigs_are_close(self.rig, acquired):
+                self.rig = acquired
+                self.rig_misses = 0
+                self.pending_rig = None
+                self.pending_rig_count = 0
+            else:
+                self.rig_misses += 1
+                if self.rig is None and acquired is None:
+                    self.pending_rig = None
+                    self.pending_rig_count = 0
+                if self.rig_misses > max(2, round(self.rig_hold_s * self.max_fps)):
+                    self.rig = None
+                    self.pending_rig = acquired
+                    self.pending_rig_count = int(acquired is not None)
 
-            roi, roi_rect = self._extract_roi(frame)
-            if roi.size == 0:
-                self._publish(False, 0.0, 'invalid_frame empty_roi')
-                return
-
-            green_mask = self._build_green_mask(roi)
-            candidate = self._find_best_candidate(green_mask)
-            stable_detected = self._update_temporal_state(candidate.detected)
-            reason = self._compose_reason(candidate, stable_detected)
-
-            self._publish(stable_detected, candidate.score, reason)
-
+            panels = (
+                [classify_panel(image, box) for box in self.rig.boxes]
+                if self.rig is not None
+                else []
+            )
+            instant_green = any(panel.class_id == GREEN_ARROW for panel in panels)
+            instant_red_count = min(2, sum(panel.class_id == RED_X for panel in panels))
+            self.green_history.append(int(instant_green))
+            self.red_history.append(int(instant_red_count > 0))
+            stable_green = sum(self.green_history) >= self.required_positive_count
+            stable_red = sum(self.red_history) >= self.required_positive_count
+            score = max((panel.confidence for panel in panels), default=0.0)
+            reason = self._reason(acquired, panels, stable_green, stable_red)
+            self._publish(stable_green, stable_red, instant_red_count, score, reason)
             if self.publish_debug_image:
-                debug_image = self._draw_debug(frame, roi_rect, candidate, stable_detected)
-                debug_msg = self.bridge.cv2_to_imgmsg(debug_image, encoding='bgr8')
+                debug = self._draw_debug(image, roi, panels, stable_green, stable_red, reason)
+                debug_msg = self.bridge.cv2_to_imgmsg(debug, encoding='bgr8')
                 debug_msg.header = msg.header
                 self.debug_pub.publish(debug_msg)
-
             if self.show_windows:
-                debug_image = self._draw_debug(frame, roi_rect, candidate, stable_detected)
-                cv2.imshow('green_down_arrow_debug', debug_image)
+                cv2.imshow(
+                    'green_down_arrow_debug',
+                    self._draw_debug(image, roi, panels, stable_green, stable_red, reason),
+                )
                 cv2.waitKey(1)
         finally:
             self.processing = False
 
-    def _extract_roi(self, frame: np.ndarray) -> tuple[np.ndarray, tuple[int, int, int, int]]:
-        height, width = frame.shape[:2]
-        top = int(clamp(self.roi_top_ratio, 0.0, 1.0) * height)
-        bottom = int(clamp(self.roi_bottom_ratio, 0.0, 1.0) * height)
-        left = int(clamp(self.roi_left_ratio, 0.0, 1.0) * width)
-        right = int(clamp(self.roi_right_ratio, 0.0, 1.0) * width)
-
-        top = max(0, min(top, height - 1))
-        bottom = max(top + 1, min(bottom, height))
-        left = max(0, min(left, width - 1))
-        right = max(left + 1, min(right, width))
-
-        return frame[top:bottom, left:right].copy(), (left, top, right, bottom)
-
-    def _build_green_mask(self, roi: np.ndarray) -> np.ndarray:
-        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(
-            hsv,
-            (self.h_min, self.s_min, self.v_min),
-            (self.h_max, self.s_max, self.v_max),
-        )
-
-        if self.morph_open_iterations > 0:
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_OPEN,
-                self.morph_kernel,
-                iterations=self.morph_open_iterations,
-            )
-        if self.morph_close_iterations > 0:
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_CLOSE,
-                self.morph_kernel,
-                iterations=self.morph_close_iterations,
-            )
-        if self.dilate_iterations > 0:
-            mask = cv2.dilate(mask, self.morph_kernel, iterations=self.dilate_iterations)
-
-        return mask
-
-    def _find_best_candidate(self, mask: np.ndarray) -> ArrowCandidate:
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        best_candidate = ArrowCandidate(False, 0.0, 'no_green_blob')
-
-        for contour in contours:
-            area = float(cv2.contourArea(contour))
-            if area < self.min_area_px:
-                continue
-
-            x, y, w, h = cv2.boundingRect(contour)
-            if w < self.min_side_px or h < self.min_side_px:
-                continue
-
-            bbox_area = float(w * h)
-            fill_ratio = area / max(bbox_area, 1.0)
-            if fill_ratio < self.min_bbox_fill_ratio or fill_ratio > self.max_bbox_fill_ratio:
-                continue
-
-            aspect_ratio = h / max(float(w), 1.0)
-            if aspect_ratio < self.min_aspect_ratio or aspect_ratio > self.max_aspect_ratio:
-                continue
-
-            local_mask = np.zeros((h, w), dtype=np.uint8)
-            shifted_contour = contour - np.array([[[x, y]]], dtype=np.int32)
-            cv2.drawContours(local_mask, [shifted_contour], -1, 255, thickness=cv2.FILLED)
-
-            template_iou, shape_score = self._measure_template_similarity(local_mask)
-            if template_iou < self.min_template_iou or shape_score < self.min_shape_score:
-                continue
-
-            tip_prominence, tip_center_offset, bottom_top_width_ratio, shaft_score, tip_point = (
-                self._measure_arrow_geometry(local_mask, shifted_contour)
-            )
-
-            if tip_prominence < self.min_tip_prominence:
-                continue
-            if tip_center_offset > self.max_tip_center_offset:
-                continue
-            if bottom_top_width_ratio < self.min_bottom_top_width_ratio:
-                continue
-
-            tip_score = clamp(
-                (tip_prominence - self.min_tip_prominence) / 0.22,
-                0.0,
-                1.0,
-            )
-            center_score = 1.0 - clamp(
-                tip_center_offset / max(self.max_tip_center_offset, 1e-6),
-                0.0,
-                1.0,
-            )
-            width_ratio_score = clamp(
-                (bottom_top_width_ratio - self.min_bottom_top_width_ratio) / 1.2,
-                0.0,
-                1.0,
-            )
-
-            score = (
-                0.30 * template_iou
-                + 0.25 * shape_score
-                + 0.15 * tip_score
-                + 0.15 * center_score
-                + 0.10 * width_ratio_score
-                + 0.05 * shaft_score
-            )
-
-            reason = (
-                f'score={score:.2f} iou={template_iou:.2f} shape={shape_score:.2f} '
-                f'tip={tip_prominence:.2f} center={tip_center_offset:.2f} '
-                f'width_ratio={bottom_top_width_ratio:.2f}'
-            )
-
-            detected = score >= self.detection_score_threshold
-            candidate = ArrowCandidate(
-                detected=detected,
-                score=score,
-                reason=reason,
-                bbox=(x, y, w, h),
-                contour=contour,
-                tip_point=(x + tip_point[0], y + tip_point[1]),
-                area=area,
-            )
-
-            if candidate.score > best_candidate.score:
-                best_candidate = candidate
-
-        if best_candidate.bbox is None:
-            return best_candidate
-
-        if not best_candidate.detected:
-            best_candidate.reason = f'best_candidate_rejected {best_candidate.reason}'
-        else:
-            best_candidate.reason = f'detected {best_candidate.reason}'
-        return best_candidate
-
-    def _measure_template_similarity(self, mask: np.ndarray) -> tuple[float, float]:
-        resized = cv2.resize(
-            mask,
-            (self.template_size, self.template_size),
-            interpolation=cv2.INTER_NEAREST,
-        )
-        resized_binary = resized > 0
-        template_binary = self.template_mask > 0
-        intersection = np.logical_and(resized_binary, template_binary).sum()
-        union = np.logical_or(resized_binary, template_binary).sum()
-        template_iou = float(intersection / union) if union > 0 else 0.0
-
-        resized_contours, _ = cv2.findContours(
-            resized.astype(np.uint8),
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
-        )
-        if not resized_contours:
-            return template_iou, 0.0
-
-        largest = max(resized_contours, key=cv2.contourArea)
-        match_distance = cv2.matchShapes(
-            largest,
-            self.template_contour,
-            cv2.CONTOURS_MATCH_I1,
-            0.0,
-        )
-        shape_score = 1.0 / (1.0 + 5.0 * float(match_distance))
-        return template_iou, shape_score
-
-    def _measure_arrow_geometry(
+    def _reason(
         self,
-        mask: np.ndarray,
-        contour: np.ndarray,
-    ) -> tuple[float, float, float, float, tuple[int, int]]:
-        moments = cv2.moments(contour)
-        if abs(moments['m00']) < 1e-6:
-            cy = mask.shape[0] / 2.0
-        else:
-            cy = moments['m01'] / moments['m00']
-
-        tip_idx = contour[:, :, 1].argmax()
-        tip_point = tuple(int(v) for v in contour[tip_idx][0])
-
-        height, width = mask.shape[:2]
-        tip_prominence = (tip_point[1] - cy) / max(float(height), 1.0)
-        tip_center_offset = abs(tip_point[0] - (width / 2.0)) / max(width / 2.0, 1.0)
-
-        row_widths = (mask > 0).sum(axis=1).astype(np.float32)
-        top_end = max(1, int(height * 0.45))
-        bottom_start = min(height - 1, int(height * 0.55))
-        top_peak = float(row_widths[:top_end].max()) if top_end > 0 else 0.0
-        bottom_peak = float(row_widths[bottom_start:].max()) if bottom_start < height else 0.0
-        bottom_top_width_ratio = bottom_peak / max(top_peak, 1.0)
-
-        center_band_half = max(1, int(width * 0.10))
-        center_x = width // 2
-        band_left = max(0, center_x - center_band_half)
-        band_right = min(width, center_x + center_band_half + 1)
-        shaft_region = mask[:top_end, band_left:band_right]
-        shaft_score = float((shaft_region > 0).mean()) if shaft_region.size > 0 else 0.0
-
+        acquired: RigCandidate | None,
+        panels: list[PanelColor],
+        green: bool,
+        red: bool,
+    ) -> str:
+        source = 'color_rig' if acquired is not None else ('held_rig' if self.rig is not None else 'no_rig')
+        ratios = ';'.join(
+            f'r={panel.red_ratio:.3f},g={panel.green_ratio:.3f},v={panel.vivid_green_ratio:.3f}'
+            for panel in panels
+        )
         return (
-            float(tip_prominence),
-            float(tip_center_offset),
-            float(bottom_top_width_ratio),
-            float(shaft_score),
-            tip_point,
+            f'green={str(green).lower()} red_x={str(red).lower()} source={source} '
+            f'rig_score={(self.rig.score if self.rig else 0.0):.2f} panels=[{ratios}]'
         )
 
-    def _update_temporal_state(self, instant_detected: bool) -> bool:
-        self.history.append(1 if instant_detected else 0)
-        now_ns = self.get_clock().now().nanoseconds
-        if instant_detected:
-            self.last_positive_ns = now_ns
-
-        stable_by_majority = sum(self.history) >= self.required_positive_count
-        if stable_by_majority:
-            return True
-
-        if self.last_positive_ns is None:
-            return False
-
-        hold_ns = int(self.hold_ms * 1e6)
-        return now_ns - self.last_positive_ns <= hold_ns
-
-    def _compose_reason(self, candidate: ArrowCandidate, stable_detected: bool) -> str:
-        instant = 'true' if candidate.detected else 'false'
-        stable = 'true' if stable_detected else 'false'
-        positives = sum(self.history)
-        return (
-            f'stable={stable} instant={instant} history={positives}/{len(self.history)} '
-            f'{candidate.reason}'
-        )
-
-    def _draw_debug(
+    def _publish(
         self,
-        frame: np.ndarray,
-        roi_rect: tuple[int, int, int, int],
-        candidate: ArrowCandidate,
-        stable_detected: bool,
-    ) -> np.ndarray:
-        debug = frame.copy()
-        left, top, right, bottom = roi_rect
-        cv2.rectangle(debug, (left, top), (right, bottom), (255, 180, 0), 2)
-        cv2.putText(
-            debug,
-            'search ROI',
-            (left + 4, max(18, top - 6)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (255, 180, 0),
-            2,
-            cv2.LINE_AA,
-        )
-
-        status_text = f'DOWN_ARROW: {"ON" if stable_detected else "OFF"} score={candidate.score:.2f}'
-        status_color = (0, 220, 0) if stable_detected else (0, 120, 255)
-        cv2.putText(
-            debug,
-            status_text,
-            (20, 36),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.9,
-            status_color,
-            2,
-            cv2.LINE_AA,
-        )
-
-        if candidate.bbox is not None:
-            x, y, w, h = candidate.bbox
-            global_x = left + x
-            global_y = top + y
-            box_color = (0, 255, 0) if candidate.detected else (0, 165, 255)
-            cv2.rectangle(
-                debug,
-                (global_x, global_y),
-                (global_x + w, global_y + h),
-                box_color,
-                2,
-            )
-
-            if candidate.contour is not None:
-                contour = candidate.contour.copy()
-                contour[:, :, 0] += left
-                contour[:, :, 1] += top
-                cv2.drawContours(debug, [contour], -1, box_color, 2)
-
-            if candidate.tip_point is not None:
-                tip_x = left + candidate.tip_point[0]
-                tip_y = top + candidate.tip_point[1]
-                cv2.circle(debug, (tip_x, tip_y), 5, (0, 0, 255), -1)
-
-            cv2.putText(
-                debug,
-                candidate.reason[:120],
-                (20, 68),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
-                (220, 220, 220),
-                1,
-                cv2.LINE_AA,
-            )
-        else:
-            cv2.putText(
-                debug,
-                candidate.reason,
-                (20, 68),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.52,
-                (220, 220, 220),
-                1,
-                cv2.LINE_AA,
-            )
-
-        return debug
-
-    def _publish(self, detected: bool, score: float, reason: str) -> None:
-        self.detected_pub.publish(Bool(data=bool(detected)))
+        green: bool,
+        red: bool,
+        red_count: int,
+        score: float,
+        reason: str,
+    ) -> None:
+        self.green_pub.publish(Bool(data=green))
+        self.red_pub.publish(Bool(data=red))
+        self.red_count_pub.publish(Int32(data=red_count))
         self.score_pub.publish(Float32(data=float(score)))
         self.reason_pub.publish(String(data=reason))
 
-    def _build_down_arrow_template(self, size: int) -> tuple[np.ndarray, np.ndarray]:
-        mask = np.zeros((size, size), dtype=np.uint8)
-        center_x = size // 2
-        shaft_half = int(size * 0.12)
-        shaft_top = int(size * 0.10)
-        shaft_bottom = int(size * 0.56)
-        head_half = int(size * 0.32)
-        head_top = shaft_bottom
-        head_bottom = int(size * 0.92)
+    def _publish_timeout_if_needed(self) -> None:
+        elapsed_s = (time.monotonic_ns() - self.last_image_ns) / 1e9
+        if elapsed_s <= self.input_timeout_s:
+            return
+        self.rig = None
+        self.pending_rig = None
+        self.pending_rig_count = 0
+        self.green_history.clear()
+        self.red_history.clear()
+        self._publish(False, False, 0, 0.0, f'input_timeout elapsed={elapsed_s:.1f}s')
 
-        points = np.array(
-            [
-                [center_x - shaft_half, shaft_top],
-                [center_x + shaft_half, shaft_top],
-                [center_x + shaft_half, shaft_bottom],
-                [center_x + head_half, head_top],
-                [center_x, head_bottom],
-                [center_x - head_half, head_top],
-                [center_x - shaft_half, shaft_bottom],
-            ],
-            dtype=np.int32,
+    def _draw_debug(
+        self,
+        image: np.ndarray,
+        roi: tuple[int, int, int, int],
+        panels: list[PanelColor],
+        green: bool,
+        red: bool,
+        reason: str,
+    ) -> np.ndarray:
+        debug = image.copy()
+        left, top, right, bottom = roi
+        cv2.rectangle(debug, (left, top), (right, bottom), (255, 180, 0), 2)
+        if self.rig is not None:
+            for box, panel in zip(self.rig.boxes, panels):
+                x, y, width, height = box
+                color = COLORS.get(panel.class_id, (160, 160, 160))
+                name = NAMES.get(panel.class_id, 'UNKNOWN')
+                cv2.rectangle(debug, (x, y), (x + width, y + height), color, 2)
+                cv2.putText(
+                    debug,
+                    name,
+                    (x, max(14, y - 4)),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.45,
+                    color,
+                    1,
+                    cv2.LINE_AA,
+                )
+        cv2.putText(
+            debug,
+            f'ARROW={"ON" if green else "OFF"} RED_X={"ON" if red else "OFF"}',
+            (20, 34),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
         )
-        cv2.fillConvexPoly(mask, points, 255)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        template_contour = max(contours, key=cv2.contourArea)
-        return mask, template_contour
+        cv2.putText(
+            debug,
+            reason[:180],
+            (20, 62),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (230, 230, 230),
+            1,
+            cv2.LINE_AA,
+        )
+        return debug
 
 
 def main(args: list[str] | None = None) -> None:

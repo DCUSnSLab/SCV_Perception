@@ -31,6 +31,7 @@ from typing import Any
 from .workspace_paths import local_python_deps_path
 from .workspace_paths import default_runtime_image_topic
 from .workspace_paths import resolve_inference_device
+from .workspace_paths import workspace_root_or_none
 
 # 외부 라이브러리를 import하기 전에 프로젝트의 .deps를 우선 탐색한다.
 # 전역 Python의 torch와 노드가 실제로 사용하는 torch가 다를 수 있다.
@@ -42,6 +43,7 @@ import cv2
 import numpy as np
 import rclpy
 from cv_bridge import CvBridge
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -87,7 +89,7 @@ STATE_COLORS = {
     STATE_RED: (70, 70, 235),
     STATE_YELLOW: (0, 215, 255),
     STATE_GREEN: (70, 205, 95),
-    STATE_LEFT_ARROW: (80, 220, 220),
+    STATE_LEFT_ARROW: (255, 220, 0),
 }
 
 COLOR_ORDER = ('red', 'yellow', 'green')
@@ -99,8 +101,16 @@ COLOR_TO_STATE = {
 
 
 def default_tl_model_path() -> str:
-    """직접 실행 시 사용할 고정 traffic-light 모델 경로를 반환한다."""
-    return '/home/ki/SSC/src/perception/traffic_light/model/best.pt'
+    """현재 workspace의 traffic-light 가중치를 기본값으로 반환한다."""
+    root = workspace_root_or_none()
+    if root is None:
+        return 'best.pt'
+
+    best = root / 'model' / 'best.pt'
+    if best.exists():
+        return str(best)
+    candidate = root / 'yolo11s.pt'
+    return str(candidate) if candidate.exists() else 'yolo11s.pt'
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -142,7 +152,7 @@ class ColorAnalysisResult:
     top_score: float
     score_gap: float
     scores: dict[str, float]
-    highlighted: np.ndarray | None
+    highlighted: np.ndarray | None = None
 
 
 @dataclass
@@ -187,11 +197,14 @@ class TLFusionNode(Node):
         self.image_topic = str(self._declare_param('image_topic', default_runtime_image_topic()))
         self.state_topic = str(self._declare_param('state_topic', '/tl/state_id'))
         self.show_windows = bool(self._declare_param('show_windows', False))
+        self.publish_debug_image = bool(
+            self._declare_param('publish_debug_image', True)
+        )
         self.input_timeout_s = float(self._declare_param('input_timeout_s', 3.0))
 
         # max_fps는 처리 타이머의 목표 주기다. 실제 처리율은 추론 시간에도 제한된다.
         # CUDA를 요청해도 사용 불가능하면 helper가 CPU로 전환하므로 시작 로그를 확인한다.
-        self.max_fps = float(self._declare_param('max_fps', 15.0))
+        self.max_fps = float(self._declare_param('max_fps', 30.0))
         requested_device = str(self._declare_param('detector_device', 'cuda:0'))
         self.detector_device = resolve_inference_device(requested_device)
         requested_color_device = str(
@@ -206,16 +219,26 @@ class TLFusionNode(Node):
             and self.color_fallback_device.lower().startswith('cuda')
             and torch.cuda.is_available()
         )
-        self.detector_image_size = int(self._declare_param('detector_image_size', 640))
+        self.detector_image_size = int(self._declare_param('detector_image_size', 480))
         self.detector_conf_threshold = float(self._declare_param('detector_conf_threshold', 0.05))
         self.detector_iou_threshold = float(self._declare_param('detector_iou_threshold', 0.45))
         self.detector_max_detections = int(self._declare_param('detector_max_detections', 50))
+        # 원본 검출이 약할 때만 밝게 보정한 같은 ROI를 한 번 더 추론한다.
+        # 1.0이면 재시도를 끈다. 항상 보정하면 정상 프레임의 클래스가 흔들릴 수 있다.
+        self.detector_retry_gamma = float(
+            self._declare_param('detector_retry_gamma', 1.20)
+        )
+        if not math.isfinite(self.detector_retry_gamma) or self.detector_retry_gamma <= 0.0:
+            raise ValueError('detector_retry_gamma must be finite and positive')
+        self.detector_retry_gamma_lut = self._build_gamma_lut(
+            self.detector_retry_gamma
+        )
 
         # detect_*: YOLO에 실제로 전달할 crop 범위. 비율은 원본 영상의 0~1 기준이다.
         self.detect_top_ratio = float(self._declare_param('detect_top_ratio', 0.00))
         self.detect_bottom_ratio = float(self._declare_param('detect_bottom_ratio', 1.0 / 3.0))
-        self.detect_left_ratio = float(self._declare_param('detect_left_ratio', 0.20))
-        self.detect_right_ratio = float(self._declare_param('detect_right_ratio', 0.80))
+        self.detect_left_ratio = float(self._declare_param('detect_left_ratio', 0.375))
+        self.detect_right_ratio = float(self._declare_param('detect_right_ratio', 0.625))
 
         # preferred_*: 대표 후보 선택 시 가산점만 주는 영역. 추론 범위를 줄이지 않는다.
         self.preferred_top_ratio = float(self._declare_param('preferred_top_ratio', 0.00))
@@ -328,6 +351,11 @@ class TLFusionNode(Node):
             f'Inference device: {self.detector_device} (requested: {requested_device})'
         )
         self.get_logger().info(
+            'Detector input: '
+            f'{self.detector_image_size}px; gamma retry={self.detector_retry_gamma:.2f} '
+            f'below confidence {self.model_confidence_threshold:.2f}'
+        )
+        self.get_logger().info(
             'Color fallback backend: '
             f"{'torch_cuda' if self.use_torch_color_fallback else 'opencv_cpu'} "
             f'(device: {self.color_fallback_device})'
@@ -342,6 +370,7 @@ class TLFusionNode(Node):
         # 수신 콜백은 단일 슬롯을 덮어쓴다. 소비한 메시지는 타이머가 슬롯에서 제거한다.
         # DDS 내부 대기열까지 없애는 구조는 아니므로 절대적인 최신 프레임 보장은 아니다.
         self.latest_msg: Image | None = None
+        self.latest_receive_monotonic_ns: int | None = None
         self.latest_msg_lock = Lock()
         self.receive_group = MutuallyExclusiveCallbackGroup()
         self.process_group = MutuallyExclusiveCallbackGroup()
@@ -365,6 +394,7 @@ class TLFusionNode(Node):
         self.last_status_log = time.monotonic()
         self.last_status_frames = 0
         self.last_image_stamp_ns: int | None = None
+        self.last_timestamp_check_ros_ns: int | None = None
         self._last_error_signature: tuple[str, str] | None = None
         self._last_error_log_time = 0.0
         self._last_invalid_input_reason: str | None = None
@@ -379,16 +409,23 @@ class TLFusionNode(Node):
         )
 
         # 출력은 Planner 호환 상태, 검출 시각화, 디버그 영상 세 토픽만 사용한다.
-        image_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
+        detection_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         status_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
-        self.debug_pub = self.create_publisher(Image, '/tl/debug_image', image_qos)
+        self.debug_pub = self.create_publisher(
+            Image, '/tl/debug_image', detection_qos,
+        )
         self.state_pub = self.create_publisher(Int32, self.state_topic, status_qos)
         self.detection_pub = self.create_publisher(
-            Detection2DArray, '/tl/detections', image_qos,
+            Detection2DArray, '/tl/detections', detection_qos,
         )
 
         timer_period = 1.0 / max(self.max_fps, 0.1)
-        self.create_timer(timer_period, self._process_latest_frame, callback_group=self.process_group)
+        self.create_timer(
+            timer_period,
+            self._process_latest_frame,
+            clock=Clock(clock_type=ClockType.STEADY_TIME),
+            callback_group=self.process_group,
+        )
 
     def _declare_param(self, name: str, default_value: Any) -> Any:
         """시작 시 ROS override를 반영한 값을 읽는다. 멤버의 실시간 갱신 기능은 아니다."""
@@ -398,8 +435,10 @@ class TLFusionNode(Node):
 
     def _image_callback(self, msg: Image) -> None:
         """추론 없이 수신 시각과 최신 슬롯만 갱신해 콜백 작업을 짧게 유지한다."""
+        received_ns = time.monotonic_ns()
         with self.latest_msg_lock:
-            self.last_image_received_monotonic_ns = time.monotonic_ns()
+            self.last_image_received_monotonic_ns = received_ns
+            self.latest_receive_monotonic_ns = received_ns
             self.latest_msg = msg
 
     def _process_latest_frame(self) -> None:
@@ -413,7 +452,9 @@ class TLFusionNode(Node):
             return
         with self.latest_msg_lock:
             msg = self.latest_msg
+            received_ns = self.latest_receive_monotonic_ns
             self.latest_msg = None
+            self.latest_receive_monotonic_ns = None
         if msg is None:
             self._publish_timeout_if_needed()
             return
@@ -423,7 +464,7 @@ class TLFusionNode(Node):
         stage = 'decode'
 
         try:
-            stamp_reason = self._validate_input_timestamp(msg)
+            stamp_reason = self._validate_input_timestamp(msg, received_ns)
             if stamp_reason is not None:
                 self._handle_invalid_input(msg, stamp_reason)
                 return
@@ -450,7 +491,7 @@ class TLFusionNode(Node):
             )
             stage = 'decide'
             decision = self._decide_state(selected, analysis)
-            stamp_reason = self._validate_input_timestamp(msg)
+            stamp_reason = self._validate_input_timestamp(msg, received_ns)
             if stamp_reason is not None:
                 self._handle_invalid_input(msg, stamp_reason)
                 return
@@ -482,7 +523,7 @@ class TLFusionNode(Node):
                     analysis,
                 )
             stage = 'publish_outputs'
-            stamp_reason = self._validate_input_timestamp(msg)
+            stamp_reason = self._validate_input_timestamp(msg, received_ns)
             if stamp_reason is not None:
                 self._handle_invalid_input(msg, stamp_reason)
                 return
@@ -549,6 +590,9 @@ class TLFusionNode(Node):
         self.last_state_observation_ns = None
         self.last_candidate_box = None
         self.last_overlay_candidate = None
+        # 카메라/BAG 스트림이 끊겼다가 다시 시작되면 새 timestamp 기준을 받는다.
+        self.last_image_stamp_ns = None
+        self.last_timestamp_check_ros_ns = None
 
         self.state_pub.publish(Int32(data=int(STATE_UNKNOWN)))
         self.detection_pub.publish(self._empty_detection_array())
@@ -594,20 +638,39 @@ class TLFusionNode(Node):
         if should_log_trace:
             self.get_logger().error(traceback.format_exc())
 
-    def _validate_input_timestamp(self, msg: Image) -> str | None:
+    def _validate_input_timestamp(
+        self,
+        msg: Image,
+        received_monotonic_ns: int | None = None,
+    ) -> str | None:
         """입력 시각이 허용되면 None, 거부할 경우 이유 문자열을 반환한다.
 
         ROS 시계 기준 나이, 미래 시각 및 역행을 검사한다.
         추론 전후와 발행 직전에 호출해 처리 도중 만료된 결과도 거부한다.
         """
         stamp_ns = self._stamp_to_ns(msg)
+        now_ns = self._now_ns()
+        # rosbag loop/재재생은 /clock과 image stamp가 함께 뒤로 간다. 이 경우만
+        # 새 스트림으로 간주하고, ROS 시간은 진행 중인데 영상만 역행하면 계속 거부한다.
+        if (
+            self.last_timestamp_check_ros_ns is not None
+            and now_ns < self.last_timestamp_check_ros_ns
+        ):
+            self.last_image_stamp_ns = None
+        self.last_timestamp_check_ros_ns = now_ns
         if (self.require_image_header_stamp or self.max_image_age_ms > 0) and stamp_ns <= 0:
             return 'invalid_image_stamp_zero'
-        age_ms = self._ns_to_ms(self._now_ns() - stamp_ns)
+        age_ms = self._ns_to_ms(now_ns - stamp_ns)
         if self.max_image_age_ms > 0 and age_ms > self.max_image_age_ms:
             return f'invalid_image_stale age_ms={age_ms:.1f}'
         if age_ms < -self.future_stamp_tolerance_ms:
             return f'invalid_image_future age_ms={age_ms:.1f}'
+        if received_monotonic_ns is not None and self.input_timeout_s > 0.0:
+            receive_age_ms = self._ns_to_ms(
+                time.monotonic_ns() - received_monotonic_ns
+            )
+            if receive_age_ms > self.input_timeout_s * 1000.0:
+                return f'invalid_image_receive_stale age_ms={receive_age_ms:.1f}'
         if (
             self.require_monotonic_image_stamp
             and stamp_ns > 0
@@ -625,12 +688,12 @@ class TLFusionNode(Node):
     def _handle_invalid_input(self, msg: Image, reason: str) -> None:
         """잘못된 입력을 UNKNOWN과 빈 검출 배열로 처리한다."""
         now = time.monotonic()
+        reason_code = reason.partition(' ')[0]
         should_log = (
-            reason != self._last_invalid_input_reason
+            reason_code != self._last_invalid_input_reason
             or (now - self._last_invalid_input_log_time) >= 5.0
         )
-        self._last_invalid_input_reason = reason
-        self._last_invalid_input_log_time = now
+        self._last_invalid_input_reason = reason_code
 
         self.current_state = STATE_UNKNOWN
         self.current_source = 'invalid_input'
@@ -644,6 +707,7 @@ class TLFusionNode(Node):
         self.detection_pub.publish(self._empty_detection_array(msg.header))
 
         if should_log:
+            self._last_invalid_input_log_time = now
             header = msg.header
             self.get_logger().error(
                 'Rejecting image frame due to invalid timestamp '
@@ -729,7 +793,30 @@ class TLFusionNode(Node):
             return [], detect_window
 
         detect_frame = frame[y0:y1, x0:x1]
-        result = self.model.predict(
+        result = self._predict_detector(detect_frame)
+        detections = self._parse_detector_result(result, detect_frame.shape, x0, y0)
+
+        best_confidence = max((candidate.conf for candidate in detections), default=0.0)
+        if (
+            abs(self.detector_retry_gamma - 1.0) > 1.0e-6
+            and best_confidence < self.model_confidence_threshold
+        ):
+            corrected_frame = cv2.LUT(detect_frame, self.detector_retry_gamma_lut)
+            retry_result = self._predict_detector(corrected_frame)
+            retry_detections = self._parse_detector_result(
+                retry_result, corrected_frame.shape, x0, y0,
+            )
+            retry_confidence = max(
+                (candidate.conf for candidate in retry_detections), default=0.0,
+            )
+            if retry_confidence > best_confidence:
+                detections = retry_detections
+
+        return detections, detect_window
+
+    def _predict_detector(self, detect_frame: np.ndarray) -> Any:
+        """한 ROI에 YOLO를 실행하고 첫 번째 결과를 반환한다."""
+        return self.model.predict(
             source=detect_frame,
             classes=self.detector_classes,
             conf=self.detector_conf_threshold,
@@ -740,9 +827,17 @@ class TLFusionNode(Node):
             verbose=False,
         )[0]
 
+    def _parse_detector_result(
+        self,
+        result: Any,
+        detect_shape: tuple[int, ...],
+        offset_x: int,
+        offset_y: int,
+    ) -> list[DetectionCandidate]:
+        """YOLO 결과를 필터링하고 원본 영상 좌표의 후보로 변환한다."""
         detections: list[DetectionCandidate] = []
         if result.boxes is None:
-            return detections, detect_window
+            return detections
 
         # GPU 결과를 박스마다 읽으면 작은 전송/동기화가 반복되므로 한 번에 CPU로 옮긴다.
         # 순서와 int 절삭 방식을 유지해야 경계 필터 및 동점 후보 선택이 달라지지 않는다.
@@ -760,8 +855,8 @@ class TLFusionNode(Node):
             if (
                 x_a <= self.edge_margin_px
                 or y_a <= self.edge_margin_px
-                or (detect_frame.shape[1] - x_b) <= self.edge_margin_px
-                or (detect_frame.shape[0] - y_b) <= self.edge_margin_px
+                or (detect_shape[1] - x_b) <= self.edge_margin_px
+                or (detect_shape[0] - y_b) <= self.edge_margin_px
             ):
                 continue
 
@@ -777,7 +872,10 @@ class TLFusionNode(Node):
             model_state, model_resolved = self._state_from_class_name(class_name)
             detections.append(
                 DetectionCandidate(
-                    box=(x_a + x0, y_a + y0, x_b + x0, y_b + y0),
+                    box=(
+                        x_a + offset_x, y_a + offset_y,
+                        x_b + offset_x, y_b + offset_y,
+                    ),
                     conf=float(box.conf[0]) if box.conf is not None else 0.0,
                     class_id=class_id,
                     class_name=class_name,
@@ -786,7 +884,7 @@ class TLFusionNode(Node):
                 )
             )
 
-        return detections, detect_window
+        return detections
 
     def _select_candidate(
         self,
@@ -851,6 +949,8 @@ class TLFusionNode(Node):
 
         crop, signal_mask = self._expanded_crop_and_mask(frame, candidate.box)
         enhanced = self._enhance_crop(crop)
+        if enhanced.size == 0:
+            return self._empty_analysis('empty_candidate_box')
         if signal_mask.shape[:2] != enhanced.shape[:2]:
             signal_mask = cv2.resize(
                 signal_mask,
@@ -994,6 +1094,19 @@ class TLFusionNode(Node):
             highlighted=highlighted,
         )
 
+    @staticmethod
+    def _candidate_color_crop(
+        frame: np.ndarray,
+        box: tuple[int, int, int, int],
+    ) -> np.ndarray:
+        """프레임 경계로 제한한 YOLO 박스 내부 view를 반환한다."""
+        x0, y0, x1, y1 = box
+        x0 = max(0, min(frame.shape[1], x0))
+        x1 = max(0, min(frame.shape[1], x1))
+        y0 = max(0, min(frame.shape[0], y0))
+        y1 = max(0, min(frame.shape[0], y1))
+        return frame[y0:y1, x0:x1]
+
     def _empty_analysis(self, reason: str) -> ColorAnalysisResult:
         """후보 없음/색 분석 생략에 공통으로 쓰는 근거 객체. 빈 표시 영상은 할당하지 않는다."""
         return ColorAnalysisResult(
@@ -1031,6 +1144,23 @@ class TLFusionNode(Node):
                 proposed_state=candidate.model_state,
                 source='model',
                 reason=f'{candidate.class_name}:{candidate.conf:.2f}',
+            )
+
+        # HSV는 녹색 LED의 색은 확인할 수 있지만 원형등과 화살표의 모양은 구분하지
+        # 못한다. 모델이 최소 신뢰도 이상으로 화살표 형태를 본 경우, 같은 녹색이라는
+        # 이유만으로 단순 GREEN으로 낮추지 않는다. 적색/황색 근거는 전환 구간일 수
+        # 있으므로 아래 일반 색상 우선순위가 그대로 처리한다.
+        if (
+            candidate.model_resolved
+            and candidate.model_state == STATE_LEFT_ARROW
+            and candidate.conf >= self.model_min_confidence_threshold
+            and analysis.decisive
+            and analysis.state == STATE_GREEN
+        ):
+            return DecisionResult(
+                proposed_state=STATE_LEFT_ARROW,
+                source='model_low_conf_shape',
+                reason=f'{candidate.class_name}:{candidate.conf:.2f}+color_green',
             )
 
         if analysis.decisive and (
@@ -1168,7 +1298,7 @@ class TLFusionNode(Node):
         """uint8 HxWx3 영상을 ROS Image로 직렬화한다. 색 순서 변환은 하지 않는다.
 
         호출자가 실제 채널 순서에 맞는 encoding을 지정해야 한다. 현재 호출은 bgr8이며
-        원본 header를 보존한다. tobytes()는 복사를 수행하므로 발행할 때만 호출한다.
+        원본 header를 보존한다. CvBridge의 빠른 배열 변환 경로를 사용한다.
         """
         if not isinstance(image, np.ndarray):
             raise TypeError(f'Debug image must be numpy.ndarray, got {type(image).__name__}')
@@ -1178,14 +1308,8 @@ class TLFusionNode(Node):
             raise ValueError(f'Debug image shape must be HxWx3, got {image.shape}')
 
         contiguous = np.ascontiguousarray(image)
-        image_msg = Image()
+        image_msg = self.bridge.cv2_to_imgmsg(contiguous, encoding=encoding)
         image_msg.header = header
-        image_msg.height = int(contiguous.shape[0])
-        image_msg.width = int(contiguous.shape[1])
-        image_msg.encoding = encoding
-        image_msg.is_bigendian = bool(contiguous.dtype.byteorder == '>')
-        image_msg.step = int(contiguous.shape[1] * contiguous.shape[2] * contiguous.dtype.itemsize)
-        image_msg.data = contiguous.tobytes()
         return image_msg
 
     # 화면 표시용 데이터: 판정/추적 입력과 분리한다.
@@ -1501,6 +1625,8 @@ class TLFusionNode(Node):
 
     def _should_publish_debug(self) -> bool:
         """구독자가 있을 때만 이미지 발행을 요청한다. 창 표시 여부는 호출자가 따로 판단한다."""
+        if not self.publish_debug_image:
+            return False
         try:
             return self.debug_pub.get_subscription_count() > 0
         except AttributeError:

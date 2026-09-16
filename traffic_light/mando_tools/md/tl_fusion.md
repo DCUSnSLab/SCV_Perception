@@ -44,8 +44,8 @@
 - `traffic light`와 `etc` 계열은 상태를 직접 해석하지 않는다.
 - `LEFT ARROW`는 `green_arrow`, `left+arrow`, `red+green` 조합으로 해석한다.
 - 종료분기용 `green_arrow(down)`은 주행 신호 상태에서 제외한다.
-- 디버그 영상과 색상 하이라이트는 구독자가 있거나 `show_windows=true`일 때만 만든다.
-- `/tl/debug_image` 메시지 변환과 발행은 구독자가 있을 때만 수행한다. 창만 켜면 화면에만 표시하며, 창과 구독자를 함께 사용할 때는 같은 영상을 재사용한다.
+- 디버그 영상과 색상 하이라이트는 `show_windows=true`이거나, `publish_debug_image=true`이고 구독자가 있을 때만 만든다.
+- `/tl/debug_image`는 RViz 기본 구독 설정과 호환되는 Reliable QoS로 발행한다. 창만 켜면 화면에만 표시하고, 창과 구독자를 함께 사용하면 같은 영상을 재사용한다.
 - 후보가 없으면 색상 inset용 빈 이미지를 만들지 않는다.
 - 검출 박스는 한 번에 CPU로 가져온 뒤 기존 순서와 필터 조건대로 처리한다.
 - 빨강+초록 조합이 확정되면 판정에 사용되지 않는 연결요소 분석을 생략한다. 작은 신호등의 색상 경계 누락을 줄이도록 색상 score 기준은 `0.45`, score gap 기준은 `0.10`을 사용한다.
@@ -53,6 +53,7 @@
 ## 5. launch에서 자주 조절하는 인자
 
 - `image_topic`
+- `publish_debug_image`
 - `max_fps`
 - `color_fallback_device`
 - `fallback_max_side_px`
@@ -87,8 +88,8 @@ ros2 launch mando_tools tl_fusion.launch.py
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ki/SSC/install/setup.bash
-export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
+source /home/ssc/SSC/src/perception/install/setup.bash
+export MANDO_WS=/home/ssc/SSC/src/perception/traffic_light
 PYTHONPATH="$MANDO_WS/.deps${PYTHONPATH:+:$PYTHONPATH}" python3 -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ros2 launch mando_tools tl_fusion.launch.py \\
   detector_device:=cuda:0 \\

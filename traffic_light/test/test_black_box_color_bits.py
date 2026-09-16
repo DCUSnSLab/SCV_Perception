@@ -1,3 +1,5 @@
+import time
+
 import cv2
 import numpy as np
 import pytest
@@ -189,9 +191,13 @@ def test_callback_preserves_debug_header(subscriber_count):
     drawn = []
     fake = SimpleNamespace(
         processing=False, latest_msg=message, bridge=bridge,
+        latest_receive_ns=time.monotonic_ns(), last_valid_receive_ns=None,
+        input_timeout_s=0.5,
         detector=BlackBoxColorDetector(), publish_debug_image=True,
         debug_pub=SimpleNamespace(publish=published.append, get_subscription_count=lambda: subscriber_count),
         _publish_bits=published_bits.append,
+        _fresh=lambda message, received_ns: True,
+        _invalidate=lambda publish=True: None,
     )
     def draw_debug(*args):
         drawn.append(True)

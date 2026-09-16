@@ -3,12 +3,32 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
-DEFAULT_TL_MODEL = '/home/ki/SSC/src/perception/traffic_light/model/best.pt'
+from pathlib import Path
+import os
+
+
+def _default_tl_model() -> str:
+    search_roots = [
+        Path(value).expanduser()
+        for value in (
+            os.environ.get('MANDO_WS'),
+            os.environ.get('MANDO_WORKSPACE'),
+        )
+        if value
+    ]
+    search_roots.append(Path.home() / 'SSC' / 'src' / 'perception' / 'traffic_light')
+    launch_file = Path(__file__).resolve()
+    search_roots.extend([launch_file.parent, *launch_file.parents])
+    for root in search_roots:
+        candidate = root / 'model' / 'best.pt'
+        if candidate.exists() or root.name == 'traffic_light':
+            return str(candidate)
+    return 'best.pt'
 
 def generate_launch_description() -> LaunchDescription:
     parameter_defaults = {
         'detect_top_ratio': 0.0, 'detect_bottom_ratio': 1.0 / 3.0,
-        'detect_left_ratio': 0.20, 'detect_right_ratio': 0.80,
+        'detect_left_ratio': 0.375, 'detect_right_ratio': 0.625,
         'max_image_age_ms': 500.0,
         'future_stamp_tolerance_ms': 50.0,
         'state_confirm_ms': 200.0,
@@ -22,7 +42,7 @@ def generate_launch_description() -> LaunchDescription:
     sim_time_arg = DeclareLaunchArgument('use_sim_time', default_value='false', description='Use the ROS clock published during bag playback.')
     model_arg = DeclareLaunchArgument(
         'model_path',
-        default_value=DEFAULT_TL_MODEL,
+        default_value=_default_tl_model(),
         description='YOLO detector model for traffic-light fusion.',
     )
     image_topic_arg = DeclareLaunchArgument(
@@ -45,9 +65,14 @@ def generate_launch_description() -> LaunchDescription:
         default_value='false',
         description='Show OpenCV debug windows.',
     )
+    publish_debug_arg = DeclareLaunchArgument(
+        'publish_debug_image',
+        default_value='true',
+        description='Publish /tl/debug_image when a subscriber is connected.',
+    )
     fps_arg = DeclareLaunchArgument(
         'max_fps',
-        default_value='15.0',
+        default_value='30.0',
         description='Maximum fusion frames processed per second.',
     )
     detector_device_arg = DeclareLaunchArgument(
@@ -67,8 +92,17 @@ def generate_launch_description() -> LaunchDescription:
     )
     detector_size_arg = DeclareLaunchArgument(
         'detector_image_size',
-        default_value='640',
-        description='Inference image size for YOLO small-object recall.',
+        default_value='480',
+        description='Inference image size for the cropped ROI.',
+    )
+    detector_retry_gamma_arg = DeclareLaunchArgument(
+        'detector_retry_gamma',
+        default_value='1.20',
+        description=(
+            'Gamma used for one retry when raw YOLO confidence is below the '
+            'model confidence threshold. '
+            'Set 1.0 to disable.'
+        ),
     )
     model_conf_arg = DeclareLaunchArgument(
         'model_confidence_threshold',
@@ -157,6 +191,10 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration('show_windows'),
                     value_type=bool,
                 ),
+                'publish_debug_image': ParameterValue(
+                    LaunchConfiguration('publish_debug_image'),
+                    value_type=bool,
+                ),
                 'max_fps': ParameterValue(
                     LaunchConfiguration('max_fps'),
                     value_type=float,
@@ -172,6 +210,10 @@ def generate_launch_description() -> LaunchDescription:
                 'detector_image_size': ParameterValue(
                     LaunchConfiguration('detector_image_size'),
                     value_type=int,
+                ),
+                'detector_retry_gamma': ParameterValue(
+                    LaunchConfiguration('detector_retry_gamma'),
+                    value_type=float,
                 ),
                 'model_confidence_threshold': ParameterValue(
                     LaunchConfiguration('model_confidence_threshold'),
@@ -238,11 +280,13 @@ def generate_launch_description() -> LaunchDescription:
             state_topic_arg,
             input_timeout_arg,
             show_windows_arg,
+            publish_debug_arg,
             fps_arg,
             detector_device_arg,
             color_fallback_device_arg,
             detector_conf_arg,
             detector_size_arg,
+            detector_retry_gamma_arg,
             model_conf_arg,
             low_conf_fallback_arg,
             fallback_score_arg,

@@ -47,8 +47,8 @@ class DetectorConfig:
     # 입력 영상 전체 기준 경계 비율(0~1); 중앙 절반 너비의 상단 1/2만 처리한다.
     roi_top_ratio: float = 0.0
     roi_bottom_ratio: float = 0.50
-    roi_left_ratio: float = 0.35
-    roi_right_ratio: float = 0.65
+    roi_left_ratio: float = 0.25
+    roi_right_ratio: float = 0.75
 
     # close는 같은 색의 틈을 메우고 open은 작은 색 잡음을 제거한다.
     morphology_kernel_size: int = 5

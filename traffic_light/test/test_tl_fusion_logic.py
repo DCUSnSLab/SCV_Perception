@@ -138,6 +138,8 @@ def test_image_timeout_publishes_unknown_and_invalid() -> None:
     node.current_reason = 'vehicular_green'
     node.last_candidate_box = (1, 2, 3, 4)
     node.last_overlay_candidate = object()
+    node.last_image_stamp_ns = 1_000_000_000
+    node.last_timestamp_check_ros_ns = 1_000_000_000
     node.image_topic = '/panorama/image_raw'
     node.state_topic = '/tl/state_id'
     node.state_pub = RecordingPublisher()
@@ -152,6 +154,8 @@ def test_image_timeout_publishes_unknown_and_invalid() -> None:
     assert node.current_state == STATE_UNKNOWN
     assert node.state_pub.messages[-1].data == STATE_UNKNOWN
     assert node.detection_pub.messages[-1].detections == []
+    assert node.last_image_stamp_ns is None
+    assert node.last_timestamp_check_ros_ns is None
     assert len(logger.errors) == 1
 
 
@@ -170,7 +174,11 @@ def test_frame_debug_demand(fusion_node, monkeypatch, show_windows, subscribers,
         candidate = make_candidate(0.9, STATE_RED, 'vehicular_red')
     detections = [] if candidate_kind == 'absent' else [candidate]
     node._detect_candidates = Mock(return_value=(detections, (0, 0, 320, 160)))
-    node.bridge = SimpleNamespace(imgmsg_to_cv2=Mock(return_value=frame))
+    cv2_to_imgmsg = node.bridge.cv2_to_imgmsg
+    node.bridge = SimpleNamespace(
+        imgmsg_to_cv2=Mock(return_value=frame),
+        cv2_to_imgmsg=cv2_to_imgmsg,
+    )
     for method_name in (
         '_highlight_masks', '_build_debug_image', '_numpy_to_image_msg',
         '_analyze_selected_candidate', '_draw_debug_inset',
@@ -267,6 +275,7 @@ def test_absent_candidate_has_no_placeholder_image(fusion_node, monkeypatch, ren
 ])
 @pytest.mark.parametrize('storage', ['torch', 'numpy'])
 def test_detection_bulk_transfer_preserves_filtering(fusion_node, rows, expected_states, storage):
+    fusion_node.detector_retry_gamma = 1.0
     frame = np.zeros((100, 200, 3), dtype=np.uint8)
     data = np.asarray(rows, dtype=np.float32).reshape(-1, 6)
     if storage == 'torch':
@@ -283,7 +292,7 @@ def test_detection_bulk_transfer_preserves_filtering(fusion_node, rows, expected
     assert [candidate.model_state for candidate in detections] == expected_states
     assert all(candidate.box == (15, 12, 40, 45) for candidate in detections)
     arguments = fusion_node.model.predict.call_args.kwargs
-    assert arguments['imgsz'] == 640
+    assert arguments['imgsz'] == 480
     assert arguments['conf'] == 0.05
     assert arguments['iou'] == 0.45
     assert arguments['max_det'] == 50
@@ -301,23 +310,74 @@ def test_detection_without_boxes(fusion_node):
     )
 
 
-@pytest.mark.parametrize('width,height,expected', [(1254, 370, (123, 753)), (1878, 555, (185, 1127))])
+def test_low_confidence_detection_retries_with_gamma(fusion_node):
+    weak = Boxes(
+        np.array([[15, 12, 40, 45, 0.2, 0]], dtype=np.float32), (100, 200),
+    )
+    recovered = Boxes(
+        np.array([[15, 12, 40, 45, 0.7, 0]], dtype=np.float32), (100, 200),
+    )
+    fusion_node.model.predict.side_effect = [
+        [SimpleNamespace(boxes=weak)],
+        [SimpleNamespace(boxes=recovered)],
+    ]
+
+    detections, _ = fusion_node._detect_candidates(
+        np.full((100, 200, 3), 64, dtype=np.uint8),
+    )
+
+    assert len(detections) == 1
+    assert detections[0].conf == pytest.approx(0.7)
+    assert fusion_node.model.predict.call_count == 2
+    retry_source = fusion_node.model.predict.call_args.kwargs['source']
+    assert float(retry_source.mean()) > 64.0
+
+
+def test_confident_detection_skips_gamma_retry(fusion_node):
+    boxes = Boxes(
+        np.array([[15, 12, 40, 45, 0.8, 0]], dtype=np.float32), (100, 200),
+    )
+    fusion_node.model.predict.return_value = [SimpleNamespace(boxes=boxes)]
+
+    detections, _ = fusion_node._detect_candidates(
+        np.full((100, 200, 3), 64, dtype=np.uint8),
+    )
+
+    assert detections[0].conf == pytest.approx(0.8)
+    fusion_node.model.predict.assert_called_once()
+
+
+def test_mid_confidence_detection_retries_with_gamma(fusion_node):
+    weak = Boxes(
+        np.array([[15, 12, 40, 45, 0.45, 0]], dtype=np.float32), (100, 200),
+    )
+    recovered = Boxes(
+        np.array([[15, 12, 40, 45, 0.65, 0]], dtype=np.float32), (100, 200),
+    )
+    fusion_node.model.predict.side_effect = [
+        [SimpleNamespace(boxes=weak)],
+        [SimpleNamespace(boxes=recovered)],
+    ]
+
+    detections, _ = fusion_node._detect_candidates(
+        np.full((100, 200, 3), 64, dtype=np.uint8),
+    )
+
+    assert detections[0].conf == pytest.approx(0.65)
+    assert fusion_node.model.predict.call_count == 2
+
+
+@pytest.mark.parametrize('width,height,expected', [(1254, 370, (123, 313)), (1878, 555, (185, 469))])
 def test_default_center_roi_reaches_model(fusion_node, monkeypatch, width, height, expected):
     monkeypatch.setattr(TLFusionNode, '_declare_param', lambda self, name, default: str(Path(__file__)) if name == 'model_path' else default)
     node = TLFusionNode()
     node.model.predict.return_value = [SimpleNamespace(boxes=None)]
     frame = np.zeros((height, width, 3), dtype=np.uint8)
     _, bounds = node._detect_candidates(frame)
-    source = node.model.predict.call_args.kwargs['source']
+    source = node.model.predict.call_args_list[0].kwargs['source']
     assert source.shape[:2] == expected
     assert np.shares_memory(frame, source)
-    assert bounds == (int(width * .20), 0, int(width * .80), int(height / 3))
-
-
-def test_default_model_path_is_fixed_best_pt():
-    assert tl_fusion.default_tl_model_path() == (
-        '/home/ki/SSC/src/perception/traffic_light/model/best.pt'
-    )
+    assert bounds == (int(width * .375), 0, int(width * .625), int(height / 3))
 
 
 @pytest.mark.parametrize('width,height', [(1254, 370), (1878, 555), (40, 30)])
@@ -459,6 +519,64 @@ def test_color_mask_debug_marks_green_weight_boundaries(color_node):
     assert np.all(analysis.highlighted[6] == (255, 255, 255))
 
 
+def test_color_analysis_ignores_color_outside_detection_box(fusion_node):
+    frame = np.full((100, 100, 3), (0, 255, 255), dtype=np.uint8)
+    frame[40:60, 40:60] = (0, 0, 255)
+    candidate = make_candidate()
+    candidate.box = (40, 40, 60, 60)
+
+    analysis = fusion_node._analyze_selected_candidate(frame, candidate)
+
+    assert analysis.decisive
+    assert analysis.state == STATE_RED
+
+
+def test_green_color_does_not_erase_low_confidence_arrow_shape(fusion_node):
+    candidate = make_candidate(
+        0.45, STATE_LEFT_ARROW, 'vehicular_green_and_green_arrow',
+    )
+    analysis = tl_fusion.ColorAnalysisResult(
+        state=STATE_GREEN,
+        decisive=True,
+        reason='color_green',
+        valid_pixels=20,
+        top_score=1.0,
+        score_gap=1.0,
+        scores={'red': 0.0, 'yellow': 0.0, 'green': 1.0},
+    )
+
+    decision = fusion_node._decide_state(candidate, analysis)
+
+    assert decision.proposed_state == STATE_LEFT_ARROW
+    assert decision.source == 'model_low_conf_shape'
+
+
+def test_red_color_can_override_low_confidence_arrow_at_transition(fusion_node):
+    candidate = make_candidate(
+        0.45, STATE_LEFT_ARROW, 'vehicular_green_and_green_arrow',
+    )
+    analysis = tl_fusion.ColorAnalysisResult(
+        state=STATE_RED,
+        decisive=True,
+        reason='color_red',
+        valid_pixels=20,
+        top_score=1.0,
+        score_gap=1.0,
+        scores={'red': 1.0, 'yellow': 0.0, 'green': 0.0},
+    )
+
+    decision = fusion_node._decide_state(candidate, analysis)
+
+    assert decision.proposed_state == STATE_RED
+    assert decision.source == 'color_fallback'
+
+
+def test_left_arrow_debug_color_is_distinct_from_yellow(fusion_node):
+    assert fusion_node._state_color(STATE_LEFT_ARROW) != fusion_node._state_color(
+        tl_fusion.STATE_YELLOW,
+    )
+
+
 @pytest.mark.parametrize('parameter', [
     'fallback_score_threshold', 'fallback_score_gap',
     'fallback_min_valid_pixels', 'fallback_min_component_pixels',
@@ -530,6 +648,55 @@ def test_frame_age_boundaries(fusion_node, age_ms, reason):
 def test_zero_stamp_rejected_with_age_check(fusion_node):
     fusion_node.require_image_header_stamp = False
     assert fusion_node._validate_input_timestamp(Image()) == 'invalid_image_stamp_zero'
+
+
+def test_received_frame_expires_on_steady_clock(fusion_node, monkeypatch):
+    fusion_node.input_timeout_s = 0.5
+    message = Image()
+    message.header.stamp.sec = 1
+    monkeypatch.setattr(time, 'monotonic_ns', lambda: 1_600_000_000)
+
+    result = fusion_node._validate_input_timestamp(message, 1_000_000_000)
+
+    assert result.startswith('invalid_image_receive_stale')
+
+
+def test_ros_clock_rewind_starts_new_image_timestamp_sequence(fusion_node):
+    first = Image()
+    first.header.stamp.sec = 2
+    fusion_node._now_ns = lambda: 2_100_000_000
+    assert fusion_node._validate_input_timestamp(first) is None
+
+    replayed = Image()
+    replayed.header.stamp.sec = 1
+    fusion_node._now_ns = lambda: 1_100_000_000
+
+    assert fusion_node._validate_input_timestamp(replayed) is None
+
+
+def test_image_stamp_backward_is_rejected_while_ros_clock_advances(fusion_node):
+    first = Image()
+    first.header.stamp.sec = 1
+    first.header.stamp.nanosec = 900_000_000
+    fusion_node._now_ns = lambda: 2_000_000_000
+    assert fusion_node._validate_input_timestamp(first) is None
+
+    older = Image()
+    older.header.stamp.sec = 1
+    older.header.stamp.nanosec = 850_000_000
+    fusion_node._now_ns = lambda: 2_100_000_000
+
+    assert fusion_node._validate_input_timestamp(older).startswith(
+        'invalid_image_stamp_backward'
+    )
+
+
+def test_debug_parameter_disables_subscriber_trigger(fusion_node):
+    fusion_node.publish_debug_image = False
+    fusion_node.debug_pub.subscription_count = 1
+
+    assert fusion_node._should_publish_debug() is False
+    assert fusion_node.debug_pub.subscription_queries == 0
 
 
 @pytest.mark.parametrize('period_ms', [25, 50, 100])

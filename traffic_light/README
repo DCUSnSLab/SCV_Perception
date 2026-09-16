@@ -46,8 +46,8 @@ Python 추론 의존성은 아래 로컬 폴더를 우선 사용한다.
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ki/SSC/install/setup.bash
-/home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh
+source /home/ssc/SSC/src/perception/install/setup.bash
+/home/ssc/SSC/src/perception/traffic_light/run_traffic_light.sh
 ```
 
 파노라마 `/panorama/image_raw`가 기본 입력이므로 옵션 없이 실행한다.
@@ -58,6 +58,13 @@ ros2 launch mando_tools tl_fusion.launch.py
 
 `input_timeout_s` 기본값도 `3.0`초다.
 
+`/tl/debug_image`는 기본적으로 구독자가 있을 때만 만들며 Reliable QoS로
+발행한다. 운행 중 디버그가 필요 없으면 아래처럼 완전히 끌 수 있다.
+
+```bash
+ros2 launch mando_tools tl_fusion.launch.py publish_debug_image:=false
+```
+
 GPU를 사용하지 않을 때:
 
 ```bash
@@ -67,7 +74,7 @@ ros2 launch mando_tools tl_fusion.launch.py detector_device:=cpu
 색상 보정은 선택된 후보마다 항상 수행한다. `enable_low_confidence_color_fallback` 인자는 기존 실행 명령과의 호환을 위해 남아 있지만 색상 분석을 끄지 않는다.
 
 ```bash
-/home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh \\
+/home/ssc/SSC/src/perception/traffic_light/run_traffic_light.sh \\
   detector_device:=cuda:0 \\
   color_fallback_device:=cuda:0 \\
   fallback_max_side_px:=640
@@ -77,6 +84,8 @@ ros2 launch mando_tools tl_fusion.launch.py detector_device:=cpu
 
 - `/tl/state_id`: `0` (`UNKNOWN`)
 - `/tl/detections`: 빈 `Detection2DArray`
+
+입력 끊김 타이머는 ROS 시뮬레이션 시간이 멈춰도 동작하도록 steady clock을 사용한다.
 
 확인:
 
@@ -120,14 +129,14 @@ ros2 launch mando_tools tl_roi_hist.launch.py
 
 이 노드의 상태 출력은 `/tl/roi_hist/state`이며 bag을 자동 재생하지 않는다.
 
-HSV 형상 기반 녹색 아래 화살표 검출도 파노라마가 기본 입력이다.
+HSV 색상 기반 3패널 녹색 아래 화살표·빨간 X 검출도 파노라마가 기본 입력이다.
 
 ```bash
 ros2 launch mando_tools green_down_arrow.launch.py
 ```
 
-대표 출력은 `/tl/green_down_arrow_detected`, `/tl/green_down_arrow_score`,
-`/tl/green_down_arrow_reason`이다.
+대표 출력은 `/tl/green_down_arrow_detected`, `/tl/red_x_detected`,
+`/tl/red_x_count`, `/tl/green_down_arrow_score`, `/tl/green_down_arrow_reason`이다.
 
 YOLO 기반 디스플레이 위치 및 빨강/초록 비트 검출:
 
@@ -159,7 +168,7 @@ ros2 launch mando_tools black_box_color_bits.launch.py publish_debug_image:=true
 `traffic_light` 배치도 검사하므로 SSC 루트에서 일반 colcon 설치본을 실행해도 모델과
 로컬 `.deps` 경로를 찾을 수 있다. `data`·`model` 폴더는 패키지 탐색의 필수 조건이 아니다.
 모델 파일은 Git 및 설치 산출물에 포함하지 않는다. 기본 모델 경로인
-`/home/ki/SSC/src/perception/traffic_light/model/box_best.pt`에 가중치를 준비해야 한다.
+`/home/ssc/SSC/src/perception/traffic_light/model/box_best.pt`에 가중치를 준비해야 한다.
 디버그의 원본 header·토픽·Best Effort QoS는 유지하며 보정된 카메라 영상으로 사용하지 않는다.
 디버그 구독자가 없으면 그리기·메시지 변환·발행을 생략한다. RViz나 구독자를 연결하면
 새 입력 프레임부터 자동으로 재개하며 비트 검출·발행은 구독자 유무와 무관하게 유지한다.
@@ -190,7 +199,7 @@ ros2 launch mando_tools black_box_color_bits.launch.py \
 
 ```bash
 ros2 launch mando_tools play_mando_bag.launch.py \
-  bag_path:=/home/ki/SSC/src/perception/traffic_light/data/bags/2026_mando_test_signal6_20260906_135904_recovered_180s \
+  bag_path:=/home/ssc/SSC/src/perception/traffic_light/data/bags/2026_mando_test_signal6_20260906_135904_recovered_180s \
   image_source_topic:=/panorama/image_raw image_topic:=/panorama/image_raw \
   resize_images:=true output_width:=1254 output_height:=370
 ```
@@ -205,14 +214,14 @@ ros2 launch mando_tools play_mando_bag.launch.py \
 영상이 없는 signal4·5 bag에는 사용할 수 없다.
 
 `model/mando_arrow_best.pt`는 `O/X`, `model/arrow_best.pt`는 8방향 화살표 클래스
-모델이다. 현재 저장소에는 이 두 모델을
-실행하는 ROS 2 노드가 없으므로 X 검출용 실행 명령은 아직 없다.
+모델이다. 현재 `green_down_arrow` 노드는 이 모델을 사용하지 않고 3패널의 HSV 색상으로
+초록 화살표와 빨간 X를 판정한다.
 
 ## 토픽 소유권
 
-`tl_fusion`도 기본적으로 중앙 상단(x=20~80%, y=0~1/3)만 YOLO에 전달하며,
+`tl_fusion`도 기본적으로 중앙 상단 25%(x=37.5~62.5%, y=0~1/3)만 YOLO에 전달하며,
 색상 fallback의 확장 범위 역시 이 ROI 안으로 제한한다. 후보/추적 좌표는 원본 영상 기준이다.
-`/tl/debug_image`와 OpenCV 창은 ROI 크롭만 표시한다(1254×370 → 753×123).
+`/tl/debug_image`와 OpenCV 창은 ROI 크롭만 표시한다(1254×370 → 313×123).
 원본 header와 Reliable QoS는 유지하지만 디버그 픽셀 좌표는 원본과 다르다.
 `tl_fusion.launch.py`, `traffic_light.launch.py`에서 `detect_top_ratio`, `detect_bottom_ratio`,
 `detect_left_ratio`, `detect_right_ratio`를 조절할 수 있다. 전체 화면 복귀는 각각 0, 1, 0, 1이다.
@@ -222,7 +231,7 @@ ros2 launch mando_tools play_mando_bag.launch.py \
   `/tl/debug_image` (ROI 디버그 영상)
 - `yolo_validator`: `/tl/yolo_validator/state` (모델 검증)
 - `tl_roi_hist`: `/tl/roi_hist/state` (색 분석 실험)
-- `green_down_arrow`: `/tl/green_down_arrow_*` (종료분기 표식 실험)
+- `green_down_arrow`: `/tl/green_down_arrow_*`, `/tl/red_x_*` (종료분기 표식)
 
 따라서 여러 검증 노드를 같이 실행해도 Behavior Planner 입력은 `tl_fusion`만 갱신한다.
 
@@ -237,7 +246,7 @@ ros2 launch mando_tools traffic_light.launch.py
 새 터미널에서 ROS 환경 source까지 생략하려면 다음 스크립트 하나만 실행한다.
 
 ```bash
-/home/ki/SSC/src/perception/traffic_light/run_traffic_light.sh
+/home/ssc/SSC/src/perception/traffic_light/run_traffic_light.sh
 ```
 
 이 스크립트가 ROS Humble과 `mando_tools` 환경을 내부에서 source한다.

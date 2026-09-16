@@ -3,13 +3,19 @@ from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
+from pathlib import Path
+
+
+DEFAULT_TL_MODEL = str(
+    Path.home() / 'SSC' / 'src' / 'perception' / 'traffic_light' / 'model' / 'best.pt'
+)
 
 
 def generate_launch_description() -> LaunchDescription:
     image_topic = LaunchConfiguration('image_topic')
     parameter_defaults = {
         'detect_top_ratio': 0.0, 'detect_bottom_ratio': 1.0 / 3.0,
-        'detect_left_ratio': 0.20, 'detect_right_ratio': 0.80,
+        'detect_left_ratio': 0.375, 'detect_right_ratio': 0.625,
         'max_image_age_ms': 500.0,
         'future_stamp_tolerance_ms': 50.0,
         'state_confirm_ms': 200.0,
@@ -43,13 +49,13 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 'detector_image_size',
-                default_value='640',
-                description='YOLO inference size for small-object recall.',
+                default_value='480',
+                description='YOLO inference size for the cropped ROI.',
             ),
             DeclareLaunchArgument(
                 'model_path',
-                default_value='/home/ki/SSC/src/perception/traffic_light/model/best.pt',
-                description='Fixed YOLO traffic-light model.',
+                default_value=DEFAULT_TL_MODEL,
+                description='YOLO traffic-light model in the current user workspace.',
             ),
             DeclareLaunchArgument(
                 'color_fallback_device',

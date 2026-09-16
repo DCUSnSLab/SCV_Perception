@@ -21,7 +21,7 @@
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/ki/SSC/install/setup.bash
+source /home/ssc/SSC/src/perception/install/setup.bash
 ros2 run mando_tools mando_tl_fusion
 ```
 
@@ -36,7 +36,7 @@ ros2 launch mando_tools tl_fusion.launch.py
 install space에서 실행할 때는 노드가 소스 트리를 찾지 못하므로, 기본 `model_path` 해석을 위해 `MANDO_WS`를 지정하거나 `model_path`를 직접 넘긴다.
 
 ```bash
-export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
+export MANDO_WS=/home/ssc/SSC/src/perception/traffic_light
 ```
 
 ## 3. 전체 처리 흐름
@@ -45,13 +45,14 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 2. 타이머가 `max_fps` 주기로 최신 프레임만 처리한다.
 3. detection window 안에서 YOLO 후보를 검출한다.
 4. 후보 중 대표 신호등 하나를 선택한다.
-5. 선택된 후보의 confidence와 무관하게 ROI를 확대하고 색상 보정을 수행한다.
-6. 모델 confidence와 색상 분석 결과의 우선순위를 적용해 상태를 결정한다.
-7. 프레임 단위 상태를 최근 이력으로 안정화한다.
-8. `/tl/state_id`, `/tl/detections`, `/tl/debug_image` 세 토픽만 발행한다.
-9. 입력 영상이 3초 동안 오지 않으면 `UNKNOWN(0)`과 빈 `/tl/detections`를 발행한다.
-10. 디코딩·추론 오류도 즉시 `UNKNOWN(0)`과 빈 `/tl/detections`로 처리한다.
-11. 디버그 이미지가 필요할 때만 `/tl/debug_image`를 생성해 발행한다.
+5. 원본 YOLO confidence가 직접 신뢰 기준 미만이면 같은 ROI를 gamma `1.20`으로 밝게 보정해 한 번 재시도한다.
+6. 선택된 후보의 confidence와 무관하게 확장 crop을 보정하고, 원래 후보 박스 안의 HSV 색을 분석한다.
+7. 모델 confidence와 색상 분석 결과의 우선순위를 적용해 상태를 결정한다.
+8. 프레임 단위 상태를 시간 조건으로 안정화한다.
+9. `/tl/state_id`, `/tl/detections`, `/tl/debug_image` 세 토픽만 발행한다.
+10. 입력 영상이 3초 동안 오지 않으면 `UNKNOWN(0)`과 빈 `/tl/detections`를 발행한다.
+11. 디코딩·추론 오류도 즉시 `UNKNOWN(0)`과 빈 `/tl/detections`로 처리한다.
+12. 디버그 이미지가 필요할 때만 생성하고, 상태별 색상의 박스와 색상 마스크 inset을 표시한다.
 
 ## 4. 입력과 출력
 
@@ -68,11 +69,13 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 디버그 이미지는 아래 조건에서만 생성된다.
 
 - `show_windows=true`
-- `/tl/debug_image`에 실제 구독자가 존재
+- `publish_debug_image=true`이고 `/tl/debug_image`에 실제 구독자가 존재
 
 컬러 마스크 inset에는 원본 YOLO 후보 박스를 상·중·하 3등분하는 흰색 기준선 2개와 상단→중단→하단 가중치가 표시된다.
 
 즉 평상시에는 디버그 프레임 전체 복사와 `cv2_to_imgmsg()` 직렬화를 건너뛴다.
+디버그 토픽은 RViz 기본 구독 설정과 호환되도록 Reliable QoS로 발행한다.
+`/tl/debug_image`에는 상단 1/3·중앙 1/4 ROI, 검출 박스, 상태 문자와 선택 후보의 색상 마스크 inset을 표시한다.
 
 ## 5. YOLO 후보 검출
 
@@ -80,7 +83,7 @@ export MANDO_WS=/home/ki/SSC/src/perception/traffic_light
 
 YOLO는 전체 프레임이 아니라 `detect_left_ratio`, `detect_right_ratio`, `detect_top_ratio`, `detect_bottom_ratio`로 정의되는 영역만 본다.
 
-기본값은 전체 화면이다.
+기본값은 중앙 상단 25%(x=37.5~62.5%, y=0~1/3)다.
 
 ### 5.2 클래스 필터
 
@@ -131,7 +134,7 @@ tracking 유사도는 중심점 거리와 IoU를 함께 사용한다.
 
 대표 후보가 선택되면 모델 confidence와 무관하게 색 분석을 수행한다.
 
-### 8.1 ROI 확장과 보정
+### 8.1 검출 박스 색 분석
 
 - 박스를 `fallback_expand_ratio`와 `fallback_min_margin_px` 기준으로 넓혀 crop하되,
   색상 마스크와 점수는 원래 YOLO 후보 박스 내부로 제한한다.
@@ -203,11 +206,13 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `model_path`
 - `image_topic`
 - `show_windows`
+- `publish_debug_image`
 - `max_fps`
 - `color_fallback_device`
 - `fallback_max_side_px`
 - `detector_conf_threshold`
-- `detector_image_size`
+- `detector_image_size` (기본 `480`; 세 BAG의 고해상도 원본 카메라 판정과 비교해 선택)
+- `detector_retry_gamma` (`1.0`이면 조건부 재시도 비활성화)
 - `model_confidence_threshold`
 - `enable_low_confidence_color_fallback`
 - `fallback_score_threshold`
