@@ -254,7 +254,7 @@ ros2 run mando_tools mando_tl_fusion --ros-args \
 | `detector_device` | `cuda:0` | YOLO 장치: `cuda:0`, `cpu`, `auto` |
 | `color_fallback_device` | `auto` | 색 분석 장치. `auto`는 선택된 YOLO 장치를 따름 |
 | `detector_conf_threshold` | `0.05` | 검출 후보 confidence 하한 |
-| `detector_image_size` | `640` | YOLO 추론 크기 |
+| `detector_image_size` | `960` | YOLO 추론 크기 |
 | `model_confidence_threshold` | `0.75` | 모델 상태를 직접 신뢰하는 confidence 기준 |
 | `show_windows` | `false` | OpenCV 창 표시 |
 | `publish_debug_image` | `false` | `/tl/debug_image` 발행 및 생성 허용 |
@@ -282,12 +282,17 @@ ros2 run mando_tools mando_tl_fusion --ros-args \
 | `enable_low_confidence_color_fallback` | `true` | 호환성 인자; `false`여도 색 분석은 수행 |
 | `fallback_score_threshold` | `0.45` | 일반 색상 정규화 점수 하한 |
 | `fallback_green_score_threshold` | `0.40` | 초록 정규화 점수 하한 |
+| `fallback_red_h_max` | `8.0` | 빨강 hue 0 근처의 상한 |
+| `fallback_red_h_wrap_min` | `170.0` | 빨강 hue 180 근처의 하한 |
+| `fallback_red_v_min` | `85` | 꺼진 주황색을 제외하기 위한 빨강 원본 밝기 하한 |
 | `fallback_green_h_min` | `39.0` | 초록 hue 하한 |
-| `fallback_green_h_max` | `100.0` | 초록 hue 상한 |
+| `fallback_green_h_max` | `90.0` | 초록 hue 상한 |
 | `fallback_green_s_min` | `50` | 초록 saturation 하한 |
 | `fallback_green_v_min` | `68` | 초록 value 하한 |
+| `fallback_green_middle_v_min` | `60` | 중간 1/3 초록 value 하한 |
 | `fallback_green_top_weight` | `0.20` | 후보 박스 상단 1/3 색상 점수 가중치 |
-| `fallback_green_middle_weight` | `1.30` | 중앙 1/3 가중치 |
+| `fallback_green_middle_weight` | `1.50` | 중앙 1/3 가중치 |
+| `fallback_middle_mask_dilate_iterations` | `1` | 중간 1/3 기존 마스크 확장 횟수 |
 | `fallback_green_bottom_weight` | `0.20` | 하단 1/3 가중치 |
 | `fallback_saturation_gain` | `2.20` | 색 분석 전 채도 보정 배율 |
 | `fallback_value_gain` | `1.35` | 밝기 보정 배율 |

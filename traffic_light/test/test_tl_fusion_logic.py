@@ -293,7 +293,7 @@ def test_detection_bulk_transfer_preserves_filtering(fusion_node, rows, expected
     assert [candidate.model_state for candidate in detections] == expected_states
     assert all(candidate.box == (15, 12, 40, 45) for candidate in detections)
     arguments = fusion_node.model.predict.call_args.kwargs
-    assert arguments['imgsz'] == 640
+    assert arguments['imgsz'] == 960
     assert arguments['conf'] == 0.05
     assert arguments['iou'] == 0.45
     assert arguments['max_det'] == 50
@@ -348,6 +348,16 @@ def test_cropped_debug_and_inset_fit(fusion_node, width, height):
     if height > 30:
         assert debug[25, 5].tolist() == [0, 0, 255]
     assert overlay.box == (left+5, 5, left+25, 30)
+
+
+def test_debug_inset_is_aligned_to_left(fusion_node):
+    image = np.zeros((120, 240, 3), dtype=np.uint8)
+    inset = np.full((30, 50, 3), 80, dtype=np.uint8)
+
+    fusion_node._draw_debug_inset(image, inset, 'Color Mask')
+
+    assert image[9, 9].tolist() == [10, 12, 16]
+    assert image[9, 190].tolist() == [0, 0, 0]
 
 
 def test_debug_image_is_downsampled_without_changing_source(fusion_node):
@@ -419,6 +429,80 @@ def test_color_analysis_ignores_color_outside_signal_box(fusion_node):
     assert analysis.state == STATE_GREEN
 
 
+def test_color_analysis_rejects_orange_as_red(fusion_node):
+    node = fusion_node
+    node.use_torch_color_fallback = False
+    node._enhance_crop = lambda crop: crop
+    node._clean_mask = lambda mask: mask
+    orange = np.full((10, 10, 3), (20, 80, 220), dtype=np.uint8)
+
+    analysis = node._analyze_selected_candidate(orange, make_candidate())
+
+    assert analysis.state == STATE_UNKNOWN
+    assert analysis.scores['red'] == 0.0
+
+
+def test_color_analysis_rejects_blue_as_green(color_node):
+    hsv_pixel = np.array([[[95, 220, 180]]], dtype=np.uint8)
+    bgr_pixel = tl_fusion.cv2.cvtColor(hsv_pixel, tl_fusion.cv2.COLOR_HSV2BGR)[0, 0]
+    blue = np.tile(bgr_pixel, (10, 10, 1))
+
+    analysis = color_node._analyze_selected_candidate(blue, make_candidate())
+
+    assert analysis.state == STATE_UNKNOWN
+    assert analysis.scores['green'] == 0.0
+
+
+def test_color_analysis_recovers_dim_green_in_middle_band(color_node):
+    hsv_pixel = np.array([[[60, 180, 60]]], dtype=np.uint8)
+    bgr_pixel = tl_fusion.cv2.cvtColor(hsv_pixel, tl_fusion.cv2.COLOR_HSV2BGR)[0, 0]
+    dim_green = np.tile(bgr_pixel, (10, 10, 1))
+
+    analysis = color_node._analyze_selected_candidate(dim_green, make_candidate())
+
+    assert analysis.state == STATE_GREEN
+    assert analysis.decisive
+
+
+def test_color_analysis_accepts_slightly_shifted_red(color_node):
+    node = color_node
+    node.use_torch_color_fallback = False
+    node._enhance_crop = lambda crop: crop
+    node._clean_mask = lambda mask: mask
+    hsv_pixel = np.array([[[8, 220, 180]]], dtype=np.uint8)
+    bgr_pixel = tl_fusion.cv2.cvtColor(hsv_pixel, tl_fusion.cv2.COLOR_HSV2BGR)[0, 0]
+    shifted_red = np.tile(bgr_pixel, (10, 10, 1))
+
+    analysis = node._analyze_selected_candidate(shifted_red, make_candidate())
+
+    assert analysis.state == STATE_RED
+    assert analysis.decisive
+
+
+def test_color_analysis_accepts_lower_brightness_red(color_node):
+    hsv_pixel = np.array([[[8, 220, 90]]], dtype=np.uint8)
+    bgr_pixel = tl_fusion.cv2.cvtColor(hsv_pixel, tl_fusion.cv2.COLOR_HSV2BGR)[0, 0]
+    dim_red = np.tile(bgr_pixel, (10, 10, 1))
+
+    analysis = color_node._analyze_selected_candidate(dim_red, make_candidate())
+
+    assert analysis.state == STATE_RED
+    assert analysis.decisive
+
+
+def test_color_analysis_rejects_dim_red_orange_as_active_red(fusion_node):
+    node = fusion_node
+    node.use_torch_color_fallback = False
+    node._enhance_crop = lambda crop: crop
+    node._clean_mask = lambda mask: mask
+    dim_orange = np.full((10, 10, 3), (0, 20, 80), dtype=np.uint8)
+
+    analysis = node._analyze_selected_candidate(dim_orange, make_candidate())
+
+    assert analysis.state == STATE_UNKNOWN
+    assert analysis.scores['red'] == 0.0
+
+
 def test_color_analysis_accepts_dim_yellow_green(color_node):
     hsv_pixel = np.array([[[60, 100, 90]]], dtype=np.uint8)
     bgr_pixel = tl_fusion.cv2.cvtColor(hsv_pixel, tl_fusion.cv2.COLOR_HSV2BGR)[0, 0]
@@ -436,8 +520,20 @@ def test_color_vertical_weights_favor_middle_of_candidate(color_node):
     weights = color_node._color_vertical_weights(signal_mask, signal_mask.shape)
 
     assert np.allclose(weights[0], 0.20)
-    assert np.allclose(weights[3:6], 1.30)
+    assert np.allclose(weights[3:6], 1.50)
     assert np.allclose(weights[-1], 0.20)
+
+
+def test_middle_mask_amplification_stays_inside_middle_band(color_node):
+    signal_mask = np.ones((9, 9), dtype=np.uint8) * 255
+    mask = np.zeros((9, 9), dtype=np.uint8)
+    mask[4, 4] = 255
+
+    amplified = color_node._amplify_middle_mask(mask, signal_mask)
+
+    assert np.count_nonzero(amplified) > np.count_nonzero(mask)
+    assert np.count_nonzero(amplified[:3]) == 0
+    assert np.count_nonzero(amplified[6:]) == 0
 
 
 @pytest.mark.parametrize('edge_pixel, central_pixel, edge_name, central_name', [
@@ -467,7 +563,9 @@ def test_color_vertical_weight_matches_torch_score(color_node):
     signal_mask = np.full(frame.shape[:2], 255, dtype=np.uint8)
 
     cpu_analysis = color_node._analyze_selected_candidate(frame, make_candidate())
-    torch_raw_scores, _, _ = color_node._torch_color_measurements(frame, signal_mask)
+    torch_raw_scores, _, _ = color_node._torch_color_measurements(
+        frame, signal_mask, frame,
+    )
     torch_total = sum(torch_raw_scores.values())
     torch_scores = {
         name: score / torch_total for name, score in torch_raw_scores.items()
@@ -501,7 +599,7 @@ def test_color_threshold_boundaries(color_node, parameter, direction):
     boundaries = {
         'fallback_score_threshold': baseline.top_score,
         'fallback_score_gap': baseline.score_gap,
-        'fallback_min_valid_pixels': 100,
+        'fallback_min_valid_pixels': baseline.valid_pixels,
         'fallback_min_component_pixels': 60,
     }
     boundary = boundaries[parameter]

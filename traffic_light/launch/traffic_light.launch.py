@@ -58,7 +58,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 'detector_image_size',
-                default_value='640',
+                default_value='960',
                 description='YOLO inference size for small-object recall.',
             ),
             DeclareLaunchArgument(
@@ -95,7 +95,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 'fallback_green_h_max',
-                default_value='100.0',
+                default_value='90.0',
                 description='Upper HSV hue bound for green fallback pixels.',
             ),
             DeclareLaunchArgument(
@@ -109,6 +109,11 @@ def generate_launch_description() -> LaunchDescription:
                 description='Minimum HSV value for green fallback pixels.',
             ),
             DeclareLaunchArgument(
+                'fallback_green_middle_v_min',
+                default_value='60',
+                description='Minimum HSV value for green pixels in the middle band.',
+            ),
+            DeclareLaunchArgument(
                 'fallback_green_score_threshold',
                 default_value='0.40',
                 description='Normalized score required for a green fallback state.',
@@ -120,8 +125,13 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 'fallback_green_middle_weight',
-                default_value='1.30',
+                default_value='1.50',
                 description='Common color score weight in the middle of the candidate box.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_middle_mask_dilate_iterations',
+                default_value='1',
+                description='Dilation iterations for existing color pixels in the middle band.',
             ),
             DeclareLaunchArgument(
                 'fallback_green_bottom_weight',
@@ -147,6 +157,21 @@ def generate_launch_description() -> LaunchDescription:
                 'fallback_gamma',
                 default_value='1.00',
                 description='Gamma applied before color fallback analysis.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_red_h_max',
+                default_value='8.0',
+                description='Upper HSV hue bound for red near hue zero.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_red_h_wrap_min',
+                default_value='170.0',
+                description='Lower HSV hue bound for red near hue 180.',
+            ),
+            DeclareLaunchArgument(
+                'fallback_red_v_min',
+                default_value='85',
+                description='Minimum red brightness to reject dark orange lamps.',
             ),
             DeclareLaunchArgument(
                 'fallback_max_side_px',
@@ -215,6 +240,10 @@ def generate_launch_description() -> LaunchDescription:
                         'fallback_green_v_min': ParameterValue(
                             LaunchConfiguration('fallback_green_v_min'), value_type=int,
                         ),
+                        'fallback_green_middle_v_min': ParameterValue(
+                            LaunchConfiguration('fallback_green_middle_v_min'),
+                            value_type=int,
+                        ),
                         'fallback_green_score_threshold': ParameterValue(
                             LaunchConfiguration('fallback_green_score_threshold'), value_type=float,
                         ),
@@ -223,6 +252,10 @@ def generate_launch_description() -> LaunchDescription:
                         ),
                         'fallback_green_middle_weight': ParameterValue(
                             LaunchConfiguration('fallback_green_middle_weight'), value_type=float,
+                        ),
+                        'fallback_middle_mask_dilate_iterations': ParameterValue(
+                            LaunchConfiguration('fallback_middle_mask_dilate_iterations'),
+                            value_type=int,
                         ),
                         'fallback_green_bottom_weight': ParameterValue(
                             LaunchConfiguration('fallback_green_bottom_weight'), value_type=float,
@@ -242,6 +275,18 @@ def generate_launch_description() -> LaunchDescription:
                         'fallback_gamma': ParameterValue(
                             LaunchConfiguration('fallback_gamma'),
                             value_type=float,
+                        ),
+                        'fallback_red_h_max': ParameterValue(
+                            LaunchConfiguration('fallback_red_h_max'),
+                            value_type=float,
+                        ),
+                        'fallback_red_h_wrap_min': ParameterValue(
+                            LaunchConfiguration('fallback_red_h_wrap_min'),
+                            value_type=float,
+                        ),
+                        'fallback_red_v_min': ParameterValue(
+                            LaunchConfiguration('fallback_red_v_min'),
+                            value_type=int,
                         ),
                         'fallback_max_side_px': ParameterValue(
                             LaunchConfiguration('fallback_max_side_px'),

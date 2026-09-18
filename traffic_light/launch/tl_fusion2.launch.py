@@ -177,10 +177,10 @@ def generate_launch_description() -> LaunchDescription:
         default_value='640',
         description='Maximum fallback ROI side before color preprocessing resize.',
     )
-    tl_fusion = Node(
+    tl_fusion2 = Node(
         package='mando_tools',
-        executable='mando_tl_fusion',
-        name='tl_fusion',
+        executable='mando_tl_fusion2',
+        name='tl_fusion2',
         output='screen',
         parameters=[
             {
@@ -335,6 +335,6 @@ def generate_launch_description() -> LaunchDescription:
             fallback_red_h_wrap_min_arg,
             fallback_red_v_min_arg,
             fallback_max_side_arg,
-            tl_fusion,
+            tl_fusion2,
         ]
     )

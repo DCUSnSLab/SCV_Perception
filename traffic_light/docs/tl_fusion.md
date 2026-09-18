@@ -152,12 +152,19 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `fallback_score_threshold`
 - `fallback_green_score_threshold`
 - `fallback_score_gap`
+- `fallback_red_h_max`
+- `fallback_red_h_wrap_min`
+- `fallback_red_v_min`
 - `fallback_min_component_pixels`
 
 초록색은 녹색 신호의 색 바램·저조도 편차를 흡수하기 위해 별도 범위를 사용한다.
-기본값은 HSV H `39~100`, S `50` 이상, V `68` 이상, score `0.40`이다.
-후보 박스 내부에서 초록색 score는 위쪽 `0.70`에서 아래쪽 `1.30`까지 세로로 선형 보정한다.
-빨강·노랑 기준과 score gap `0.10`은 변경하지 않아 녹색처럼 보이는 배경의 확정을 제한한다.
+기본값은 HSV H `39~90`, S `50` 이상, V `68` 이상, score `0.40`이다. 중간 1/3은 V `60`까지 허용한다.
+후보 박스 내부의 모든 색상 score에 상·중·하 가중치 `0.20`·`1.50`·`0.20`을 적용한다.
+중간 1/3에서는 기존 색상 마스크 픽셀을 3x3 커널로 1회 확장해 작은 끊김을 보완한다.
+Hue/S/V 임계값을 낮추는 방식이 아니므로 배경색을 새로 색상 픽셀로 만들지는 않는다.
+빨강은 원본 crop의 hue를 사용해 보정 과정에서 생기는 주황색 이동을 차단한다. H `0~8`
+또는 `170~179`, S `55` 이상, 원본 V `85` 이상이며, 보정 영상의 V도 `70` 이상이어야 한다.
+따라서 꺼진 주황색 램프가 빨강으로 확정되는 것을 제한한다. score gap은 `0.10`이다.
 
 `LEFT ARROW` 색 규칙은 아래 조건을 동시에 볼 때 사용한다.
 
@@ -220,19 +227,24 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `fallback_score_threshold`
 - `fallback_green_score_threshold`
 - `fallback_score_gap`
+- `fallback_red_h_max`
+- `fallback_red_h_wrap_min`
+- `fallback_red_v_min`
 - `fallback_green_h_min`
 - `fallback_green_h_max`
 - `fallback_green_s_min`
 - `fallback_green_v_min`
+- `fallback_green_middle_v_min`
 - `fallback_green_top_weight`
 - `fallback_green_middle_weight`
+- `fallback_middle_mask_dilate_iterations`
 - `fallback_green_bottom_weight`
 - `uncertain_hold_ms`
 - `fallback_saturation_gain`
 - `fallback_value_gain`
 - `fallback_gamma`
 
-현재 기본값은 YOLO 입력 크기 `640`, 디버그 영상 최대 변 길이 `640`, 디버그 최소 출력 간격 `200ms`, 후보 confidence `0.05`, 일반 색상 score `0.45`, 초록색 score `0.40`, 색상 score gap `0.10`, 모델 신뢰도 `0.75`, 공통 색상 상·중·하 가중치 `0.20`·`1.30`·`0.20`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다. 기존 `fallback_green_*_weight` 파라미터 이름은 호환성을 위해 유지한다.
+현재 기본값은 YOLO 입력 크기 `960`, 디버그 영상 최대 변 길이 `640`, 디버그 최소 출력 간격 `200ms`, 후보 confidence `0.05`, 일반 색상 score `0.45`, 초록색 score `0.40`, 색상 score gap `0.10`, 빨강 H `0~8`/`170~179`, 빨강 최소 V `85`, 모델 신뢰도 `0.75`, 공통 색상 상·중·하 가중치 `0.20`·`1.50`·`0.20`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다. 기존 `fallback_green_*_weight` 파라미터 이름은 호환성을 위해 유지한다.
 색상 보정은 모든 선택 후보에 항상 적용되며, 모델 confidence가 `0.75` 미만이면 색상 fallback이 최종 판단에 더 적극적으로 사용된다.
 
 예시:

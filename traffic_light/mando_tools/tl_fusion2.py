@@ -174,7 +174,7 @@ class TLFusionNode(Node):
 
     def __init__(self) -> None:
         """파라미터, 재사용 연산 객체, 모델, ROS 통신과 타이머를 순서대로 준비한다."""
-        super().__init__('tl_fusion')
+        super().__init__('tl_fusion2')
 
         # 프레임마다 만들 필요가 없는 영상 변환 객체와 형태학 커널을 재사용한다.
         self.bridge = CvBridge()
@@ -2142,7 +2142,7 @@ class TLFusionNode(Node):
 
 
 def main(args: list[str] | None = None) -> None:
-    """mando_tl_fusion 진입점. 생성된 노드를 spin하고 종료 시 ROS/OpenCV 자원을 정리한다."""
+    """mando_tl_fusion2 진입점. 생성된 노드를 spin하고 종료 시 ROS/OpenCV 자원을 정리한다."""
     rclpy.init(args=args)
     node = TLFusionNode()
     executor = MultiThreadedExecutor(num_threads=2)
