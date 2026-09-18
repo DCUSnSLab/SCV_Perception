@@ -203,6 +203,11 @@ class TLFusionNode(Node):
         self.debug_image_max_side_px = int(
             self._declare_param('debug_image_max_side_px', 640)
         )
+        # 표시 전용. false면 디버그 영상 우상단의 'Color Mask' 인셋(보정 crop + 색 마스크
+        # 하이라이트)을 그리지 않는다. 색 분석과 판정은 그대로 수행한다.
+        self.show_color_mask_inset = bool(
+            self._declare_param('show_color_mask_inset', True)
+        )
         self.debug_publish_period_ms = float(
             self._declare_param('debug_publish_period_ms', 200.0)
         )
@@ -269,6 +274,9 @@ class TLFusionNode(Node):
         self.enable_low_confidence_color_fallback = bool(
             self._declare_param('enable_low_confidence_color_fallback', True)
         )
+        # true면 색상 분석을 건너뛰고 YOLO 클래스만으로 판정한다(model / model_low_conf /
+        # model_weak 경로). 해석 불가 클래스(etc 등)나 후보 없음은 UNKNOWN이 된다.
+        self.model_only = bool(self._declare_param('model_only', False))
 
         # 색상 fallback: 박스 주변 확장 -> 명암/채도 보정 -> 후보 박스 내부 HSV 마스크 분석.
         # S/V는 OpenCV uint8의 0~255 범위이며, 픽셀 수 기준은 보정된 ROI에 적용된다.
@@ -363,6 +371,10 @@ class TLFusionNode(Node):
             f'{self.detector_image_size}px; gamma retry={self.detector_retry_gamma:.2f} '
             f'below confidence {self.model_confidence_threshold:.2f}'
         )
+        if self.model_only:
+            self.get_logger().warning(
+                'model_only=true: color analysis disabled; state comes from YOLO classes only.'
+            )
         self.get_logger().info(
             'Color fallback backend: '
             f"{'torch_cuda' if self.use_torch_color_fallback else 'opencv_cpu'} "
@@ -498,9 +510,12 @@ class TLFusionNode(Node):
             # 후보가 있든 없든 같은 경로를 사용한다. 후보가 있으면 confidence와 무관하게
             # 색 보정을 수행하고, 최종 상태의 우선순위만 _decide_state()가 결정한다.
             stage = 'analyze'
-            analysis = self._analyze_selected_candidate(
-                frame, selected, render_debug=render_debug,
-            )
+            if self.model_only:
+                analysis = self._empty_analysis('model_only')
+            else:
+                analysis = self._analyze_selected_candidate(
+                    frame, selected, render_debug=render_debug,
+                )
             stage = 'decide'
             decision = self._decide_state(selected, analysis)
             stamp_reason = self._validate_input_timestamp(msg, received_ns)
@@ -1092,7 +1107,7 @@ class TLFusionNode(Node):
 
         highlighted = (
             self._highlight_masks(enhanced, masks, scores, signal_mask)
-            if render_debug
+            if render_debug and self.show_color_mask_inset
             else None
         )
         return ColorAnalysisResult(
@@ -1369,7 +1384,12 @@ class TLFusionNode(Node):
             thickness = 2 if overlay.selected else 1
             cv2.rectangle(debug, (x_a, y_a), (x_b, y_b), overlay.color, thickness)
             self._draw_box_label(debug, overlay.label, x_a, y_a, overlay.color)
-        if selected is not None and analysis.highlighted is not None and analysis.highlighted.size > 0:
+        if (
+            self.show_color_mask_inset
+            and selected is not None
+            and analysis.highlighted is not None
+            and analysis.highlighted.size > 0
+        ):
             inset_width = min(200, debug.shape[1] - 24)
             inset_height = min(120, debug.shape[0] - 42)
             if inset_width > 0 and inset_height > 0:

@@ -260,6 +260,31 @@ def test_color_analysis_remains_enabled_when_legacy_switch_is_false(fusion_node)
     node._log_processing_error.assert_not_called()
 
 
+def test_model_only_skips_color_analysis_and_uses_model_state(fusion_node):
+    node = fusion_node
+    node.model_only = True
+    node.show_windows = False
+    node.debug_pub.subscription_count = 0
+    node.last_state_change_ns = 0
+    frame = np.zeros((160, 320, 3), dtype=np.uint8)
+    candidate = make_candidate(0.4, STATE_RED, 'vehicular_red')
+    node._detect_candidates = Mock(return_value=([candidate], (0, 0, 320, 160)))
+    node._analyze_selected_candidate = Mock()
+    node.bridge = SimpleNamespace(imgmsg_to_cv2=Mock(return_value=frame))
+    node._publish_outputs = Mock()
+    message = Image()
+    message.header.stamp.sec = 1
+    node.latest_msg = message
+
+    node._process_latest_frame()
+
+    node._analyze_selected_candidate.assert_not_called()
+    decision = node._publish_outputs.call_args.args[4]
+    assert decision.source == 'model_low_conf'
+    assert decision.proposed_state == STATE_RED
+    node._log_processing_error.assert_not_called()
+
+
 @pytest.mark.parametrize('render_debug', [False, True])
 def test_absent_candidate_has_no_placeholder_image(fusion_node, monkeypatch, render_debug):
     draw_text = Mock()

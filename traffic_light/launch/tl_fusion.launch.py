@@ -75,6 +75,11 @@ def generate_launch_description() -> LaunchDescription:
         default_value='640',
         description='Maximum side length of the debug image; 0 keeps the source size.',
     )
+    show_color_mask_inset_arg = DeclareLaunchArgument(
+        'show_color_mask_inset',
+        default_value='true',
+        description='Draw the Color Mask inset on the debug image. Display only; set false to hide it.',
+    )
     debug_publish_period_arg = DeclareLaunchArgument(
         'debug_publish_period_ms',
         default_value='200.0',
@@ -125,6 +130,11 @@ def generate_launch_description() -> LaunchDescription:
         description=(
             'Legacy compatibility parameter. Color analysis is always enabled.'
         ),
+    )
+    model_only_arg = DeclareLaunchArgument(
+        'model_only',
+        default_value='false',
+        description='Use YOLO classes only; skip HSV color analysis entirely.',
     )
     fallback_score_arg = DeclareLaunchArgument(
         'fallback_score_threshold',
@@ -208,6 +218,14 @@ def generate_launch_description() -> LaunchDescription:
                 'debug_image_max_side_px': ParameterValue(
                     LaunchConfiguration('debug_image_max_side_px'),
                     value_type=int,
+                ),
+                'show_color_mask_inset': ParameterValue(
+                    LaunchConfiguration('show_color_mask_inset'),
+                    value_type=bool,
+                ),
+                'model_only': ParameterValue(
+                    LaunchConfiguration('model_only'),
+                    value_type=bool,
                 ),
                 'debug_publish_period_ms': ParameterValue(
                     LaunchConfiguration('debug_publish_period_ms'),
@@ -300,6 +318,8 @@ def generate_launch_description() -> LaunchDescription:
             show_windows_arg,
             publish_debug_arg,
             debug_image_max_side_arg,
+            show_color_mask_inset_arg,
+            model_only_arg,
             debug_publish_period_arg,
             fps_arg,
             detector_device_arg,
