@@ -82,7 +82,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     detector_size_arg = DeclareLaunchArgument(
         'detector_image_size',
-        default_value='960',
+        default_value='1280',
         description='Inference image size for YOLO small-object recall.',
     )
     model_conf_arg = DeclareLaunchArgument(

@@ -254,7 +254,7 @@ ros2 run mando_tools mando_tl_fusion --ros-args \
 | `detector_device` | `cuda:0` | YOLO 장치: `cuda:0`, `cpu`, `auto` |
 | `color_fallback_device` | `auto` | 색 분석 장치. `auto`는 선택된 YOLO 장치를 따름 |
 | `detector_conf_threshold` | `0.05` | 검출 후보 confidence 하한 |
-| `detector_image_size` | `960` | YOLO 추론 크기 |
+| `detector_image_size` | `1280` | YOLO 추론 크기 |
 | `model_confidence_threshold` | `0.75` | 모델 상태를 직접 신뢰하는 confidence 기준 |
 | `show_windows` | `false` | OpenCV 창 표시 |
 | `publish_debug_image` | `false` | `/tl/debug_image` 발행 및 생성 허용 |

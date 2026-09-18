@@ -217,7 +217,7 @@ class TLFusionNode(Node):
             and self.color_fallback_device.lower().startswith('cuda')
             and torch.cuda.is_available()
         )
-        self.detector_image_size = int(self._declare_param('detector_image_size', 960))
+        self.detector_image_size = int(self._declare_param('detector_image_size', 1280))
         self.detector_conf_threshold = float(self._declare_param('detector_conf_threshold', 0.05))
         self.detector_iou_threshold = float(self._declare_param('detector_iou_threshold', 0.45))
         self.detector_max_detections = int(self._declare_param('detector_max_detections', 50))
