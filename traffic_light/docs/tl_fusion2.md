@@ -12,7 +12,7 @@ source /home/ki/SSC/install/setup.bash
 ros2 launch mando_tools tl_fusion2.launch.py \
   use_sim_time:=true \
   publish_debug_image:=true \
-  detector_image_size:=1280
+  detector_image_size:=960
 ```
 
 실행 파일은 `mando_tl_fusion2`, 노드 이름은 `/tl_fusion2`다.

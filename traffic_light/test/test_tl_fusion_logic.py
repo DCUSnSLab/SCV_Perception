@@ -293,7 +293,7 @@ def test_detection_bulk_transfer_preserves_filtering(fusion_node, rows, expected
     assert [candidate.model_state for candidate in detections] == expected_states
     assert all(candidate.box == (15, 12, 40, 45) for candidate in detections)
     arguments = fusion_node.model.predict.call_args.kwargs
-    assert arguments['imgsz'] == 1280
+    assert arguments['imgsz'] == 960
     assert arguments['conf'] == 0.05
     assert arguments['iou'] == 0.45
     assert arguments['max_det'] == 50
