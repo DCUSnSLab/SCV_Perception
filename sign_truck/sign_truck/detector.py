@@ -11,6 +11,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from std_msgs.msg import Int32, String
+from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithPose
 import torch
 from ultralytics import YOLO
 
@@ -75,6 +76,8 @@ class SignTruckDetector(Node):
         self.right_state_pub = self.create_publisher(String, '/sign_truck/right_lane_state', 10)
         self.current_state_pub = self.create_publisher(String, '/sign_truck/current_lane_state', 10)
         self.debug_pub = self.create_publisher(String, '/sign_truck/debug', 10)
+        self.observations_pub = self.create_publisher(
+            Detection2DArray, '/sign_truck/observations', 10)
         self.create_subscription(Image, self.image_topic, self.image_callback, qos_profile_sensor_data)
         self.create_subscription(Int32, '/sign_truck/current_lane', self.current_lane_callback, 10)
 
@@ -123,6 +126,10 @@ class SignTruckDetector(Node):
                 lane_detections.append(((bx0 + bx1) / 2.0, name, float(confidence)))
                 visual_detections.append((bx0, by0, bx1, by1, name, float(confidence)))
 
+        # Publish only this frame's detections, including empty/partial frames.
+        # The behavior layer owns three-panel validation and temporal voting.
+        self.observations_pub.publish(self.make_observations(msg.header, visual_detections, x0))
+
         roi_width = x1 - x0
         anchors = {
             'left': roi_width * self.left_anchor_ratio,
@@ -163,6 +170,22 @@ class SignTruckDetector(Node):
             annotated_msg = self.bridge.cv2_to_imgmsg(annotated, encoding='bgr8')
             annotated_msg.header = msg.header
             self.annotated_pub.publish(annotated_msg)
+
+    @staticmethod
+    def make_observations(header, detections, roi_x):
+        observations = Detection2DArray(header=header)
+        for x0, y0, x1, y1, name, confidence in detections:
+            detection = Detection2D(header=header)
+            detection.bbox.center.position.x = float(roi_x + (x0 + x1) / 2.0)
+            detection.bbox.center.position.y = float((y0 + y1) / 2.0)
+            detection.bbox.size_x = float(x1 - x0)
+            detection.bbox.size_y = float(y1 - y0)
+            hypothesis = ObjectHypothesisWithPose()
+            hypothesis.hypothesis.class_id = 'green' if name == 'green_sign' else 'red'
+            hypothesis.hypothesis.score = float(confidence)
+            detection.results = [hypothesis]
+            observations.detections.append(detection)
+        return observations
 
     def draw_visualization(self, frame, detections):
         for bx0, by0, bx1, by1, name, _ in detections:

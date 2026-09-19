@@ -12,6 +12,11 @@
   - `/sign_truck/right_lane_state`
   - `/sign_truck/current_lane_state`
   - `/sign_truck/debug`
+  - `/sign_truck/observations` (`vision_msgs/Detection2DArray`): current-image
+    detections with the original image timestamp, full-image box coordinates,
+    and `green`/`red` labels. Empty and partial frames are published without
+    padding or retaining previous detections. The behavior planner, not this
+    detector, requires exactly three panels and performs terminal-route voting.
 
 색상 검출만으로는 차량이 어느 차선에 있는지 알 수 없다. `current_lane:=auto`는 임시로 화면 중앙에 가장 가까운 신호를 현재 차선 신호로 본다. 실제 차량에서는 planner/localization이 현재 차선을 정하고, `/sign_truck/current_lane`에 `0`(왼쪽) 또는 `1`(오른쪽)을 보내면 해당 차선 상태를 선택한다. 고정된 차선 기준선은 카메라 설치 각도와 주행 경로에 맞춰 보정해야 한다.
 
