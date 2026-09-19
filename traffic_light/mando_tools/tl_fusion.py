@@ -93,6 +93,8 @@ STATE_COLORS = {
 }
 
 COLOR_ORDER = ('red', 'yellow', 'green')
+COLOR_TOP_END_RATIO = 0.48
+COLOR_MIDDLE_END_RATIO = 0.98
 COLOR_TO_STATE = {
     'red': STATE_RED,
     'yellow': STATE_YELLOW,
@@ -198,7 +200,7 @@ class TLFusionNode(Node):
         self.state_topic = str(self._declare_param('state_topic', '/tl/state_id'))
         self.show_windows = bool(self._declare_param('show_windows', False))
         self.publish_debug_image = bool(
-            self._declare_param('publish_debug_image', True)
+            self._declare_param('publish_debug_image', False)
         )
         self.debug_image_max_side_px = int(
             self._declare_param('debug_image_max_side_px', 640)
@@ -287,7 +289,7 @@ class TLFusionNode(Node):
         self.fallback_value_gain = float(self._declare_param('fallback_value_gain', 1.35))
         self.fallback_gamma = float(self._declare_param('fallback_gamma', 1.00))
         self.fallback_s_min = int(self._declare_param('fallback_s_min', 55))
-        self.fallback_v_min = int(self._declare_param('fallback_v_min', 70))
+        self.fallback_v_min = int(self._declare_param('fallback_v_min', 67))
         self.fallback_green_h_min = float(self._declare_param('fallback_green_h_min', 39.0))
         self.fallback_green_h_max = float(self._declare_param('fallback_green_h_max', 100.0))
         self.fallback_green_s_min = int(self._declare_param('fallback_green_s_min', 50))
@@ -301,9 +303,15 @@ class TLFusionNode(Node):
         self.fallback_green_bottom_weight = float(
             self._declare_param('fallback_green_bottom_weight', 0.20)
         )
-        self.fallback_min_valid_pixels = int(self._declare_param('fallback_min_valid_pixels', 12))
+        self.fallback_min_valid_pixels = int(self._declare_param('fallback_min_valid_pixels', 7))
         self.fallback_min_component_pixels = int(
-            self._declare_param('fallback_min_component_pixels', 4)
+            self._declare_param('fallback_min_component_pixels', 5)
+        )
+        self.fallback_green_min_valid_pixels = int(
+            self._declare_param('fallback_green_min_valid_pixels', 14)
+        )
+        self.fallback_green_min_component_pixels = int(
+            self._declare_param('fallback_green_min_component_pixels', 9)
         )
         self.fallback_score_threshold = float(self._declare_param('fallback_score_threshold', 0.45))
         self.fallback_green_score_threshold = float(
@@ -982,6 +990,19 @@ class TLFusionNode(Node):
         enhanced = self._enhance_crop(crop)
         if enhanced.size == 0:
             return self._empty_analysis('empty_candidate_box')
+        color_reference = crop if crop.size else enhanced.copy()
+        if color_reference.shape[:2] != enhanced.shape[:2]:
+            interpolation = (
+                cv2.INTER_AREA
+                if color_reference.shape[0] >= enhanced.shape[0]
+                and color_reference.shape[1] >= enhanced.shape[1]
+                else cv2.INTER_LINEAR
+            )
+            color_reference = cv2.resize(
+                color_reference,
+                (enhanced.shape[1], enhanced.shape[0]),
+                interpolation=interpolation,
+            )
         if signal_mask.shape[:2] != enhanced.shape[:2]:
             signal_mask = cv2.resize(
                 signal_mask,
@@ -991,7 +1012,7 @@ class TLFusionNode(Node):
         if self.use_torch_color_fallback:
             try:
                 raw_scores, valid_pixels, masks = self._torch_color_measurements(
-                    enhanced, signal_mask,
+                    enhanced, signal_mask, color_reference,
                 )
             except Exception as exc:  # noqa: BLE001
                 self.use_torch_color_fallback = False
@@ -1000,30 +1021,35 @@ class TLFusionNode(Node):
                 )
 
         if not self.use_torch_color_fallback:
-            hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
+            hsv = cv2.cvtColor(color_reference, cv2.COLOR_BGR2HSV)
+            enhanced_hsv = cv2.cvtColor(enhanced, cv2.COLOR_BGR2HSV)
             # 채도와 밝기가 높은 픽셀에 더 큰 가중치를 준다. 합산은 float32 기준이며,
             # 벡터화/합산 순서를 바꾸면 임계값 근처 결과가 달라질 수 있어 회귀 검증이 필요하다.
-            saturation = hsv[:, :, 1].astype(np.float32) / 255.0
-            value = hsv[:, :, 2].astype(np.float32) / 255.0
+            saturation = enhanced_hsv[:, :, 1].astype(np.float32) / 255.0
+            value = enhanced_hsv[:, :, 2].astype(np.float32) / 255.0
             weights = 0.25 + 0.40 * saturation + 0.35 * value
 
             # uint8 OpenCV HSV의 H는 0~179다. 적색은 hue 경계 양쪽에 있어 두 구간을 합친다.
-            red_mask_1 = cv2.inRange(hsv, (0, self.fallback_s_min, self.fallback_v_min), (13, 255, 255))
-            red_mask_2 = cv2.inRange(hsv, (160, self.fallback_s_min, self.fallback_v_min), (179, 255, 255))
+            red_mask_1 = cv2.inRange(hsv, (0, self.fallback_s_min, self.fallback_v_min), (9, 255, 255))
+            red_mask_2 = cv2.inRange(hsv, (170, self.fallback_s_min, self.fallback_v_min), (179, 255, 255))
             red_mask = cv2.bitwise_or(red_mask_1, red_mask_2)
+            red_mask = cv2.bitwise_and(
+                red_mask,
+                cv2.inRange(enhanced_hsv[:, :, 2], self.fallback_v_min, 255),
+            )
             yellow_mask = cv2.inRange(
-                hsv,
+                enhanced_hsv,
                 (14, self.fallback_s_min, self.fallback_v_min),
                 (38, 255, 255),
             )
-            green_mask = cv2.inRange(
+            green_hs_mask = cv2.inRange(
                 hsv,
-                (
-                    self.fallback_green_h_min,
-                    self.fallback_green_s_min,
-                    self.fallback_green_v_min,
-                ),
+                (self.fallback_green_h_min, self.fallback_green_s_min, 0),
                 (self.fallback_green_h_max, 255, 255),
+            )
+            green_mask = cv2.bitwise_and(
+                green_hs_mask,
+                cv2.inRange(enhanced_hsv[:, :, 2], self.fallback_green_v_min, 255),
             )
             red_mask = self._clean_mask(red_mask)
             yellow_mask = self._clean_mask(yellow_mask)
@@ -1031,6 +1057,10 @@ class TLFusionNode(Node):
             red_mask = cv2.bitwise_and(red_mask, signal_mask)
             yellow_mask = cv2.bitwise_and(yellow_mask, signal_mask)
             green_mask = cv2.bitwise_and(green_mask, signal_mask)
+            middle_region = self._middle_band_mask(signal_mask, enhanced.shape[:2])
+            red_mask = cv2.bitwise_and(red_mask, middle_region)
+            yellow_mask = cv2.bitwise_and(yellow_mask, middle_region)
+            green_mask = cv2.bitwise_and(green_mask, middle_region)
 
             masks = {
                 'red': red_mask,
@@ -1047,6 +1077,11 @@ class TLFusionNode(Node):
                 for name, mask in masks.items()
             }
             valid_pixels = int(sum(int(np.count_nonzero(mask)) for mask in masks.values()))
+
+        mask_pixel_counts = {
+            name: int(np.count_nonzero(mask)) for name, mask in masks.items()
+        }
+        green_valid_pixels = mask_pixel_counts['green']
 
         # 분모는 ROI 면적이 아니라 세 색상의 가중치 합이다. 배경이 많아도 한 색만
         # 조금 남으면 비율이 커질 수 있으므로 아래 픽셀 수/연결요소 조건을 함께 사용한다.
@@ -1067,10 +1102,26 @@ class TLFusionNode(Node):
             if top_color == 'green'
             else self.fallback_score_threshold
         )
+        required_valid_pixels = (
+            self.fallback_green_min_valid_pixels
+            if top_color == 'green'
+            else self.fallback_min_valid_pixels
+        )
+        required_component_pixels = (
+            self.fallback_green_min_component_pixels
+            if top_color == 'green'
+            else self.fallback_min_component_pixels
+        )
+        top_color_valid_pixels = (
+            mask_pixel_counts[top_color]
+            if top_color == 'green'
+            else valid_pixels
+        )
 
         # 동시 적/녹 점등은 단일 우세 색상보다 먼저 해석하는 프로젝트별 좌회전 규칙이다.
         red_green_decisive = (
             valid_pixels >= self.fallback_min_valid_pixels
+            and green_valid_pixels >= self.fallback_green_min_valid_pixels
             and scores['red'] >= self.fallback_red_green_red_min
             and scores['green'] >= self.fallback_red_green_green_min
             and scores['yellow'] <= self.fallback_red_green_yellow_max
@@ -1081,17 +1132,17 @@ class TLFusionNode(Node):
         component_size = 0
         if (
             not red_green_decisive
-            and valid_pixels >= self.fallback_min_valid_pixels
+            and top_color_valid_pixels >= required_valid_pixels
             and top_score >= score_threshold
             and score_gap >= self.fallback_score_gap
         ):
             component_size = self._largest_component(masks[top_color])
 
         decisive = (
-            valid_pixels >= self.fallback_min_valid_pixels
+            top_color_valid_pixels >= required_valid_pixels
             and top_score >= score_threshold
             and score_gap >= self.fallback_score_gap
-            and component_size >= self.fallback_min_component_pixels
+            and component_size >= required_component_pixels
         )
 
         if red_green_decisive:
@@ -1384,6 +1435,14 @@ class TLFusionNode(Node):
             thickness = 2 if overlay.selected else 1
             cv2.rectangle(debug, (x_a, y_a), (x_b, y_b), overlay.color, thickness)
             self._draw_box_label(debug, overlay.label, x_a, y_a, overlay.color)
+        if selected is not None:
+            self._draw_color_split_boundaries(
+                debug,
+                selected.box,
+                roi_x0,
+                roi_y0,
+                scale,
+            )
         if (
             self.show_color_mask_inset
             and selected is not None
@@ -1396,6 +1455,35 @@ class TLFusionNode(Node):
                 inset = self._fit_to_canvas(analysis.highlighted, inset_width, inset_height)
                 self._draw_debug_inset(debug, inset, 'Color Mask')
         return debug
+
+    def _draw_color_split_boundaries(
+        self,
+        image: np.ndarray,
+        box: tuple[int, int, int, int],
+        roi_x0: int,
+        roi_y0: int,
+        scale: float,
+    ) -> None:
+        """선택 후보 박스에 색상 마스크 세로 경계를 표시한다."""
+        x0, y0, x1, y1 = box
+        debug_x0 = max(0, int(round((x0 - roi_x0) * scale)))
+        debug_x1 = min(image.shape[1] - 1, int(round((x1 - roi_x0) * scale)))
+        if debug_x1 <= debug_x0 or y1 <= y0:
+            return
+
+        box_height = y1 - y0
+        for ratio in (COLOR_TOP_END_RATIO, COLOR_MIDDLE_END_RATIO):
+            boundary_y = int(round((y0 + box_height * ratio - roi_y0) * scale))
+            if boundary_y < 0 or boundary_y >= image.shape[0]:
+                continue
+            cv2.line(
+                image,
+                (debug_x0, boundary_y),
+                (debug_x1, boundary_y),
+                (255, 255, 255),
+                1,
+                cv2.LINE_8,
+            )
 
     def _build_overlay_candidates(
         self,
@@ -1701,6 +1789,7 @@ class TLFusionNode(Node):
         self,
         enhanced: np.ndarray,
         signal_mask: np.ndarray | None = None,
+        color_reference: np.ndarray | None = None,
     ) -> tuple[dict[str, float], int, dict[str, np.ndarray]]:
         """PyTorch CUDA로 HSV 마스크와 색상 점수를 계산한다.
 
@@ -1713,7 +1802,8 @@ class TLFusionNode(Node):
             raise RuntimeError('PyTorch is not available')
 
         with torch.inference_mode():
-            bgr = torch.from_numpy(np.ascontiguousarray(enhanced)).to(
+            reference = enhanced if color_reference is None else color_reference
+            bgr = torch.from_numpy(np.ascontiguousarray(reference)).to(
                 device=self.color_fallback_device,
                 non_blocking=True,
             )
@@ -1739,24 +1829,36 @@ class TLFusionNode(Node):
                 torch.zeros_like(max_value),
             )
             value = max_value * 255.0
-            weights = 0.25 + 0.40 * (saturation / 255.0) + 0.35 * (value / 255.0)
+            enhanced_bgr = torch.from_numpy(
+                np.ascontiguousarray(enhanced)
+            ).to(device=self.color_fallback_device, non_blocking=True)
+            enhanced_rgb = enhanced_bgr[..., (2, 1, 0)].to(
+                dtype=torch.float32,
+            ).div_(255.0)
+            enhanced_value = enhanced_rgb.amax(dim=-1) * 255.0
+            weights = 0.25 + 0.40 * (saturation / 255.0) + 0.35 * (enhanced_value / 255.0)
             color_vertical_weights = torch.from_numpy(
                 self._color_vertical_weights(signal_mask, enhanced.shape[:2])
             ).to(device=weights.device, dtype=weights.dtype)
 
             red_mask = (
-                ((hue >= 0.0) & (hue <= 9.0))
-                | ((hue >= 165.0) & (hue < 180.0))
-            ) & (saturation >= self.fallback_s_min) & (value >= self.fallback_v_min)
+                (
+                    ((hue >= 0.0) & (hue <= 9.0))
+                    | ((hue >= 170.0) & (hue < 180.0))
+                )
+                & (saturation >= self.fallback_s_min)
+                & (value >= self.fallback_v_min)
+                & (enhanced_value >= self.fallback_v_min)
+            )
             yellow_mask = (
                 (hue >= 14.0) & (hue <= 38.0)
                 & (saturation >= self.fallback_s_min)
-                & (value >= self.fallback_v_min)
+                & (enhanced_value >= self.fallback_v_min)
             )
             green_mask = (
                 (hue >= self.fallback_green_h_min) & (hue <= self.fallback_green_h_max)
                 & (saturation >= self.fallback_green_s_min)
-                & (value >= self.fallback_green_v_min)
+                & (enhanced_value >= self.fallback_green_v_min)
             )
             masks_gpu = {
                 'red': self._torch_clean_mask(red_mask),
@@ -1771,6 +1873,12 @@ class TLFusionNode(Node):
                 masks_gpu = {
                     name: mask & signal_region for name, mask in masks_gpu.items()
                 }
+            middle_region = torch.from_numpy(
+                self._middle_band_mask(signal_mask, enhanced.shape[:2])
+            ).to(device=bgr.device, non_blocking=True) > 0
+            masks_gpu = {
+                name: mask & middle_region for name, mask in masks_gpu.items()
+            }
             raw_values = torch.stack([
                 (
                     weights
@@ -1816,10 +1924,10 @@ class TLFusionNode(Node):
                 1.0,
             )
         vertical_weights = np.where(
-            vertical_ratio < (1.0 / 3.0),
+            vertical_ratio < COLOR_TOP_END_RATIO,
             self.fallback_green_top_weight,
             np.where(
-                vertical_ratio < (2.0 / 3.0),
+                vertical_ratio < COLOR_MIDDLE_END_RATIO,
                 self.fallback_green_middle_weight,
                 self.fallback_green_bottom_weight,
             ),
@@ -1838,6 +1946,40 @@ class TLFusionNode(Node):
         if signal_rows.size == 0:
             return None
         return int(signal_rows[0]), int(signal_rows[-1])
+
+    def _middle_band_mask(
+        self,
+        signal_mask: np.ndarray | None,
+        shape: tuple[int, int],
+    ) -> np.ndarray:
+        """후보 박스의 중앙 48~98%만 남기는 색상 마스크를 만든다."""
+        height, width = shape
+        if height <= 0 or width <= 0:
+            return np.zeros((max(0, height), max(0, width)), dtype=np.uint8)
+
+        if signal_mask is None or signal_mask.shape[:2] != shape:
+            base_mask = np.full((height, width), 255, dtype=np.uint8)
+        else:
+            base_mask = signal_mask
+
+        signal_rows = np.flatnonzero(np.any(base_mask > 0, axis=1))
+        if signal_rows.size == 0:
+            return np.zeros((height, width), dtype=np.uint8)
+
+        top_row = int(signal_rows[0])
+        bottom_row = int(signal_rows[-1])
+        row_indices = np.arange(height, dtype=np.float32)
+        if bottom_row == top_row:
+            middle_rows = row_indices == float(top_row)
+        else:
+            vertical_ratio = (row_indices - top_row) / float(bottom_row - top_row)
+            middle_rows = (
+                vertical_ratio >= COLOR_TOP_END_RATIO
+            ) & (vertical_ratio < COLOR_MIDDLE_END_RATIO)
+
+        middle_mask = np.zeros((height, width), dtype=np.uint8)
+        middle_mask[middle_rows, :] = base_mask[middle_rows, :]
+        return middle_mask
 
     def _torch_clean_mask(self, mask: Any) -> Any:
         """OpenCV 3x3 타원 커널과 같은 십자형 morphology를 PyTorch로 수행한다."""
@@ -1925,8 +2067,8 @@ class TLFusionNode(Node):
             top_row, bottom_row = weight_rows
             row_span = bottom_row - top_row
             boundary_rows = (
-                round(top_row + row_span / 3.0),
-                round(top_row + 2.0 * row_span / 3.0),
+                round(top_row + row_span * COLOR_TOP_END_RATIO),
+                round(top_row + row_span * COLOR_MIDDLE_END_RATIO),
             )
             for boundary_row in boundary_rows:
                 cv2.line(

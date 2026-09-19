@@ -281,6 +281,11 @@ ros2 run mando_tools mando_tl_fusion --ros-args \
 | --- | --- | --- |
 | `enable_low_confidence_color_fallback` | `true` | 호환성 인자; `false`여도 색 분석은 수행 |
 | `fallback_score_threshold` | `0.45` | 일반 색상 정규화 점수 하한 |
+| `fallback_min_valid_pixels` | `7` | 중앙 48~98% 색상 마스크 최소 픽셀 수 |
+| `fallback_min_component_pixels` | `5` | 색상 마스크 연결 요소 최소 크기 |
+| `fallback_v_min` | `67` | 빨강·노랑 HSV value 하한 |
+| `fallback_green_min_valid_pixels` | `14` | 초록 마스크 최소 픽셀 수 |
+| `fallback_green_min_component_pixels` | `9` | 초록 연결 요소 최소 크기 |
 | `fallback_green_score_threshold` | `0.40` | 초록 정규화 점수 하한 |
 | `fallback_green_h_min` | `39.0` | 초록 hue 하한 |
 | `fallback_green_h_max` | `100.0` | 초록 hue 상한 |
@@ -295,7 +300,8 @@ ros2 run mando_tools mando_tl_fusion --ros-args \
 | `fallback_max_side_px` | `640` | 색 분석 ROI 최대 변 길이(px) |
 
 이름은 `fallback_green_*_weight`지만 현재는 빨강·노랑·초록 점수 모두에 적용된다.
-상·중·하 기준은 확장 ROI가 아닌 원본 YOLO 후보 박스다. 가중치는 점수에만 적용하며
+상·중·하 기준은 확장 ROI가 아닌 원본 YOLO 후보 박스다. 상단 0~48%와 하단 98~100%의
+색상 마스크는 제거되며 중앙 48~98% 마스크에만 가중치를 적용한다. 가중치는 점수에만 적용하며
 유효 픽셀 수와 연결요소 크기 조건을 대체하지 않는다.
 HSV 기준은 OpenCV 범위(H: 0~179, S/V: 0~255)이며 색상 보정 이후에 평가한다.
 

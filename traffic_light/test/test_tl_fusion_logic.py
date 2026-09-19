@@ -89,8 +89,8 @@ def make_candidate(confidence=0.4, state=STATE_UNKNOWN, class_name='traffic ligh
 
 
 def color_frame(red_pixels, yellow_pixels, green_pixels):
-    frame = np.zeros((10, 10, 3), dtype=np.uint8)
-    pixels = frame.reshape(-1, 3)
+    frame = np.zeros((30, 10, 3), dtype=np.uint8)
+    pixels = frame[15:25].reshape(-1, 3)
     pixels[:red_pixels] = (0, 0, 255)
     pixels[red_pixels:red_pixels + yellow_pixels] = (0, 255, 255)
     pixels[red_pixels + yellow_pixels:red_pixels + yellow_pixels + green_pixels] = (0, 255, 0)
@@ -448,6 +448,22 @@ def test_debug_image_is_downsampled_without_changing_source(fusion_node):
     np.testing.assert_array_equal(frame, original)
 
 
+def test_debug_image_shows_color_split_boundaries(fusion_node):
+    node = fusion_node
+    node.detect_left_ratio = 0.0
+    node.detect_right_ratio = 1.0
+    node.detect_top_ratio = 0.0
+    node.detect_bottom_ratio = 1.0
+    frame = np.zeros((120, 200, 3), dtype=np.uint8)
+    candidate = make_candidate()
+    analysis = node._empty_analysis('test')
+
+    debug = node._build_debug_image(frame, [], candidate, analysis)
+
+    assert debug[64, 60].tolist() == [255, 255, 255]
+    assert debug[89, 60].tolist() == [255, 255, 255]
+
+
 def test_detection_preserves_crop_offsets(fusion_node):
     fusion_node.detect_left_ratio = 0.25
     fusion_node.detect_right_ratio = 0.75
@@ -462,14 +478,14 @@ def test_detection_preserves_crop_offsets(fusion_node):
 
 @pytest.mark.parametrize('red_pixels, yellow_pixels, green_pixels, expected_state', [
     (0, 0, 0, STATE_UNKNOWN),
-    (11, 0, 0, STATE_UNKNOWN),
-    (12, 0, 0, STATE_RED),
-    (70, 0, 30, STATE_RED),
+    (6, 0, 0, STATE_UNKNOWN),
+    (7, 0, 0, STATE_RED),
+    (70, 0, 30, STATE_LEFT_ARROW),
     (30, 0, 70, STATE_GREEN),
     (29, 0, 71, STATE_GREEN),
     (82, 0, 18, STATE_RED),
     (83, 0, 17, STATE_RED),
-    (58, 12, 30, STATE_RED),
+    (58, 12, 30, STATE_LEFT_ARROW),
     (57, 13, 30, STATE_RED),
 ])
 def test_color_analysis_preserves_results_with_debug(
@@ -521,8 +537,70 @@ def test_color_vertical_weights_favor_middle_of_candidate(color_node):
     weights = color_node._color_vertical_weights(signal_mask, signal_mask.shape)
 
     assert np.allclose(weights[0], 0.20)
-    assert np.allclose(weights[3:6], 1.30)
+    assert np.allclose(weights[5:9], 1.30)
     assert np.allclose(weights[-1], 0.20)
+
+
+def test_color_masks_keep_only_middle_band(color_node):
+    signal_mask = np.ones((9, 9), dtype=np.uint8) * 255
+    middle_mask = color_node._middle_band_mask(signal_mask, signal_mask.shape)
+
+    assert np.count_nonzero(middle_mask[:4]) == 0
+    assert np.count_nonzero(middle_mask[4:8]) == 36
+    assert np.count_nonzero(middle_mask[8:]) == 0
+
+    frame = np.full((9, 9, 3), (0, 0, 255), dtype=np.uint8)
+    color_node._torch_clean_mask = lambda mask: mask
+    _, valid_pixels, masks = color_node._torch_color_measurements(frame, signal_mask)
+
+    assert valid_pixels == 36
+    assert np.count_nonzero(masks['red'][:4]) == 0
+    assert np.count_nonzero(masks['red'][4:8]) == 36
+    assert np.count_nonzero(masks['red'][8:]) == 0
+
+
+def test_cpu_color_masks_ignore_outer_bands(color_node):
+    color_node.use_torch_color_fallback = False
+    color_node._enhance_crop = lambda crop: crop
+    color_node._clean_mask = lambda mask: mask
+    frame = np.zeros((9, 9, 3), dtype=np.uint8)
+    frame[:4] = (0, 0, 255)
+    frame[8:] = (0, 0, 255)
+
+    analysis = color_node._analyze_selected_candidate(frame, make_candidate())
+
+    assert analysis.valid_pixels == 0
+    assert analysis.state == STATE_UNKNOWN
+
+
+def test_cpu_green_mask_rejects_gray_after_saturation_enhancement(color_node):
+    color_node.use_torch_color_fallback = False
+    color_node._clean_mask = lambda mask: mask
+
+    def enhance_gray(crop):
+        hsv = tl_fusion.cv2.cvtColor(crop, tl_fusion.cv2.COLOR_BGR2HSV)
+        hsv[:, :, 1] = tl_fusion.cv2.convertScaleAbs(hsv[:, :, 1], alpha=3.0)
+        return tl_fusion.cv2.cvtColor(hsv, tl_fusion.cv2.COLOR_HSV2BGR)
+
+    color_node._enhance_crop = enhance_gray
+    gray = np.full((10, 10, 3), (100, 115, 100), dtype=np.uint8)
+
+    analysis = color_node._analyze_selected_candidate(gray, make_candidate())
+
+    assert analysis.valid_pixels == 0
+    assert analysis.state == STATE_UNKNOWN
+
+
+@pytest.mark.parametrize('green_pixels, expected_state', [
+    (13, STATE_UNKNOWN),
+    (14, STATE_GREEN),
+])
+def test_green_requires_eleven_valid_mask_pixels(color_node, green_pixels, expected_state):
+    frame = color_frame(0, 0, green_pixels)
+
+    analysis = color_node._analyze_selected_candidate(frame, make_candidate())
+
+    assert analysis.state == expected_state
 
 
 @pytest.mark.parametrize('edge_pixel, central_pixel, edge_name, central_name', [
@@ -571,8 +649,8 @@ def test_color_mask_debug_marks_green_weight_boundaries(color_node):
     )
 
     assert analysis.highlighted is not None
-    assert np.all(analysis.highlighted[3] == (255, 255, 255))
-    assert np.all(analysis.highlighted[6] == (255, 255, 255))
+    assert np.all(analysis.highlighted[4] == (255, 255, 255))
+    assert np.all(analysis.highlighted[9] == (255, 255, 255))
 
 
 def test_color_analysis_ignores_color_outside_detection_box(fusion_node):

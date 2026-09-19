@@ -159,8 +159,14 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 
 초록색은 녹색 신호의 색 바램·저조도 편차를 흡수하기 위해 별도 범위를 사용한다.
 기본값은 HSV H `39~100`, S `50` 이상, V `68` 이상, score `0.40`이다.
-후보 박스 내부에서 초록색 score는 위쪽 `0.70`에서 아래쪽 `1.30`까지 세로로 선형 보정한다.
-빨강·노랑 기준과 score gap `0.10`은 변경하지 않아 녹색처럼 보이는 배경의 확정을 제한한다.
+후보 박스 상단 `0~48%`와 하단 `98~100%`에서 생성된 색상 마스크는 제거하고,
+중앙 `48~98%` 마스크만 점수 계산에 사용한다.
+중앙 `48~98%` 내부에서는 초록색 score를 세로 가중치로 보정한다.
+빨강은 H `0~9` 또는 `170~179`, S `55` 이상, V `67` 이상을 사용한다.
+빨강 H/S와 원본 V 조건은 원본 crop에서 판정하고, 보정 영상의 V도 `67` 이상인지 확인한다.
+초록 H/S는 원본 crop에서 판정하고, 밝기 조건은 보정 영상으로 확인한다.
+따라서 회색 영역의 채도가 보정으로 올라가도 초록 마스크에 포함되지 않는다.
+노랑 기준과 score gap `0.10`은 녹색처럼 보이는 배경의 확정을 제한한다.
 
 `LEFT ARROW` 색 규칙은 아래 조건을 동시에 볼 때 사용한다.
 
@@ -210,7 +216,7 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `model_path`
 - `image_topic`
 - `show_windows`
-- `publish_debug_image`
+- `publish_debug_image` (기본 `false`)
 - `max_fps`
 - `color_fallback_device`
 - `fallback_max_side_px`
@@ -223,6 +229,7 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `debug_publish_period_ms`
 - `publish_debug_image`
 - `fallback_score_threshold`
+- `fallback_v_min`
 - `fallback_green_score_threshold`
 - `fallback_score_gap`
 - `fallback_green_h_min`
@@ -237,7 +244,7 @@ HSV 기반으로 빨강, 노랑, 초록 마스크를 만든 뒤 가중합 점수
 - `fallback_value_gain`
 - `fallback_gamma`
 
-현재 기본값은 YOLO 입력 크기 `640`, 디버그 영상 최대 변 길이 `640`, 디버그 최소 출력 간격 `200ms`, 후보 confidence `0.05`, 일반 색상 score `0.45`, 초록색 score `0.40`, 색상 score gap `0.10`, 모델 신뢰도 `0.75`, 공통 색상 상·중·하 가중치 `0.20`·`1.30`·`0.20`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다. 기존 `fallback_green_*_weight` 파라미터 이름은 호환성을 위해 유지한다.
+현재 기본값은 YOLO 입력 크기 `640`, 디버그 영상 최대 변 길이 `640`, 디버그 최소 출력 간격 `200ms`, 후보 confidence `0.05`, 일반 색상 최소 유효 마스크 `7px`·최소 연결 요소 `5px`, 초록색 최소 유효 마스크 `14px`·최소 연결 요소 `9px`, 일반 색상 score `0.45`, 초록색 score `0.40`, 색상 score gap `0.10`, 모델 신뢰도 `0.75`, 공통 색상 상·중·하 가중치 `0.20`·`1.30`·`0.20`, 채도 gain `2.20`, 밝기 gain `1.35`, gamma `1.00`이다. 기존 `fallback_green_*_weight` 파라미터 이름은 호환성을 위해 유지한다.
 색상 보정은 모든 선택 후보에 항상 적용되며, 모델 confidence가 `0.75` 미만이면 색상 fallback이 최종 판단에 더 적극적으로 사용된다.
 
 예시:

@@ -67,7 +67,7 @@ def generate_launch_description() -> LaunchDescription:
     )
     publish_debug_arg = DeclareLaunchArgument(
         'publish_debug_image',
-        default_value='true',
+        default_value='false',
         description='Publish /tl/debug_image when a subscriber is connected.',
     )
     debug_image_max_side_arg = DeclareLaunchArgument(
@@ -140,6 +140,31 @@ def generate_launch_description() -> LaunchDescription:
         'fallback_score_threshold',
         default_value='0.45',
         description='Normalized color score required for the fallback state.',
+    )
+    fallback_min_valid_pixels_arg = DeclareLaunchArgument(
+        'fallback_min_valid_pixels',
+        default_value='7',
+        description='Minimum number of color-mask pixels required for a fallback state.',
+    )
+    fallback_min_component_pixels_arg = DeclareLaunchArgument(
+        'fallback_min_component_pixels',
+        default_value='5',
+        description='Minimum connected-component size for a fallback state.',
+    )
+    fallback_v_min_arg = DeclareLaunchArgument(
+        'fallback_v_min',
+        default_value='67',
+        description='Minimum HSV value for red/yellow fallback pixels.',
+    )
+    fallback_green_min_valid_pixels_arg = DeclareLaunchArgument(
+        'fallback_green_min_valid_pixels',
+        default_value='14',
+        description='Minimum green-mask pixels required for a green fallback state.',
+    )
+    fallback_green_min_component_pixels_arg = DeclareLaunchArgument(
+        'fallback_green_min_component_pixels',
+        default_value='9',
+        description='Minimum green connected-component size for a green fallback state.',
     )
     fallback_green_h_min_arg = DeclareLaunchArgument(
         'fallback_green_h_min', default_value='39.0',
@@ -263,6 +288,26 @@ def generate_launch_description() -> LaunchDescription:
                     LaunchConfiguration('fallback_score_threshold'),
                     value_type=float,
                 ),
+                'fallback_min_valid_pixels': ParameterValue(
+                    LaunchConfiguration('fallback_min_valid_pixels'),
+                    value_type=int,
+                ),
+                'fallback_min_component_pixels': ParameterValue(
+                    LaunchConfiguration('fallback_min_component_pixels'),
+                    value_type=int,
+                ),
+                'fallback_v_min': ParameterValue(
+                    LaunchConfiguration('fallback_v_min'),
+                    value_type=int,
+                ),
+                'fallback_green_min_valid_pixels': ParameterValue(
+                    LaunchConfiguration('fallback_green_min_valid_pixels'),
+                    value_type=int,
+                ),
+                'fallback_green_min_component_pixels': ParameterValue(
+                    LaunchConfiguration('fallback_green_min_component_pixels'),
+                    value_type=int,
+                ),
                 'fallback_green_h_min': ParameterValue(
                     LaunchConfiguration('fallback_green_h_min'), value_type=float,
                 ),
@@ -330,6 +375,11 @@ def generate_launch_description() -> LaunchDescription:
             model_conf_arg,
             low_conf_fallback_arg,
             fallback_score_arg,
+            fallback_min_valid_pixels_arg,
+            fallback_min_component_pixels_arg,
+            fallback_v_min_arg,
+            fallback_green_min_valid_pixels_arg,
+            fallback_green_min_component_pixels_arg,
             fallback_green_h_min_arg,
             fallback_green_h_max_arg,
             fallback_green_s_min_arg,
