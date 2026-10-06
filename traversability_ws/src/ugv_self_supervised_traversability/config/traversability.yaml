@@ -8,6 +8,16 @@ trajectory_recorder:
     trajectory_publish_rate: 5.0
     min_pose_distance: 0.03
     max_path_poses: 10000
+    imu_topic: /imu/data
+    pointcloud_topic: /velodyne_points
+    use_imu_orientation: true
+    imu_use_yaw: false
+    imu_timeout_seconds: 0.2
+    use_lidar_ground_height: true
+    pointcloud_timeout_seconds: 0.4
+    lidar_ground_radius: 1.2
+    lidar_ground_min_points: 20
+    lidar_ground_percentile: 20.0
 
 footprint_generator:
   ros__parameters:
@@ -20,20 +30,30 @@ footprint_generator:
     footprint_margin: 0.05
     min_footprint_distance: 0.05
     max_visualized_footprints: 2000
+    imu_topic: /imu/data
+    pointcloud_topic: /velodyne_points
+    use_imu_orientation: true
+    imu_use_yaw: false
+    imu_timeout_seconds: 0.2
+    use_lidar_ground_height: true
+    pointcloud_timeout_seconds: 0.4
+    lidar_ground_radius: 1.2
+    lidar_ground_min_points: 20
+    lidar_ground_percentile: 20.0
 
 traversability_labeler:
   ros__parameters:
-    camera_image_topic: /camera/color/image_raw
-    camera_depth_topic: /camera/depth/image_rect_raw
-    camera_info_topic: /camera/color/camera_info
+    camera_image_topic: /zed/zed_node/left/image_rect_color
+    camera_depth_topic: /zed/zed_node/depth/depth_registered
+    camera_info_topic: /zed/zed_node/left/camera_info
     odom_topic: /odom
-    pointcloud_topic: /velodyne_points  # Reserved for the future LiDAR validator.
+    pointcloud_topic: /velodyne_points  # LiDAR ground-height refinement
     positive_mask_topic: /traversability/positive_mask
     labeled_image_topic: /traversability/labeled_image
     world_frame: odom
     base_frame: base_link
     # Must be an optical frame: +X right, +Y down, +Z forward.
-    camera_frame: camera_color_optical_frame
+    camera_frame: zed_left_camera_optical_frame
     robot_width: 0.8
     robot_length: 1.2
     footprint_margin: 0.05
@@ -46,6 +66,15 @@ traversability_labeler:
     save_dataset: false
     save_empty_labels: false
     dataset_root: ~/traversability_dataset
+    imu_topic: /imu/data
+    use_imu_orientation: true
+    imu_use_yaw: false
+    imu_timeout_seconds: 0.2
+    use_lidar_ground_height: true
+    pointcloud_timeout_seconds: 0.4
+    lidar_ground_radius: 1.2
+    lidar_ground_min_points: 20
+    lidar_ground_percentile: 20.0
 
 label_visualizer:
   ros__parameters:
@@ -54,3 +83,32 @@ label_visualizer:
     debug_image_topic: /traversability/debug_image
     debug_visualization: true
     overlay_alpha: 0.45
+
+# Standalone LiDAR geometry analysis does not require camera images.
+terrain_analyzer:
+  ros__parameters:
+    world_frame: odom              # Must be gravity-aligned, with valid 3D sensor TF.
+    base_frame: base_link
+    odom_topic: /odom
+    imu_topic: /imu/data
+    pointcloud_topic: /velodyne_points
+    sensor_timeout_seconds: 0.25
+    analysis_rate: 2.0
+    use_imu_cloud_leveling: true   # Per-scan attitude correction using base <- LiDAR TF.
+    odometry_z_valid: false        # Enable only for verified 3D localization.
+    resolution: 0.4
+    radius: 6.0
+    min_points: 3
+    min_plane_cells: 6
+    robot_width: 0.8
+    robot_length: 1.2
+    footprint_margin: 0.05
+    lookahead: 3.0
+    # EXAMPLE limits, not measured capabilities of this UGV.
+    limits_calibrated: false
+    max_uphill_deg: 15.0
+    max_downhill_deg: 12.0
+    max_cross_slope_deg: 10.0
+    max_step_up: 0.15
+    max_drop: 0.12
+    max_roughness: 0.08

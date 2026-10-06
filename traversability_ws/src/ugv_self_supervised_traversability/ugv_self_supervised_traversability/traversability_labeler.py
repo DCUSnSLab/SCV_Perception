@@ -14,20 +14,16 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Image, Imu, PointCloud2
 from tf2_ros import Buffer, TransformException, TransformListener
 
 from . import TRAVERSABLE, UNKNOWN
 from .observation_buffer import Observation, ObservationBuffer
+from .pose_fusion import PoseFusion, stamp_to_ns
 from .trajectory_projector import TrajectoryProjector
 from .utils.camera_projection import convert_depth_to_meters, validate_intrinsics
 from .utils.geometry import footprint_corners
 from .utils.transforms import euler_from_quaternion, transform_matrix
-
-
-def stamp_to_ns(stamp) -> int:
-    """Convert builtin_interfaces/Time to integer nanoseconds."""
-    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
 class TraversabilityLabeler(Node):
@@ -60,6 +56,15 @@ class TraversabilityLabeler(Node):
         self.declare_parameter('depth_check_enabled', True)
         self.declare_parameter('save_dataset', False)
         self.declare_parameter('save_empty_labels', False)
+        self.declare_parameter('imu_topic', '/imu/data')
+        self.declare_parameter('use_imu_orientation', True)
+        self.declare_parameter('imu_use_yaw', False)
+        self.declare_parameter('imu_timeout_seconds', 0.2)
+        self.declare_parameter('use_lidar_ground_height', True)
+        self.declare_parameter('pointcloud_timeout_seconds', 0.4)
+        self.declare_parameter('lidar_ground_radius', 1.2)
+        self.declare_parameter('lidar_ground_min_points', 20)
+        self.declare_parameter('lidar_ground_percentile', 20.0)
 
         self.world_frame = str(self.get_parameter('world_frame').value)
         self.camera_frame = str(self.get_parameter('camera_frame').value)
@@ -81,6 +86,18 @@ class TraversabilityLabeler(Node):
             float(self.get_parameter('depth_tolerance').value))
         self.tf_buffer = Buffer(cache_time=Duration(seconds=30.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.pose_fusion = PoseFusion(
+            self.tf_buffer, self.world_frame,
+            use_imu_orientation=bool(self.get_parameter('use_imu_orientation').value),
+            imu_use_yaw=bool(self.get_parameter('imu_use_yaw').value),
+            imu_timeout_seconds=float(self.get_parameter('imu_timeout_seconds').value),
+            use_lidar_ground_height=bool(self.get_parameter('use_lidar_ground_height').value),
+            pointcloud_timeout_seconds=float(
+                self.get_parameter('pointcloud_timeout_seconds').value),
+            lidar_ground_radius=float(self.get_parameter('lidar_ground_radius').value),
+            lidar_ground_min_points=int(self.get_parameter('lidar_ground_min_points').value),
+            lidar_ground_percentile=float(self.get_parameter('lidar_ground_percentile').value),
+            base_frame=str(self.get_parameter('base_frame').value))
         self.camera_info: Optional[CameraInfo] = None
         self.depth_messages: Deque[Image] = deque(maxlen=30)
         self.robot_poses: Deque[Tuple[int, Dict[str, float]]] = deque(maxlen=500)
@@ -101,6 +118,12 @@ class TraversabilityLabeler(Node):
         self.odom_sub = self.create_subscription(
             Odometry, str(self.get_parameter('odom_topic').value),
             self._odom_callback, qos_profile_sensor_data)
+        self.imu_sub = self.create_subscription(
+            Imu, str(self.get_parameter('imu_topic').value),
+            self.pose_fusion.update_imu, qos_profile_sensor_data)
+        self.pointcloud_sub = self.create_subscription(
+            PointCloud2, str(self.get_parameter('pointcloud_topic').value),
+            self._pointcloud_callback, qos_profile_sensor_data)
         if self.save_dataset:
             for directory in ('images', 'depth', 'labels', 'metadata'):
                 (self.dataset_root / directory).mkdir(parents=True, exist_ok=True)
@@ -204,23 +227,31 @@ class TraversabilityLabeler(Node):
                 'Odometry frame differs from world_frame; delayed labeling skipped. '
                 'Provide odometry in world_frame.', throttle_duration_sec=5.0)
             return
-        position = message.pose.pose.position
-        orientation = message.pose.pose.orientation
-        roll, pitch, yaw = euler_from_quaternion(
-            [orientation.x, orientation.y, orientation.z, orientation.w])
-        pose = {'timestamp_ns': timestamp_ns, 'x': position.x, 'y': position.y,
-                'z': position.z, 'roll': roll, 'pitch': pitch, 'yaw': yaw}
+        fused = self.pose_fusion.fuse_odometry(message)
+        pose = {
+            'timestamp_ns': timestamp_ns,
+            'x': fused.x,
+            'y': fused.y,
+            'z': fused.z,
+            'base_z': fused.base_z,
+            'roll': fused.roll,
+            'pitch': fused.pitch,
+            'yaw': fused.yaw,
+            'orientation_source': fused.orientation_source,
+            'z_source': fused.z_source,
+        }
         self.robot_poses.append((timestamp_ns, pose))
         for expired in self.buffer.pop_expired(timestamp_ns):
             self._finalize(expired)
         if self.last_traversal_xy is not None:
-            distance = ((position.x - self.last_traversal_xy[0]) ** 2 +
-                        (position.y - self.last_traversal_xy[1]) ** 2) ** 0.5
+            distance = ((fused.x - self.last_traversal_xy[0]) ** 2 +
+                        (fused.y - self.last_traversal_xy[1]) ** 2) ** 0.5
             if distance < self.min_distance:
                 return
-        self.last_traversal_xy = (position.x, position.y)
-        footprint = footprint_corners(position.x, position.y, position.z, yaw,
-                                      self.length, self.width, self.margin)
+        self.last_traversal_xy = (fused.x, fused.y)
+        footprint = footprint_corners(
+            fused.x, fused.y, fused.z, fused.yaw, self.length, self.width, self.margin,
+            roll=fused.roll, pitch=fused.pitch)
         for observation in self.buffer.observations_before(timestamp_ns):
             positive = self.projector.project_footprint(footprint, observation)
             new_positive = positive & (observation.label != TRAVERSABLE)
@@ -228,6 +259,13 @@ class TraversabilityLabeler(Node):
                 observation.label[new_positive] = TRAVERSABLE
                 observation.source_trajectory_timestamps_ns.append(timestamp_ns)
                 self._publish(observation)
+
+    def _pointcloud_callback(self, message: PointCloud2) -> None:
+        try:
+            self.pose_fusion.update_pointcloud(message)
+        except (TransformException, ValueError) as error:
+            self.get_logger().warning('LiDAR fusion skipped: %s' % error,
+                                      throttle_duration_sec=5.0)
 
     def _publish(self, observation: Observation) -> None:
         stamp = Time(nanoseconds=observation.timestamp_ns).to_msg()

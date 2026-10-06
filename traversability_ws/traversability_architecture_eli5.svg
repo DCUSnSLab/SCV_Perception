@@ -1,0 +1,148 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 980" width="1200" height="980" role="img" aria-labelledby="title desc">
+  <title id="title">UGV Online Self-Supervised Traversability: one-page architecture explainer</title>
+  <desc id="desc">Architecture map of a ROS 2 traversability labeling workspace, showing declared nodes, delayed positive-only labeling flow, observed rosbag evidence, strengths, risks, and next actions.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f6f3eb; }
+      .panel { fill: #fffdf8; stroke: #5b5346; stroke-width: 1.4; rx: 18; ry: 18; }
+      .soft { fill: #efe6d4; stroke: #8b7e68; stroke-width: 1.2; rx: 14; ry: 14; }
+      .node { fill: #fffaf0; stroke: #4e5f52; stroke-width: 1.4; rx: 12; ry: 12; }
+      .data { fill: #eef6f2; stroke: #406a58; stroke-width: 1.2; rx: 12; ry: 12; }
+      .warn { fill: #fff0e4; stroke: #9a5f2d; stroke-width: 1.2; rx: 12; ry: 12; }
+      .future { fill: #f6f1fb; stroke: #72628d; stroke-width: 1.2; stroke-dasharray: 7 6; rx: 12; ry: 12; }
+      .title { font: 700 28px 'DejaVu Sans', sans-serif; fill: #201b14; }
+      .subtitle { font: 500 15px 'DejaVu Sans', sans-serif; fill: #4e463d; }
+      .section { font: 700 18px 'DejaVu Sans', sans-serif; fill: #2a241d; }
+      .label { font: 700 15px 'DejaVu Sans', sans-serif; fill: #27221d; }
+      .body { font: 13px 'DejaVu Sans', sans-serif; fill: #2c2823; }
+      .small { font: 12px 'DejaVu Sans', sans-serif; fill: #433d36; }
+      .tiny { font: 11px 'DejaVu Sans', sans-serif; fill: #4d463e; }
+      .good { fill: #1f6b45; font: 700 13px 'DejaVu Sans', sans-serif; }
+      .risk { fill: #9a4a19; font: 700 13px 'DejaVu Sans', sans-serif; }
+      .next { fill: #355c9c; font: 700 13px 'DejaVu Sans', sans-serif; }
+      .line { stroke: #49554b; stroke-width: 2.1; fill: none; marker-end: url(#arrow); }
+      .dash { stroke: #72628d; stroke-width: 2; fill: none; stroke-dasharray: 8 6; marker-end: url(#arrowFuture); }
+      .thin { stroke: #8a806f; stroke-width: 1.4; fill: none; marker-end: url(#arrowSmall); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#49554b"/>
+    </marker>
+    <marker id="arrowFuture" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#72628d"/>
+    </marker>
+    <marker id="arrowSmall" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 z" fill="#8a806f"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="980"/>
+
+  <text class="title" x="36" y="46">UGV Online Self-Supervised Traversability</text>
+  <text class="subtitle" x="36" y="72">ELI5: like a warehouse CCTV system that only stamps floor tiles as “safe” after the robot has physically driven over them later.</text>
+  <text class="subtitle" x="36" y="92">Declared state from source and launch files; observed state from the included bag metadata dated August 13, 2026. No live runtime inspection was available.</text>
+
+  <rect class="panel" x="28" y="118" width="1144" height="470"/>
+  <text class="section" x="48" y="146">Architecture Map</text>
+
+  <rect class="soft" x="46" y="164" width="212" height="168"/>
+  <text class="label" x="62" y="190">Context</text>
+  <text class="body" x="62" y="214">Operator or rosbag replay</text>
+  <text class="body" x="62" y="236">feeds UGV sensor streams.</text>
+  <text class="body" x="62" y="266">Declared inputs:</text>
+  <text class="small" x="62" y="288">RGB `/zed/.../image_rect_color`</text>
+  <text class="small" x="62" y="306">Depth `/zed/.../depth_registered`</text>
+  <text class="small" x="62" y="324">`CameraInfo`, `/odom`, `/tf`, `/tf_static`</text>
+
+  <rect class="node" x="300" y="170" width="220" height="104"/>
+  <text class="label" x="316" y="196">trajectory_recorder</text>
+  <text class="small" x="316" y="218">reads `/odom` or TF pose</text>
+  <text class="small" x="316" y="236">keeps bounded Path history</text>
+  <text class="small" x="316" y="254">publishes `/traversability/trajectory`</text>
+
+  <rect class="node" x="300" y="300" width="220" height="104"/>
+  <text class="label" x="316" y="326">footprint_generator</text>
+  <text class="small" x="316" y="348">turns each accepted pose into</text>
+  <text class="small" x="316" y="366">a rectangular robot footprint</text>
+  <text class="small" x="316" y="384">and traversed-area markers</text>
+
+  <rect class="node" x="556" y="170" width="310" height="234"/>
+  <text class="label" x="572" y="196">traversability_labeler</text>
+  <text class="small" x="572" y="218">1. buffer past RGB + depth + intrinsics + world-&gt;camera TF</text>
+  <text class="small" x="572" y="236">2. wait until later odometry proves robot crossed that patch</text>
+  <text class="small" x="572" y="254">3. project future footprint into the past image</text>
+  <text class="small" x="572" y="272">4. keep only visible pixels if depth check passes</text>
+  <text class="small" x="572" y="290">5. emit positive-only `mono8` mask and matching RGB frame</text>
+  <text class="small" x="572" y="320">Buffer limits: 10 s, 150 frames</text>
+  <text class="small" x="572" y="338">Positive semantics: `UNKNOWN=0`, `TRAVERSABLE=1`</text>
+  <text class="small" x="572" y="356">`NON_TRAVERSABLE=2` reserved, not produced in MVP</text>
+  <text class="small" x="572" y="384">Optional dataset save: images, depth, labels, metadata</text>
+
+  <rect class="node" x="900" y="196" width="226" height="94"/>
+  <text class="label" x="916" y="222">label_visualizer</text>
+  <text class="small" x="916" y="244">matches delayed RGB + mask</text>
+  <text class="small" x="916" y="262">publishes green overlay debug image</text>
+
+  <rect class="data" x="892" y="316" width="242" height="108"/>
+  <text class="label" x="908" y="342">Published outputs</text>
+  <text class="small" x="908" y="364">Path, footprint polygon, traversed area</text>
+  <text class="small" x="908" y="382">positive mask, labeled image, debug overlay</text>
+  <text class="small" x="908" y="400">dataset files only if `save_dataset=true`</text>
+
+  <rect class="future" x="552" y="430" width="188" height="96"/>
+  <text class="label" x="568" y="456">foundation_model_adapter</text>
+  <text class="small" x="568" y="478">future mask expansion interface</text>
+  <text class="small" x="568" y="496">declared in code, not wired into launch</text>
+
+  <rect class="future" x="764" y="430" width="188" height="96"/>
+  <text class="label" x="780" y="456">lidar_geometry_validator</text>
+  <text class="small" x="780" y="478">future positive and negative evidence</text>
+  <text class="small" x="780" y="496">point cloud topic reserved only</text>
+
+  <path class="line" d="M258 228 L300 222"/>
+  <path class="line" d="M258 308 L300 352"/>
+  <path class="line" d="M520 222 L556 222"/>
+  <path class="line" d="M520 352 L556 352"/>
+  <path class="line" d="M866 244 L900 244"/>
+  <path class="line" d="M866 352 L892 352"/>
+  <path class="dash" d="M711 404 L646 430"/>
+  <path class="dash" d="M760 404 L846 430"/>
+  <path class="thin" d="M258 284 L556 284"/>
+  <text class="tiny" x="354" y="278">camera frames + TF snapshot</text>
+  <text class="tiny" x="353" y="430">future footprint projection happens after later odometry arrives</text>
+
+  <rect class="panel" x="28" y="608" width="554" height="330"/>
+  <text class="section" x="48" y="636">Evidence State</text>
+  <rect class="data" x="46" y="652" width="518" height="126"/>
+  <text class="label" x="62" y="678">Observed from included rosbag metadata</text>
+  <text class="small" x="62" y="700">Bag duration 252.6 s, total 63,425 messages.</text>
+  <text class="small" x="62" y="718">Present: `/odom` 25,265, `/tf` 27,791, `/tf_static` 2, `/velodyne_points` 2,515.</text>
+  <text class="small" x="62" y="736">Produced: trajectory 3,492, footprint 2,180, traversed_area 2,180.</text>
+  <text class="small" x="62" y="754">Zero-output topics: positive_mask 0, labeled_image 0, debug_image 0.</text>
+
+  <rect class="warn" x="46" y="794" width="518" height="124"/>
+  <text class="label" x="62" y="820">Declared vs observed mismatch</text>
+  <text class="small" x="62" y="842">The bag metadata does not list the configured ZED RGB, depth, or CameraInfo topics.</text>
+  <text class="small" x="62" y="860">Inference: the labeler likely never received valid camera observations to buffer.</text>
+  <text class="small" x="62" y="878">Because no live run logs were inspected, TF errors or frame mismatches may also exist but are unconfirmed.</text>
+  <text class="small" x="62" y="896">Result: the “path and footprint” half is working in the bag; the “delayed label” half is not evidenced.</text>
+
+  <rect class="panel" x="604" y="608" width="568" height="330"/>
+  <text class="section" x="624" y="636">Assessment</text>
+
+  <text class="good" x="624" y="668">Strengths</text>
+  <text class="small" x="624" y="690">1. Positive-only labeling preserves epistemic honesty: unseen is kept unknown, not guessed negative.</text>
+  <text class="small" x="624" y="710">2. Delayed association uses capture-time TF and buffered observations, matching the front-camera vs current-footprint geometry problem.</text>
+  <text class="small" x="624" y="730">3. Dataset metadata stores pose and source trajectory timestamps, so labels keep provenance.</text>
+  <text class="small" x="624" y="750">4. Geometry, projection, and buffer math have focused unit tests instead of being left implicit.</text>
+
+  <text class="risk" x="624" y="786">Risks</text>
+  <text class="small" x="624" y="808">1. Evidence: included bag lacks camera topics. Consequence: labeler cannot emit masks, so MVP output is absent in the provided replay path.</text>
+  <text class="small" x="624" y="828">2. Evidence: labeler requires odometry header frame to equal `world_frame`. Consequence: a common frame mismatch silently skips delayed labeling.</text>
+  <text class="small" x="624" y="848">3. Evidence: no end-to-end ROS or bag regression test. Consequence: integration breaks surface only during runtime replay.</text>
+  <text class="small" x="624" y="868">4. Evidence: future LiDAR and foundation-model adapters are placeholders only. Consequence: no negative evidence path exists despite reserved encoding.</text>
+
+  <text class="next" x="624" y="904">Next moves</text>
+  <text class="small" x="624" y="926">1. Create a known-good replay bag or launch fixture that includes RGB, aligned depth, CameraInfo, `/odom`, `/tf`, `/tf_static` and assert non-zero mask output.</text>
+  <text class="small" x="624" y="946">2. Add startup diagnostics that log missing camera topics, stale depth sync, and frame mismatches as explicit counters or fatal configuration errors.</text>
+  <text class="small" x="624" y="966">3. Only after replay is reliable, wire one real negative-evidence source behind `lidar_geometry_validator` and keep provenance separate from positive seeds.</text>
+</svg>

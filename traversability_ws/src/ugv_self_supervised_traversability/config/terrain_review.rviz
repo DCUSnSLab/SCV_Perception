@@ -1,0 +1,126 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: rviz_common/Time
+    Name: Time
+Visualization Manager:
+  Class: ""
+  Global Options:
+    Background Color: 16; 24; 38
+    Fixed Frame: odom
+    Frame Rate: 30
+  Displays:
+    - Class: rviz_default_plugins/Grid
+      Name: Ground reference (1 m)
+      Enabled: true
+      Cell Size: 1
+      Plane Cell Count: 30
+      Color: 80; 95; 115
+      Alpha: 0.35
+      Reference Frame: odom
+      Plane: XY
+      Line Style:
+        Value: Lines
+        Line Width: 0.02
+    - Class: rviz_default_plugins/PointCloud2
+      Name: Recorded LiDAR - height colors
+      Enabled: true
+      Topic:
+        Value: /velodyne_points
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+        Filter size: 20
+      Position Transformer: XYZ
+      Color Transformer: AxisColor
+      Axis: Z
+      Use Fixed Frame: true
+      Autocompute Value Bounds:
+        Value: false
+        Min Value: -0.5
+        Max Value: 2.5
+      Use rainbow: true
+      Alpha: 0.4
+      Style: Points
+      Size (Pixels): 2
+      Size (m): 0.03
+      Decay Time: 0
+    - Class: rviz_default_plugins/MarkerArray
+      Name: LIVE terrain - green pass red blocked gray unknown
+      Enabled: true
+      Topic:
+        Value: /traversability/terrain_markers
+        Reliability Policy: Reliable
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+        Filter size: 20
+      Namespaces:
+        forward: true
+        reverse: false
+        status: true
+    - Class: rviz_default_plugins/Path
+      Name: Recorded trajectory
+      Enabled: true
+      Topic:
+        Value: /traversability/trajectory
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+        Filter size: 20
+      Color: 80; 175; 255
+      Alpha: 0.8
+      Line Style: Lines
+      Line Width: 0.04
+      Buffer Length: 1
+      Pose Style: None
+    - Class: rviz_default_plugins/Polygon
+      Name: Recorded vehicle footprint
+      Enabled: true
+      Topic:
+        Value: /traversability/footprint
+        Reliability Policy: Best Effort
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Depth: 5
+        Filter size: 20
+      Color: 255; 215; 90
+      Alpha: 1
+    - Class: rviz_default_plugins/Axes
+      Name: Vehicle axes
+      Enabled: true
+      Reference Frame: base_link
+      Length: 0.8
+      Radius: 0.04
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Vehicle 3D view
+      Target Frame: base_link
+      Distance: 15
+      Pitch: 0.55
+      Yaw: 3.7
+      Focal Point:
+        X: 1.5
+        Y: 0
+        Z: 0.3
+      Near Clip Distance: 0.01
+      Invert Z Axis: false
+Window Geometry:
+  Width: 1500
+  Height: 960
+  X: 40
+  Y: 40
+  Hide Left Dock: false
+  Hide Right Dock: false

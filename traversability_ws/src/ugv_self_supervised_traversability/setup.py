@@ -9,8 +9,8 @@ setup(
     data_files=[
         ('share/ament_index/resource_index/packages', ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        ('share/' + package_name + '/launch', ['launch/traversability_labeling.launch.py']),
-        ('share/' + package_name + '/config', ['config/traversability.yaml']),
+        ('share/' + package_name + '/launch', ['launch/traversability_labeling.launch.py', 'launch/terrain_analysis.launch.py']),
+        ('share/' + package_name + '/config', ['config/traversability.yaml', 'config/terrain_review.rviz']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,6 +20,7 @@ setup(
     license='Apache-2.0',
     entry_points={
         'console_scripts': [
+            'terrain_analyzer = ugv_self_supervised_traversability.terrain_node:main',
             'trajectory_recorder = ugv_self_supervised_traversability.trajectory_recorder:main',
             'footprint_generator = ugv_self_supervised_traversability.footprint_generator:main',
             'traversability_labeler = ugv_self_supervised_traversability.traversability_labeler:main',

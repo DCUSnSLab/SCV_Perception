@@ -21,6 +21,17 @@ def quaternion_to_rotation_matrix(quaternion: Sequence[float]) -> np.ndarray:
     ], dtype=np.float64)
 
 
+def rotation_matrix_from_euler(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """Build a 3x3 rotation matrix from roll, pitch, yaw."""
+    cr, sr = np.cos(roll), np.sin(roll)
+    cp, sp = np.cos(pitch), np.sin(pitch)
+    cy, sy = np.cos(yaw), np.sin(yaw)
+    rotation_x = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    rotation_y = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    rotation_z = np.array([[cy, -sy, 0.0], [sy, cy, 0.0], [0.0, 0.0, 1.0]])
+    return rotation_z @ rotation_y @ rotation_x
+
+
 def transform_matrix(translation: Sequence[float], quaternion: Sequence[float]) -> np.ndarray:
     """Build a homogeneous target_T_source matrix."""
     matrix = np.eye(4, dtype=np.float64)
@@ -50,3 +61,19 @@ def euler_from_quaternion(quaternion: Sequence[float]) -> Tuple[float, float, fl
     cosy = 1.0 - 2.0 * (y * y + z * z)
     yaw = np.arctan2(siny, cosy)
     return float(roll), float(pitch), float(yaw)
+
+
+def quaternion_from_euler(roll: float, pitch: float, yaw: float) -> np.ndarray:
+    """Return [x, y, z, w] quaternion from roll, pitch, yaw."""
+    half_roll = roll * 0.5
+    half_pitch = pitch * 0.5
+    half_yaw = yaw * 0.5
+    cr, sr = np.cos(half_roll), np.sin(half_roll)
+    cp, sp = np.cos(half_pitch), np.sin(half_pitch)
+    cy, sy = np.cos(half_yaw), np.sin(half_yaw)
+    return np.array([
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+        cr * cp * cy + sr * sp * sy,
+    ], dtype=np.float64)

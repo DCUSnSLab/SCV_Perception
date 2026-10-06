@@ -18,6 +18,9 @@ def generate_launch_description() -> LaunchDescription:
     config = LaunchConfiguration('config_file')
     nodes = [
         Node(package='ugv_self_supervised_traversability',
+             executable='terrain_analyzer', name='terrain_analyzer',
+             output='screen', parameters=[config]),
+        Node(package='ugv_self_supervised_traversability',
              executable='trajectory_recorder', name='trajectory_recorder',
              output='screen', parameters=[config]),
         Node(package='ugv_self_supervised_traversability',
