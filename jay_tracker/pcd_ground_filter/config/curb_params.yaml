@@ -1,0 +1,46 @@
+# Curb / negative-obstacle detection parameters.
+# Emits synthetic obstacle points on the sidewalk<->road boundary so the
+# height-filtering local_costmap treats the curb as a lethal obstacle.
+/curb_detection_node:
+  ros__parameters:
+    input_topic: '/velodyne_points'
+    output_topic: '/velodyne_points_curb'   # <- point local_costmap here
+    curb_topic: '/curb_points'              # debug-only (curb walls in RViz)
+
+    # 'below_grade' (validated default): fit the sidewalk plane on the strip
+    # ahead, then flag EVERY cell whose ground is >drop_min below it (the
+    # road) or raise_min..raise_max above it (kerb tops).  The flagged
+    # region's boundary is the curb line; avoidance can no longer leave the
+    # sidewalk.  'grid'/'radial' are older edge detectors kept as options.
+    method: 'below_grade'
+    grid_cell: 0.30          # grid resolution (m); ground density ~76 pt/m^2
+    grid_min_pts: 1          # min LiDAR returns per cell to trust its height
+
+    drop_min: 0.10           # ground this far below the plane => road (lethal)
+    raise_min: 0.08          # raised-kerb band (below costmap's 0.15 threshold)
+    raise_max: 0.45
+    plane_z_band: 0.8        # returns within +/- this of the plane count as ground
+    max_mark_range: 12.0     # don't mark cells beyond this radius
+    plane_ema_alpha: 0.3     # temporal smoothing of the plane fit
+    plane_max_jump: 0.25     # reject fits jumping more than this (obstructed strip)
+
+    # legacy edge-detector params (unused by 'below_grade')
+    ground_ref_z: -0.9       # measured: sensor sits ~0.9 m above the sidewalk
+    ground_z_band: 0.45
+
+    curb_min_height: 0.10    # ignore steps < 10 cm (ground noise)
+    curb_max_height: 0.5     # steps taller than this are walls, not curbs
+    min_range: 1.0
+    max_range: 15.0
+
+    # radial-method-only params (unused when method: 'grid')
+    max_step_dr: 0.35
+    min_dr: 0.04
+    max_gap: 1.0
+    num_angular_bins: 720
+
+    # synthetic wall points, metres above the SIDEWALK plane (below_grade) or
+    # local ground (edge methods); must land in the costmap band [0.15, 2.0]
+    wall_offsets: [0.20, 0.35, 0.50]
+    wall_intensity: 250.0
+    merge_original: true     # republish original cloud + curb walls

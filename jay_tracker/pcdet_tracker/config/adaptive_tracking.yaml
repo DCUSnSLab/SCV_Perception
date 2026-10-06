@@ -1,0 +1,82 @@
+adaptive_tracking:
+  # All additions are independently ablatable. Setting the first flag false
+  # leaves Jay_Tracker on its original detection-only path.
+  enable_observation_analysis: true
+  enable_camera_support: true
+  enable_lidar_support: true
+  enable_depth_consistency: false
+  enable_adaptive_association: false
+  enable_adaptive_lifecycle: true
+  enable_adaptive_kf: false
+
+  topics:
+    lidar_points: /velodyne_points
+    camera_detections: /yolo/detections
+    camera_info: /camera/camera/color/camera_info
+    aligned_depth: /camera/camera/aligned_depth_to_color/image_raw
+
+  synchronization:
+    lidar_tolerance_sec: 0.12
+    camera_tolerance_sec: 0.15
+    depth_tolerance_sec: 0.15
+    cache_size: 8
+
+  camera:
+    optical_frame: camera_color_optical_frame
+    fallback_width: 896
+    fallback_height: 504
+    fallback_intrinsics: [450.6982727050781, 450.1395263671875,
+                          443.96533203125, 260.06781005859375]
+    static_tf_only: true
+
+  observation:
+    lidar:
+      min_points: 3
+      strong_points: 10
+      strong_density: 1.0
+      max_range: 40.0
+      full_score_range: 15.0
+      roi_scale: 1.10
+      strong_score: 0.55
+      count_weight: 0.55
+      density_weight: 0.25
+      range_weight: 0.20
+    camera:
+      iou_threshold: 0.20
+      strong_score: 0.40
+      min_roi_pixels: 4.0
+      min_projected_depth: 0.10
+    depth:
+      min_valid_pixels: 20
+      min_m: 0.20
+      max_m: 20.0
+      sigma_m: 1.0
+      scale: 0.001
+
+  class_mapping:
+    Vehicle: [car, truck, bus, vehicle]
+    Pedestrian: [person, pedestrian]
+    Cyclist: [bicycle, motorcycle, cyclist]
+
+  policy:
+    multimodal_cost_bonus: 0.35
+    camera_match_cost_bonus: 0.30
+    camera_conflict_penalty: 0.60
+    weak_cost_penalty: 0.35
+    camera_dominant_gate_scale: 1.20
+    weak_gate_scale: 0.75
+    camera_grace_multiplier: 2.0
+    lidar_grace_multiplier: 1.5
+    suppress_weak_new_tracks: true
+
+  temporal:
+    observation_history_size: 5
+
+  kf:
+    # Used only when enable_adaptive_kf is true.
+    min_r_scale: 0.60
+    max_r_scale: 2.00
+
+  logging:
+    enable: true
+    output_dir: results/observability
