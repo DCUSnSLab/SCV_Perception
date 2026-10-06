@@ -20,3 +20,14 @@ datasets/
 *.avi
 *.bag
 *.db3
+.pytest_cache/
+
+# colcon workspace artifacts
+traversability_ws/build/
+traversability_ws/install/
+traversability_ws/log/
+traversability_ws/test_results/
+rosbag2_*/
+
+# model weights
+*.pth

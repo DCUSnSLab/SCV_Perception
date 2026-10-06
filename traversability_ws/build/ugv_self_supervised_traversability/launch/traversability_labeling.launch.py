@@ -1,1 +1,0 @@
-/home/jay/traversability_ws/src/ugv_self_supervised_traversability/launch/traversability_labeling.launch.py

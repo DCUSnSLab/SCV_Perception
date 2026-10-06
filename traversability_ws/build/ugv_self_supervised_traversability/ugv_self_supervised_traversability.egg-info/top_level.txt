@@ -1,1 +1,0 @@
-ugv_self_supervised_traversability
