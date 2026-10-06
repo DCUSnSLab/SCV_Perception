@@ -1,0 +1,272 @@
+{
+  "method": {
+    "bag": "/home/scv/rosbag2_2026_09_17-10_51_36",
+    "camera_topic": "/camera/camera/depth/color/points",
+    "lidar_topic": "/velodyne_points",
+    "camera_frame": "camera_depth_optical_frame",
+    "lidar_frame": "velodyne",
+    "sample_count": 24,
+    "range_m": [
+      0.4,
+      10.0
+    ],
+    "max_selected_sync_ms": 30.0,
+    "metric": "one-way Velodyne-to-RealSense nearest 3-D point distance"
+  },
+  "timing": {
+    "camera_message_count": 1968,
+    "lidar_message_count": 1440,
+    "camera_rate_hz": 15.008602304444285,
+    "lidar_rate_hz": 9.980402328115854,
+    "all_pairs_abs_sync_median_ms": 18.000364303588867,
+    "all_pairs_within_30_ms": 0.6770833333333334,
+    "selected_abs_sync_median_ms": 10.241389274597168,
+    "selected_abs_sync_max_ms": 28.687000274658203
+  },
+  "recorded_camera_from_lidar_matrix": [
+    [
+      -0.03478712,
+      -0.99911931,
+      -0.02346199,
+      0.03999084
+    ],
+    [
+      -0.18562521,
+      0.02952719,
+      -0.98217688,
+      -0.22648206
+    ],
+    [
+      0.98200465,
+      -0.02981197,
+      -0.1864889,
+      -0.2939254
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "recorded_calibration": {
+    "matched_lidar_points": 101246,
+    "median_distance_m": 0.12811060677918837,
+    "p75_distance_m": 0.25392382833316446,
+    "p90_distance_m": 0.4558233886090785,
+    "within_0_10_m": 0.4141101870691188,
+    "within_0_20_m": 0.6700412855816527,
+    "within_0_30_m": 0.8031922248780199,
+    "frame_median_std_m": 0.02199001047684379
+  },
+  "uncalibrated_baseline": {
+    "matched_lidar_points": 106759,
+    "median_distance_m": 0.6304904607371667,
+    "p75_distance_m": 1.1269526987310905,
+    "p90_distance_m": 1.5685223785776825,
+    "within_0_10_m": 0.11086653115896553,
+    "within_0_20_m": 0.19783812137618373,
+    "within_0_30_m": 0.2615798199683399,
+    "frame_median_std_m": 0.2129140243487364
+  },
+  "median_distance_improvement": 0.7968080173181336,
+  "per_frame": [
+    {
+      "pair": 0,
+      "sync_delta_ms": 17.12346076965332,
+      "lidar_points_in_fov": 5501,
+      "median_distance_m": 0.1123573563428712,
+      "within_0_10_m": 0.46482457734957283,
+      "within_0_20_m": 0.662061443373932
+    },
+    {
+      "pair": 1,
+      "sync_delta_ms": -28.687000274658203,
+      "lidar_points_in_fov": 5107,
+      "median_distance_m": 0.12635777036871382,
+      "within_0_10_m": 0.42020755825337774,
+      "within_0_20_m": 0.6712355590366164
+    },
+    {
+      "pair": 2,
+      "sync_delta_ms": -6.492853164672852,
+      "lidar_points_in_fov": 5407,
+      "median_distance_m": 0.12975120495880943,
+      "within_0_10_m": 0.4096541520251526,
+      "within_0_20_m": 0.6565563158868134
+    },
+    {
+      "pair": 3,
+      "sync_delta_ms": 13.672351837158203,
+      "lidar_points_in_fov": 5428,
+      "median_distance_m": 0.10455436524525619,
+      "within_0_10_m": 0.4859985261606485,
+      "within_0_20_m": 0.7046794399410464
+    },
+    {
+      "pair": 4,
+      "sync_delta_ms": 1.6045570373535156,
+      "lidar_points_in_fov": 5234,
+      "median_distance_m": 0.09882307461279871,
+      "within_0_10_m": 0.5042032862055789,
+      "within_0_20_m": 0.7082537256400459
+    },
+    {
+      "pair": 5,
+      "sync_delta_ms": -10.756254196166992,
+      "lidar_points_in_fov": 5085,
+      "median_distance_m": 0.12403678832364586,
+      "within_0_10_m": 0.4352015732546706,
+      "within_0_20_m": 0.6507374631268437
+    },
+    {
+      "pair": 6,
+      "sync_delta_ms": 9.530305862426758,
+      "lidar_points_in_fov": 5165,
+      "median_distance_m": 0.05539197851587747,
+      "within_0_10_m": 0.7163601161665053,
+      "within_0_20_m": 0.8451113262342691
+    },
+    {
+      "pair": 7,
+      "sync_delta_ms": -2.7658939361572266,
+      "lidar_points_in_fov": 5245,
+      "median_distance_m": 0.1400539434027431,
+      "within_0_10_m": 0.3319351763584366,
+      "within_0_20_m": 0.7040991420400381
+    },
+    {
+      "pair": 8,
+      "sync_delta_ms": 18.163681030273438,
+      "lidar_points_in_fov": 3580,
+      "median_distance_m": 0.1409793840537616,
+      "within_0_10_m": 0.36620111731843574,
+      "within_0_20_m": 0.6508379888268156
+    },
+    {
+      "pair": 9,
+      "sync_delta_ms": -27.1146297454834,
+      "lidar_points_in_fov": 3474,
+      "median_distance_m": 0.14996700962940393,
+      "within_0_10_m": 0.34772596430627517,
+      "within_0_20_m": 0.6373056994818653
+    },
+    {
+      "pair": 10,
+      "sync_delta_ms": 27.5270938873291,
+      "lidar_points_in_fov": 3492,
+      "median_distance_m": 0.13314368443247776,
+      "within_0_10_m": 0.3880297823596793,
+      "within_0_20_m": 0.6580756013745704
+    },
+    {
+      "pair": 11,
+      "sync_delta_ms": 14.921903610229492,
+      "lidar_points_in_fov": 4463,
+      "median_distance_m": 0.1429285956277941,
+      "within_0_10_m": 0.36858615281200985,
+      "within_0_20_m": 0.6155052655164688
+    },
+    {
+      "pair": 12,
+      "sync_delta_ms": 2.4242401123046875,
+      "lidar_points_in_fov": 3572,
+      "median_distance_m": 0.1509257946316972,
+      "within_0_10_m": 0.3446248600223964,
+      "within_0_20_m": 0.6273796192609182
+    },
+    {
+      "pair": 13,
+      "sync_delta_ms": -9.726524353027344,
+      "lidar_points_in_fov": 3762,
+      "median_distance_m": 0.14841888049960608,
+      "within_0_10_m": 0.3487506645401382,
+      "within_0_20_m": 0.6358320042530569
+    },
+    {
+      "pair": 14,
+      "sync_delta_ms": 11.69443130493164,
+      "lidar_points_in_fov": 3757,
+      "median_distance_m": 0.10526272323004017,
+      "within_0_10_m": 0.4785733297844024,
+      "within_0_20_m": 0.7482033537396859
+    },
+    {
+      "pair": 15,
+      "sync_delta_ms": -0.6439685821533203,
+      "lidar_points_in_fov": 3662,
+      "median_distance_m": 0.13817770474477337,
+      "within_0_10_m": 0.3629164391043146,
+      "within_0_20_m": 0.6466411796832332
+    },
+    {
+      "pair": 16,
+      "sync_delta_ms": 20.180940628051758,
+      "lidar_points_in_fov": 3684,
+      "median_distance_m": 0.1419411680871382,
+      "within_0_10_m": 0.3697068403908795,
+      "within_0_20_m": 0.6414223669923995
+    },
+    {
+      "pair": 17,
+      "sync_delta_ms": 7.213592529296875,
+      "lidar_points_in_fov": 3526,
+      "median_distance_m": 0.14157921836712462,
+      "within_0_10_m": 0.37521270561542824,
+      "within_0_20_m": 0.6596710153148043
+    },
+    {
+      "pair": 18,
+      "sync_delta_ms": -4.77290153503418,
+      "lidar_points_in_fov": 3527,
+      "median_distance_m": 0.1557275966692184,
+      "within_0_10_m": 0.32719024666855684,
+      "within_0_20_m": 0.6351006521122767
+    },
+    {
+      "pair": 19,
+      "sync_delta_ms": 17.192363739013672,
+      "lidar_points_in_fov": 3983,
+      "median_distance_m": 0.12605945700729573,
+      "within_0_10_m": 0.42806929450163195,
+      "within_0_20_m": 0.6811448656791363
+    },
+    {
+      "pair": 20,
+      "sync_delta_ms": 3.8094520568847656,
+      "lidar_points_in_fov": 3644,
+      "median_distance_m": 0.14516322286699818,
+      "within_0_10_m": 0.36086717892425907,
+      "within_0_20_m": 0.6319978046103183
+    },
+    {
+      "pair": 21,
+      "sync_delta_ms": -8.231163024902344,
+      "lidar_points_in_fov": 3831,
+      "median_distance_m": 0.138446560200632,
+      "within_0_10_m": 0.36961628817541115,
+      "within_0_20_m": 0.6536152440616028
+    },
+    {
+      "pair": 22,
+      "sync_delta_ms": 12.847185134887695,
+      "lidar_points_in_fov": 3545,
+      "median_distance_m": 0.14597638742775623,
+      "within_0_10_m": 0.3695345557122708,
+      "within_0_20_m": 0.6304654442877292
+    },
+    {
+      "pair": 23,
+      "sync_delta_ms": 0.5137920379638672,
+      "lidar_points_in_fov": 3572,
+      "median_distance_m": 0.14787010677353774,
+      "within_0_10_m": 0.3650615901455767,
+      "within_0_20_m": 0.6256998880179171
+    }
+  ],
+  "limitations": [
+    "No surveyed target or ground-truth extrinsic is present.",
+    "Nearest-point distance is affected by sensor noise, beam density, occlusion, motion, and residual timestamp offset.",
+    "The result demonstrates cross-sensor consistency, not absolute six-degree-of-freedom calibration accuracy."
+  ]
+}

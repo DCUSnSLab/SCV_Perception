@@ -1,0 +1,69 @@
+terrain_seg_node:
+  ros__parameters:
+    model_id: nvidia/segformer-b0-finetuned-cityscapes-1024-1024
+    device: auto                 # auto, cpu, cuda, cuda:0, ...
+    use_fp16: true               # Applied only on CUDA.
+    # cloud matches the currently recorded bag. Use rgbd for live raw+depth.
+    input_mode: cloud
+
+    image_topic: /camera/camera/color/image_raw
+    depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    camera_info_topic: /camera/camera/color/camera_info
+    compressed_image_topic: /camera/camera/color/image_raw/compressed
+    camera_cloud_topic: /camera/camera/depth/color/points
+    # D555 serial 419222301550, 896x504 color profile.
+    camera_calibration_width: 896
+    camera_calibration_height: 504
+    camera_intrinsics: [450.6982727050781, 450.1395263671875,
+                        443.96533203125, 260.06781005859375]
+    camera_distortion: [-0.0555432066321373, 0.06311847269535065,
+                        0.0002300205669598654, 0.0008905537542887032,
+                        -0.019217900931835175]
+
+    class_mask_topic: /terrain_seg/class_mask
+    color_mask_topic: /terrain_seg/color_mask
+    overlay_topic: /terrain_seg/overlay
+    pointcloud_topic: /terrain_seg/semantic_points
+    lidar_topic: /velodyne_points
+    lidar_pointcloud_topic: /terrain_seg/semantic_lidar_points
+    geometry_pointcloud_topic: /terrain_seg/geometry_points
+    fused_pointcloud_topic: /terrain_seg/fused_points
+    labels_topic: /terrain_seg/labels
+    geometry_labels_topic: /terrain_seg/geometry_labels
+    fused_labels_topic: /terrain_seg/fused_labels
+    target_frame: velodyne       # Empty string keeps the camera optical frame.
+    static_tf_only: true         # Sensor extrinsics only; robust to looped bags.
+
+    sync_queue_size: 5
+    sync_slop: 0.08
+    cloud_sync_slop: 0.15
+    lidar_sync_tolerance: 0.15
+    lidar_occlusion_tolerance: 0.5
+    tf_timeout: 0.1
+    max_inference_rate: 5.0
+
+    point_stride: 2
+    min_depth: 0.25
+    max_depth: 12.0
+    depth_scale: 0.001           # 16UC1 RealSense depth units to meters.
+    min_confidence: 0.55
+    included_class_ids: [0, 1]  # road, sidewalk (Cityscapes includes curb here)
+    overlay_alpha: 0.45
+
+    # Geometry-only baseline in the gravity-aligned velodyne frame.
+    enable_depth_geometry: true
+    geometry_stride: 2
+    geometry_resolution: 0.05
+    geometry_x_min: -1.0
+    geometry_x_max: 12.0
+    geometry_y_min: -5.0
+    geometry_y_max: 5.0
+    geometry_z_min: -1.5
+    geometry_z_max: 1.5
+    expected_ground_z: -0.9
+    expected_ground_tolerance: 0.45
+    ground_plane_tolerance: 0.05
+    max_ground_slope_deg: 20.0
+    curb_min_height: 0.05
+    curb_max_height: 0.25
+    obstacle_min_height: 0.28
