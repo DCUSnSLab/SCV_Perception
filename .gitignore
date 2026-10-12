@@ -23,6 +23,9 @@ datasets/
 .pytest_cache/
 
 # colcon workspace artifacts
+build/
+install/
+log/
 traversability_ws/build/
 traversability_ws/install/
 traversability_ws/log/
