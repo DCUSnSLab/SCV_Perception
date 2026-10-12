@@ -1,0 +1,3 @@
+[console_scripts]
+observation_tracker_node = observation_tracker.observation_tracker_node:main
+

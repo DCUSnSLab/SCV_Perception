@@ -1,0 +1,28 @@
+[1.267s] Invoking command in '/home/scv/SCV/src/perception/observation_tracker/build/observation_tracker': PYTHONPATH=/home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/build --no-deps symlink_data
+[1.625s] running develop
+[1.870s] running egg_info
+[1.870s] creating observation_tracker.egg-info
+[1.870s] writing observation_tracker.egg-info/PKG-INFO
+[1.870s] writing dependency_links to observation_tracker.egg-info/dependency_links.txt
+[1.871s] writing entry points to observation_tracker.egg-info/entry_points.txt
+[1.871s] writing requirements to observation_tracker.egg-info/requires.txt
+[1.871s] writing top-level names to observation_tracker.egg-info/top_level.txt
+[1.871s] writing manifest file 'observation_tracker.egg-info/SOURCES.txt'
+[1.872s] reading manifest file 'observation_tracker.egg-info/SOURCES.txt'
+[1.873s] writing manifest file 'observation_tracker.egg-info/SOURCES.txt'
+[1.910s] running build_ext
+[1.911s] Creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/lib/python3.10/site-packages/observation-tracker.egg-link (link to .)
+[1.911s] Installing observation_tracker_node script to /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/lib/observation_tracker
+[1.912s] 
+[1.912s] Installed /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker
+[1.912s] running symlink_data
+[1.912s] creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/ament_index
+[1.912s] creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/ament_index/resource_index
+[1.912s] creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/ament_index/resource_index/packages
+[1.912s] symbolically linking /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/resource/observation_tracker -> /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/ament_index/resource_index/packages
+[1.912s] symbolically linking /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/package.xml -> /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker
+[1.912s] creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker/config
+[1.912s] symbolically linking /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/config/observation_tracker.yaml -> /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker/config
+[1.912s] creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker/launch
+[1.912s] symbolically linking /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/launch/observation_tracker.launch.py -> /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker/launch
+[1.941s] Invoked command in '/home/scv/SCV/src/perception/observation_tracker/build/observation_tracker' returned '0': PYTHONPATH=/home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/lib/python3.10/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/build --no-deps symlink_data

@@ -279,7 +279,7 @@ def inside_edge(point, edge_start, edge_end):
     return (
         (edge_end[0] - edge_start[0]) * (point[1] - edge_start[1])
         - (edge_end[1] - edge_start[1]) * (point[0] - edge_start[0])
-    ) >= 0.0
+    ) <= 0.0
 
 
 def segment_intersection(p1, p2, q1, q2):

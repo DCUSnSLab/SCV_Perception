@@ -1,0 +1,26 @@
+running develop
+running egg_info
+creating observation_tracker.egg-info
+writing observation_tracker.egg-info/PKG-INFO
+writing dependency_links to observation_tracker.egg-info/dependency_links.txt
+writing entry points to observation_tracker.egg-info/entry_points.txt
+writing requirements to observation_tracker.egg-info/requires.txt
+writing top-level names to observation_tracker.egg-info/top_level.txt
+writing manifest file 'observation_tracker.egg-info/SOURCES.txt'
+reading manifest file 'observation_tracker.egg-info/SOURCES.txt'
+writing manifest file 'observation_tracker.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/lib/python3.10/site-packages/observation-tracker.egg-link (link to .)
+Installing observation_tracker_node script to /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/lib/observation_tracker
+
+Installed /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker
+running symlink_data
+creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/ament_index
+creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/ament_index/resource_index
+creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/ament_index/resource_index/packages
+symbolically linking /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/resource/observation_tracker -> /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/ament_index/resource_index/packages
+symbolically linking /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/package.xml -> /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker
+creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker/config
+symbolically linking /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/config/observation_tracker.yaml -> /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker/config
+creating /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker/launch
+symbolically linking /home/scv/SCV/src/perception/observation_tracker/build/observation_tracker/launch/observation_tracker.launch.py -> /home/scv/SCV/src/perception/observation_tracker/install/observation_tracker/share/observation_tracker/launch

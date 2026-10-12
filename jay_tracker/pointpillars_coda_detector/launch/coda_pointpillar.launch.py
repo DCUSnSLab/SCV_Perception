@@ -8,7 +8,7 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument("input_topic", default_value="/no_ground_points"),
+        DeclareLaunchArgument("input_topic", default_value="/velodyne_points"),
         DeclareLaunchArgument("detection_topic", default_value="/detected_objects_3d"),
         DeclareLaunchArgument("marker_topic", default_value="/detections/visual_markers"),
         DeclareLaunchArgument("score_thresh", default_value="0.65"),
@@ -16,7 +16,8 @@ def generate_launch_description():
         DeclareLaunchArgument("perf_output_dir", default_value="results/perf"),
         DeclareLaunchArgument(
             "openpcdet_path",
-            default_value="/home/scv/SCV_Perception/third_party/OpenPCDet",
+            default_value=(
+                "/home/scv/ws/SCV_Perception/third_party/OpenPCDet"),
             description="Path containing the OpenPCDet pcdet Python package",
         ),
         DeclareLaunchArgument(
@@ -31,7 +32,7 @@ def generate_launch_description():
             ),
             description="CUDA 12 OpenPCDet extension directory",
         ),
-        DeclareLaunchArgument("run_tracker", default_value="true"),
+        DeclareLaunchArgument("run_tracker", default_value="false"),
         # behavior_predictor is an optional downstream package and is not part
         # of this workspace. Keep the detector/tracker launch self-contained.
         DeclareLaunchArgument("run_behavior_predictor", default_value="false"),

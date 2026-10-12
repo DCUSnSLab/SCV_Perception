@@ -1,0 +1,9 @@
+source;share/observation_tracker/hook/pythonpath.ps1
+source;share/observation_tracker/hook/pythonpath.dsv
+source;share/observation_tracker/hook/pythonpath.sh
+source;share/observation_tracker/hook/ament_prefix_path.ps1
+source;share/observation_tracker/hook/ament_prefix_path.dsv
+source;share/observation_tracker/hook/ament_prefix_path.sh
+source;../../build/observation_tracker/share/observation_tracker/hook/pythonpath_develop.ps1
+source;../../build/observation_tracker/share/observation_tracker/hook/pythonpath_develop.dsv
+source;../../build/observation_tracker/share/observation_tracker/hook/pythonpath_develop.sh

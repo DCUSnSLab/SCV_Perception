@@ -9,7 +9,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile
 from ament_index_python.packages import get_package_share_directory
 
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CompressedImage, Image
 from geometry_msgs.msg import Point, Polygon, Point32
 from perception_interface.msg import DetectionResult, DetectionArray
 from ultralytics import YOLO
@@ -23,14 +23,18 @@ class SegNode(Node):
 
         # ---- Declare parameters ----
         self.declare_parameter("yolo_model", "yolo11n-seg.pt")
-        self.declare_parameter("input_topic", "image_raw")
-        self.declare_parameter("result_image_topic", "yolo/seg_image")
-        self.declare_parameter("detection_topic", "yolo/detections")
+        self.declare_parameter(
+            "input_topic", "/camera/camera/color/image_raw/compressed")
+        self.declare_parameter("result_image_topic", "/yolo/seg_image")
+        self.declare_parameter("detection_topic", "/yolo/detections")
+        self.declare_parameter("publish_source_image", False)
+        self.declare_parameter("publish_masks", False)
 
         self.declare_parameter("conf_thres", 0.25)
         self.declare_parameter("iou_thres", 0.45)
         self.declare_parameter("max_det", 300)
-        self.declare_parameter("classes", "")     # 문자열로 받기
+        # COCO: person=0, car=2. Observation tracking only needs these classes.
+        self.declare_parameter("classes", "0,2")
         self.declare_parameter("device", "")      # 문자열로 받기
 
         self.declare_parameter("result_conf", True)
@@ -41,7 +45,7 @@ class SegNode(Node):
         self.declare_parameter("result_boxes", True)
         
         # Memory-SORT tracker parameters
-        self.declare_parameter("enable_tracking", True)
+        self.declare_parameter("enable_tracking", False)
         self.declare_parameter("iou_thr_active", 0.3)
         self.declare_parameter("iou_thr_memory", 0.2)
         self.declare_parameter("min_hits", 3)
@@ -53,6 +57,8 @@ class SegNode(Node):
         self.input_topic = self.get_parameter("input_topic").get_parameter_value().string_value
         self.result_image_topic = self.get_parameter("result_image_topic").get_parameter_value().string_value
         self.detection_topic = self.get_parameter("detection_topic").get_parameter_value().string_value
+        self.publish_source_image = self.get_parameter("publish_source_image").value
+        self.publish_masks = self.get_parameter("publish_masks").value
 
         self.conf_thres = self.get_parameter("conf_thres").value
         self.iou_thres = self.get_parameter("iou_thres").value
@@ -103,9 +109,13 @@ class SegNode(Node):
         self.prev_timestamp = None
 
         # ---- IO ----
+        input_type = (
+            CompressedImage
+            if self.input_topic.rstrip("/").endswith("/compressed")
+            else Image)
         self.sub = self.create_subscription(
-            Image, self.input_topic, self.image_cb, qos_profile_sensor_data
-        )
+            input_type, self.input_topic, self.image_cb,
+            qos_profile_sensor_data)
         self.pub_img = self.create_publisher(Image, self.result_image_topic, QoSProfile(depth=1))
         self.pub_detections = self.create_publisher(DetectionArray, self.detection_topic, QoSProfile(depth=1))
 
@@ -125,9 +135,27 @@ class SegNode(Node):
                 output_masks=self.use_segmentation
             )
 
-    def image_cb(self, msg: Image):
+    def image_cb(self, msg):
         t0 = time.perf_counter()
-        cv_img = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        if isinstance(msg, CompressedImage):
+            cv_img = cv2.imdecode(
+                np.frombuffer(msg.data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if cv_img is None:
+                self.get_logger().error(
+                    "Failed to decode compressed camera image",
+                    throttle_duration_sec=2.0)
+                return
+        else:
+            cv_img = self.bridge.imgmsg_to_cv2(
+                msg, desired_encoding="bgr8")
+
+        if self.publish_source_image:
+            source_image = self.bridge.cv2_to_imgmsg(cv_img, encoding="bgr8")
+        else:
+            source_image = Image()
+            source_image.height, source_image.width = cv_img.shape[:2]
+            source_image.encoding = "bgr8"
+        source_image.header = msg.header
         
         # Calculate FPS for tracker initialization
         current_time = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
@@ -165,7 +193,7 @@ class SegNode(Node):
             
             # Get masks if available (segmentation)
             masks_np = None
-            if res.masks is not None:
+            if self.publish_masks and res.masks is not None:
                 masks_np = res.masks.data.cpu().numpy()
             
             # Convert to tracker format: [x1, y1, x2, y2, conf, cls, mask]
@@ -191,7 +219,7 @@ class SegNode(Node):
         # Create detection array message
         detection_array = DetectionArray()
         detection_array.header = msg.header
-        detection_array.source_image = msg
+        detection_array.source_image = source_image
         detection_array.model_name = "YOLO11"
         detection_array.model_version = "v11"
         detection_array.detections = []
@@ -233,13 +261,9 @@ class SegNode(Node):
                 )
                 
                 # Segmentation mask if available
-                if mask is not None and isinstance(mask, np.ndarray):
+                if self.publish_masks and mask is not None and isinstance(mask, np.ndarray):
                     mask_uint8 = (mask * 255).astype(np.uint8)
                     detection.mask = self.bridge.cv2_to_imgmsg(mask_uint8, encoding="mono8")
-                else:
-                    # Create empty mask
-                    empty_mask = np.zeros((cv_img.shape[0], cv_img.shape[1]), dtype=np.uint8)
-                    detection.mask = self.bridge.cv2_to_imgmsg(empty_mask, encoding="mono8")
                 
                 detection_array.detections.append(detection)
         else:
@@ -251,7 +275,7 @@ class SegNode(Node):
                 
                 # Get masks if available (segmentation)
                 masks = None
-                if res.masks is not None:
+                if self.publish_masks and res.masks is not None:
                     masks = res.masks.data.cpu().numpy()
                 
                 for i in range(len(boxes)):
@@ -284,14 +308,10 @@ class SegNode(Node):
                     )
                     
                     # Segmentation mask if available
-                    if masks is not None and i < len(masks):
+                    if self.publish_masks and masks is not None and i < len(masks):
                         mask = masks[i]
                         mask_uint8 = (mask * 255).astype(np.uint8)
                         detection.mask = self.bridge.cv2_to_imgmsg(mask_uint8, encoding="mono8")
-                    else:
-                        # Create empty mask
-                        empty_mask = np.zeros((cv_img.shape[0], cv_img.shape[1]), dtype=np.uint8)
-                        detection.mask = self.bridge.cv2_to_imgmsg(empty_mask, encoding="mono8")
                     
                     detection_array.detections.append(detection)
         

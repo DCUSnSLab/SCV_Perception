@@ -109,7 +109,10 @@ source install/setup.bash
 ros2 launch pointpillars_coda_detector coda_pointpillar.launch.py
 ```
 
-PointPillars 기본 입력은 ground removal 결과인 `/no_ground_points`이다. Ground filter를 쓰지 않을 때는 `input_topic:=/velodyne_points`로 직접 바꿀 수 있지만, 학습 전처리와 같은 조건인지 확인해야 한다. 이 workspace에 없는 optional `behavior_predictor`는 기본 OFF이다.
+Observation Tracker와 함께 쓸 때 편하도록 PointPillars 기본 입력은
+`/velodyne_points`, 내장 Jay Tracker는 기본 OFF이다. Ground removal 결과를
+사용하려면 `input_topic:=/no_ground_points`를 지정한다. 이 workspace에 없는
+optional `behavior_predictor`도 기본 OFF이다.
 
 Tracker만 실행:
 
@@ -156,7 +159,7 @@ RViz text marker에는 track ID, observation state, L/C/D score가 표시된다.
 
 여기서 3D/2D detection은 integration 검증을 위해 합성했으며 PointPillars와 실제 camera detector의 정확도 평가는 아직 수행하지 않았다. Camera debug image overlay는 아직 없고 RViz text/box 및 CSV를 우선 구현했다.
 
-PointPillars runtime은 CUDA 12 overlay 방식으로 복구했다. 완전한 OpenPCDet Python 소스는 `/home/scv/SCV_Perception/third_party/OpenPCDet`를 사용하고, workspace에 있던 CUDA 12 extension 6개를 `openpcdet_runtime.py`가 먼저 로드한다. Eager detector registry가 불필요한 CUDA 11 `bev_pool`을 읽지 않도록 BEVFusion만 격리했다. 현재 PyTorch와 실행 ABI가 맞지 않는 CUDA NMS는 OpenCV C++ rotated-box NMS로 대체했으며, PointPillars의 GPU convolution과 forward는 그대로 유지한다.
+PointPillars runtime은 CUDA 12 overlay 방식으로 복구했다. 완전한 OpenPCDet Python 소스는 `/home/scv/ws/SCV_Perception/third_party/OpenPCDet`를 사용하고, workspace에 있던 CUDA 12 extension 6개를 `openpcdet_runtime.py`가 먼저 로드한다. Eager detector registry가 불필요한 CUDA 11 `bev_pool`을 읽지 않도록 BEVFusion만 격리했다. 현재 PyTorch와 실행 ABI가 맞지 않는 CUDA NMS는 OpenCV C++ rotated-box NMS로 대체했으며, PointPillars의 GPU convolution과 forward는 그대로 유지한다.
 
 실제 rosbag의 `/velodyne_points`로 520프레임 연속 inference를 검증했다. 약 9.98 Hz 입력을 유지했고 전체 처리시간은 일반적으로 78–83 ms, GPU inference는 약 56–57 ms였다. 객체가 생긴 프레임에서 1–2개 detection 및 marker 발행까지 확인했고 CUDA/NMS crash 없이 종료했다. 검증은 detector에 raw point를 직접 연결했으므로 실제 운용 시에는 기본 입력인 `/no_ground_points`를 ground removal node에서 발행하는 구성을 사용한다.
 
