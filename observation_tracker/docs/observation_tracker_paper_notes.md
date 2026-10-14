@@ -111,7 +111,7 @@
 → Camera Projection and 2D Matching
 → Depth Consistency Analysis
 → Observation State Decision
-→ Observation-Adaptive Cascaded Association
+→ Uncertainty-Adaptive Unified Association
 → Adaptive Track Lifecycle
 → Track Output, RViz Marker, CSV Logging
 ```
@@ -246,7 +246,7 @@
   - `Y = (v - cy) × Z / fy`
   - `Z = median depth`
 - TF inverse transform을 이용하여 LiDAR/source frame으로 변환
-- RViz에서 `CAMERA_DEPTH_CANDIDATE` sphere로 표시
+- RViz에서 `CAMERA_DEPTH_CANDIDATE` box로 표시
 - Camera-only candidate에는 신규 3D Track ID를 부여하지 않음
 - 기존 Track과 Camera/Depth evidence가 일치하는 경우에만 recovery에 사용
 
@@ -259,78 +259,40 @@
 | `CAMERA_DOMINANT` | LiDAR Weak/No evidence + Camera Supported + Depth Consistent | 기존 3D Track recovery에 사용 |
 | `WEAK_OBSERVATION` | LiDAR와 Camera 모두 충분한 support 없음 | 즉시 삭제하지 않고 temporal lifecycle에서 판단 |
 
-## 13. Observation-Adaptive Cascaded Association
+## 13. Uncertainty-Adaptive Unified Association
 
 ### 13.1 공통 원칙
 
-- 각 Stage 이전에 gating 적용
-- 각 Stage에서 matching된 Track과 detection을 제거
-- Unmatched candidate만 다음 Stage로 전달
-- Hungarian assignment 재사용
-- 모든 객체가 모든 Stage를 통과하지 않음
+- 활성, LOST, OCCLUDED Track과 모든 3D detection을 하나의 Hungarian assignment에 포함
+- Class mismatch는 rejection
+- `H P H^T + R` 기반 Mahalanobis distance를 유일한 위치 hard gate로 사용
+- 3D IoU, Camera 2D IoU, Depth consistency는 soft cost로 사용
+- 센서가 unavailable이면 해당 센서 cost를 적용하지 않음
 
-### 13.2 Stage 1: Multimodal Association
+### 13.2 Sensor-supported Unmatched Track Recovery
 
-- 대상: `MULTIMODAL_STRONG`
-- 사용 항목
-  - 3D center distance
-  - 3D IoU
-  - Motion consistency
-  - Camera 2D IoU
-  - Depth consistency
-  - Class consistency
-- 동일 Camera detection index가 아닌 Track-detection pair는 rejection 가능
-
-### 13.3 Stage 2: LiDAR-dominant Association
-
-- 대상
-  - Stage 1 unmatched candidate
-  - `LIDAR_DOMINANT`
-  - Observation data가 unavailable인 candidate
-- Camera information을 cost에서 제외
-- Camera FOV 밖에 대한 penalty 없음
-
-### 13.4 Stage 3: Camera-assisted Recovery
-
-- 대상: Stage 1과 Stage 2에서 match되지 않은 기존 Track
+- 대상: 통합 assignment에서 match되지 않은 기존 Track
 - 조건
-  - `CAMERA_DOMINANT`
-  - 2D detection support
-  - Depth `CONSISTENT`
+  - 예측 box 내부 LiDAR evidence가 `STRONG`, 또는
+  - class-compatible 2D detection support와 `CONSISTENT`/`UNAVAILABLE` depth
+  - 다른 객체에 의한 명시적 occlusion은 occlusion policy가 우선
 - 처리
   - 기존 Track ID 유지
   - Track status를 `RECOVERING`으로 변경
+  - detector miss streak를 0으로 reset
+  - association stage를 `SUPPORTED_PREDICTION`으로 기록
   - Camera-depth 3D center 방향으로 predicted position 일부 보정
   - Position gain: `0.40`
   - 1 frame maximum correction: `0.50 m`
 - Camera-only detection으로 신규 3D Track을 생성하지 않음
 
-### 13.5 Stage 4: Weak Observation Handling
+### 13.3 Weak Observation Handling
 
-- 강제 association을 수행하지 않는 기본 miss 처리
-- KF prediction 및 temporal memory 유지
-- Miss count와 confidence 갱신
-- 장기 WEAK 상태는 lifecycle에서 termination
-
-### 13.6 Weak Track Continuity 보완
-
-- 문제
-  - 기존 ID를 가진 객체가 순간적으로 `WEAK_OBSERVATION`으로 바뀌면 3D box가 존재해도 Stage 1/2 대상에서 제외
-  - Track ID와 detection box의 연결이 한 frame 단절될 수 있음
-- 개선
-  - Stage 1/2 이후 남은 Track과 WEAK detection을 대상으로 수행
-  - 실험 log의 association stage: `STAGE_4_WEAK_CONTINUITY`
-  - 기존 `CONFIRMED` 또는 `RECOVERING` Track만 대상
-  - Class 완전 일치
-  - Center distance `1.0 m` 이하
-  - 3D IoU `0.20` 이상
-  - 기존 miss age `2 frame` 이하
-  - Hungarian one-to-one assignment 수행
-- Suppression 유지 방법
-  - Weak detection으로 신규 Track을 생성하지 않음
-  - Weak continuity를 정상 KF hit로 계산하지 않음
-  - Confirmation 근거로 사용하지 않음
-  - 장기 WEAK 상태에는 기존 confidence decay와 termination 적용
+- `CONFIRMED`, `RECOVERING`, `LOST`, `OCCLUDED` Track을 하나의 Hungarian assignment에 포함
+- 모든 class가 동일한 uncertainty policy 사용
+- `WEAK_OBSERVATION` match는 ID와 위치 연속성만 유지하며 정상 KF hit 또는 confirmation 근거로 계산하지 않음
+- unmatched Track은 가림 여부와 센서 관측 가능성에 따라 서로 다른 confidence decay 적용
+- 보행자 전용 recovery stage와 고정 반경 기반 신규 ID 차단 제거
 
 ## 14. Association Cost 및 Gate
 
@@ -338,27 +300,33 @@
 
 ```text
 Cost =
-  center_distance_weight × normalized center distance
+  motion_weight × normalized squared Mahalanobis distance
   + iou_3d_weight × (1 - 3D IoU)
-  + motion_weight × normalized motion innovation
   + optional camera/depth cost
-  + class mismatch penalty
 ```
 
-### 14.2 현재 보수적 설정
+위치 innovation은 `S = H P H^T + R`로 정규화한다. Class mismatch만 즉시
+거절하며 3D IoU는 hard gate가 아닌 soft cost이다. 따라서 miss가 누적되어
+예측 공분산이 증가하면 재연결 가능 영역도 자동으로 증가한다.
+
+### 14.2 현재 설정
 
 | Parameter | 현재 값 | 목적 |
 |---|---:|---|
-| `center_distance_weight` | 1.25 | 위치 일치 중요도 증가 |
 | `iou_3d_weight` | 1.25 | box overlap 중요도 증가 |
-| `motion_weight` | 0.75 | 비정상 motion 억제 |
-| `camera_iou_weight` | 0.50 | Multimodal stage의 2D overlap 반영 |
+| `motion_weight` | 0.75 | 공분산 정규화 innovation 반영 |
+| `camera_iou_weight` | 0.50 | 2D overlap 반영 |
 | `depth_weight` | 0.25 | Depth consistency 반영 |
-| `class_penalty` | 10.0 | Class mismatch 사실상 rejection |
-| `center_distance_gate` | 2.5 m | 멀리 벗어난 detection rejection |
-| `iou_3d_gate` | 0.05 | overlap이 없는 pair rejection |
-| `motion_gate` | 4.0 | 과도한 innovation rejection |
+| `mahalanobis_gate` | 9.21 | 2D 위치 측정의 99% chi-square gate |
 | `maximum_association_cost` | 3.5 | 낮은 품질의 전체 match rejection |
+
+### 14.3 정지/등속 motion mixture
+
+- 동일 Track 안에서 stationary prediction과 constant-velocity prediction을 계산
+- 직전 model 확률에 transition prior를 적용
+- 새 위치 측정에 대한 두 prediction likelihood로 model 확률 갱신
+- 두 prediction의 weighted mean과 between-model covariance를 KF prediction에 반영
+- 차량과 보행자 모두 같은 motion mixture 사용
 
 ## 15. BEV IoU 수정
 
@@ -372,7 +340,7 @@ Cost =
 - 검증
   - 동일 box의 BEV IoU가 `1.0`으로 계산됨
 - 영향
-  - 신규 Weak Continuity뿐 아니라 기존 Stage 1/2의 3D IoU cost도 정상화
+  - 통합 association의 3D IoU soft cost 정상화
 
 ## 16. Track Lifecycle Management
 
@@ -381,6 +349,7 @@ Cost =
 - `TENTATIVE`
 - `CONFIRMED`
 - `RECOVERING`
+- `OCCLUDED`
 - `SUPPRESSED`
 - `LOST`
 - `TERMINATED`
@@ -420,6 +389,10 @@ Cost =
 - Detection match 실패 + sensor support 없음
   - miss count 증가
   - Track confidence 감소
+- Detection match 실패 + 가까운 보행자가 projected ROI를 가림
+  - Depth `OCCLUDED`와 track 간 거리 순서를 함께 확인
+  - `OCCLUDED` 상태로 전환하고 기존 ID를 제한 시간 동안 유지
+  - 재등장 detection을 신규 ID 생성 전에 기존 Track에 우선 association
 
 ### 16.5 Track Termination
 
@@ -519,23 +492,21 @@ Cost =
 - `enable_camera_observation`
 - `enable_depth_consistency`
 - `enable_observation_state`
-- `enable_cascaded_association`
 - `enable_adaptive_lifecycle`
 - `enable_temporal_smoothing`
-- `enable_weak_track_continuity`
 - `enable_odometry`
 - `enable_imu`
 
 ### 20.2 권장 ablation 조합
 
-| 실험 | LiDAR observation | Camera | Depth | Cascaded association | Adaptive lifecycle | 목적 |
+| 실험 | LiDAR observation | Camera | Depth | Unified association | Adaptive lifecycle | 목적 |
 |---|---:|---:|---:|---:|---:|---|
 | A0 Baseline | Off | Off | Off | Off | Off | 기존 LiDAR Tracking-by-Detection 기준 성능 |
 | A1 LiDAR evidence | On | Off | Off | On | On | Raw point evidence 효과 |
 | A2 LiDAR + Camera | On | On | Off | On | On | 2D support 효과 |
 | A3 LiDAR + Camera + Depth | On | On | On | On | On | Depth consistency 효과 |
 | A4 Full - temporal smoothing | On | On | On | On | On, smoothing Off | Temporal smoothing 효과 |
-| A5 Full - weak continuity | On | On | On | On | On | Weak continuity의 ID 유지 효과 |
+| A5 Full - weak match | On | On | On | On | On | Weak match의 ID 유지 효과 |
 | A6 Full | On | On | On | On | On | 전체 제안 방법 |
 
 ## 21. 논문 평가 지표 후보
@@ -572,7 +543,7 @@ Cost =
 
 - `observation_tracker` package build 성공
 - `pcdet_tracker`와 함께 build 성공
-- Unit test: `15 passed`
+- Unit test: `30 passed`
 - 검증 항목
   - Class × Distance LiDAR threshold
   - LiDAR centroid consistency
@@ -580,11 +551,12 @@ Cost =
   - Depth consistency와 occlusion 분류
   - Observation state 결정
   - Camera-depth 3D candidate marker
-  - Stage 1 association 및 confirmation
-  - Stage 3 camera recovery와 ID 유지
+  - 공분산 증가에 따른 association gate 확장
+  - Camera-assisted unmatched Track recovery와 ID 유지
   - Camera-only 신규 Track 생성 억제
-  - Weak Continuity를 통한 기존 ID 연결
-  - Weak Continuity를 KF hit로 계산하지 않는 동작
+  - Unified weak match를 통한 기존 ID 연결
+  - Weak match를 KF hit로 계산하지 않는 동작
+  - 정지/CV model 확률 전환
   - Fused marker의 stable Track ID 표시
   - Detection miss 시 fused bounding box 즉시 삭제
   - 동일 box BEV IoU `1.0`
@@ -607,8 +579,8 @@ Cost =
 - 객체별 실제 센서 관측 상태를 명시적으로 모델링하고, 이를 association과 Track lifecycle에 동시에 반영하는 경량 3D Multi-Object Tracking 구조를 제안하였다.
 - Detector confidence와 raw sensor evidence를 분리하여, 3D detection miss와 sensor observation failure를 동일한 사건으로 취급하지 않도록 설계하였다.
 - LiDAR point support, image-plane detection support, aligned-depth consistency를 결합하여 `MULTIMODAL_STRONG`, `LIDAR_DOMINANT`, `CAMERA_DOMINANT`, `WEAK_OBSERVATION`의 네 가지 관측 상태를 정의하였다.
-- Observation state별 cascaded association과 adaptive lifecycle을 적용하여 Camera FOV 밖 객체에 대한 불필요한 penalty를 제거하고, Camera/Depth evidence를 이용한 기존 3D Track recovery를 수행하였다.
-- Weak detection에는 신규 ID 생성을 억제하면서도 최근 confirmed Track과의 엄격한 공간 일치 조건을 만족하는 경우 기존 ID continuity를 보존하였다.
+- Kalman prediction uncertainty 기반 통합 association과 adaptive lifecycle을 적용하여 고정 거리 gate에 대한 의존성을 제거하고, Camera/Depth evidence를 이용한 기존 3D Track recovery를 수행하였다.
+- Weak detection은 신규 ID 생성 근거로 사용하지 않으면서도 동일한 공분산 기반 association으로 기존 ID continuity를 보존하였다.
 - 기존 Kalman Filter, Hungarian matching, Track ID 관리 및 ROS 2 interface를 유지하여 새로운 학습 모델 없이 실제 센서 시스템에 통합 가능한 구조를 구현하였다.
 
 ## 25. 논문 작성 시 구분해야 할 표현
@@ -636,7 +608,7 @@ Cost =
 | Depth consistency | `observation_tracker/depth_consistency.py` |
 | Evidence 통합 및 state 결정 | `observation_tracker/observation_analyzer.py` |
 | Enum 및 `ObservationResult` | `observation_tracker/observation_state.py` |
-| Cascaded association 및 Weak Continuity | `observation_tracker/cascaded_association.py` |
+| 통합 uncertainty association 및 Static/CV mixture | `observation_tracker/cascaded_association.py` |
 | Adaptive lifecycle | `observation_tracker/track_lifecycle.py` |
 | Temporal memory | `observation_tracker/track_memory.py` |
 | RViz marker | `observation_tracker/visualization.py` |
@@ -647,4 +619,3 @@ Cost =
 | 3D Detector 기본 launch | `jay_tracker/pointpillars_coda_detector/launch/coda_pointpillar.launch.py` |
 | 2D Detector 입력 및 class 설정 | `ultralytics_ros2/ultralytics_ros2/seg_run.py` |
 | 2D Detector 기본 launch | `ultralytics_ros2/launch/seg.launch.py` |
-

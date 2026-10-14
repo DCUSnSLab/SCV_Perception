@@ -1,11 +1,13 @@
 """ROS 2 node extending Jay Tracker with observation-adaptive policies."""
 
 from collections import deque
+import struct
 
+import cv2
 import numpy as np
 from cv_bridge import CvBridge
 from rclpy.qos import HistoryPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CameraInfo, Image, PointCloud2
+from sensor_msgs.msg import CameraInfo, CompressedImage, Image, PointCloud2
 from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
 
@@ -21,6 +23,85 @@ from .lidar_observation import LidarObservationAnalyzer, LidarObservationConfig
 from .observation_analyzer import ObservationAnalyzer
 from .track_lifecycle import LifecycleConfig
 from .visualization import ObservationVisualizer
+
+
+def decode_compressed_depth(message):
+    """Decode ROS compressedDepth PNG into its metric depth array."""
+    data = bytes(message.data)
+    png_start = data.find(b"\x89PNG\r\n\x1a\n")
+    if png_start < 0:
+        return None
+    encoded = np.frombuffer(data[png_start:], dtype=np.uint8)
+    depth = cv2.imdecode(encoded, cv2.IMREAD_UNCHANGED)
+    if depth is None:
+        return None
+    if str(message.format).startswith("32FC1"):
+        if png_start < 12:
+            return None
+        _, depth_quant_a, depth_quant_b = struct.unpack_from("<iff", data)
+        inverse = depth.astype(np.float32)
+        valid = inverse > 0.0
+        restored = np.full(inverse.shape, np.nan, dtype=np.float32)
+        restored[valid] = depth_quant_a / (
+            inverse[valid] - depth_quant_b)
+        return restored
+    return depth
+
+
+def depth_detection_box(detection, depth_image, intrinsics,
+                        source_from_camera, config):
+    """Estimate a source-frame 3-D box from one 2-D detection and depth."""
+    image = np.asarray(depth_image)
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = map(float, detection.bbox)
+    x1, x2 = np.clip((x1, x2), 0, width)
+    y1, y2 = np.clip((y1, y2), 0, height)
+    if x2 <= x1 or y2 <= y1:
+        return None
+
+    scale = float(np.clip(config.roi_inner_scale, 0.05, 1.0))
+    center_u, center_v = (x1 + x2) * 0.5, (y1 + y2) * 0.5
+    half_width = (x2 - x1) * scale * 0.5
+    half_height = (y2 - y1) * scale * 0.5
+    left, right = int(center_u - half_width), int(center_u + half_width)
+    top, bottom = int(center_v - half_height), int(center_v + half_height)
+    values = image[top:bottom, left:right].reshape(-1).astype(np.float32)
+    if image.dtype == np.uint16:
+        values *= config.depth_scale
+    valid = values[
+        np.isfinite(values) &
+        (values >= config.min_depth_m) &
+        (values <= config.max_depth_m)]
+    if len(valid) < config.min_valid_pixels:
+        return None
+
+    fx, fy, cx, cy = map(float, intrinsics)
+    if fx <= 0.0 or fy <= 0.0:
+        return None
+    surface_depth = float(np.median(valid))
+    box_width = max(0.10, (x2 - x1) * surface_depth / fx)
+    box_height = max(0.10, (y2 - y1) * surface_depth / fy)
+    # ponytail: monocular depth cannot reveal the hidden extent; use a bounded
+    # width-derived thickness until orientation or class dimensions are needed.
+    box_depth = float(np.clip(box_width * 0.5, 0.30, 2.00))
+    center_depth = surface_depth + box_depth * 0.5
+    center_camera = np.array([
+        (center_u - cx) * center_depth / fx,
+        (center_v - cy) * center_depth / fy,
+        center_depth], dtype=np.float64)
+    half_size = np.array(
+        [box_width, box_height, box_depth], dtype=np.float64) * 0.5
+    corners_camera = center_camera + np.array([
+        [dx, dy, dz]
+        for dx in (-half_size[0], half_size[0])
+        for dy in (-half_size[1], half_size[1])
+        for dz in (-half_size[2], half_size[2])])
+    corners_source = (
+        corners_camera @ source_from_camera[:3, :3].T +
+        source_from_camera[:3, 3])
+    lower = corners_source.min(axis=0)
+    upper = corners_source.max(axis=0)
+    return (lower + upper) * 0.5, np.maximum(upper - lower, 0.05), surface_depth
 
 
 class ObservationTrackerNode(JayTrackerNode):
@@ -56,27 +137,32 @@ class ObservationTrackerNode(JayTrackerNode):
             "depth_roi_inner_scale": self._declare("depth_roi_inner_scale", 0.60),
             "min_depth_support_ratio": self._declare(
                 "min_depth_support_ratio", 0.15),
-            "center_distance_weight": self._declare("center_distance_weight", 1.25),
+            "pedestrian_depth_overlap_margin": self._declare(
+                "pedestrian_depth_overlap_margin", 0.35),
+            "pedestrian_depth_overlap_threshold": self._declare(
+                "pedestrian_depth_overlap_threshold", 0.05),
             "iou_3d_weight": self._declare("iou_3d_weight", 1.25),
             "motion_weight": self._declare("motion_weight", 0.75),
             "camera_iou_weight": self._declare("camera_iou_weight", 0.5),
             "depth_weight": self._declare("depth_weight", 0.25),
-            "class_penalty": self._declare("class_penalty", 10.0),
-            "center_distance_gate": self._declare("center_distance_gate", 2.5),
-            "iou_3d_gate": self._declare("iou_3d_gate", 0.05),
-            "motion_gate": self._declare("motion_gate", 4.0),
+            "mahalanobis_gate": self._declare("mahalanobis_gate", 9.21),
             "maximum_association_cost": self._declare("maximum_association_cost", 3.5),
             "camera_recovery_position_gain": self._declare(
                 "camera_recovery_position_gain", 0.40),
             "camera_recovery_max_correction": self._declare(
                 "camera_recovery_max_correction", 0.50),
-            "enable_weak_track_continuity": self._declare(
-                "enable_weak_track_continuity", True),
-            "weak_center_distance_gate": self._declare(
-                "weak_center_distance_gate", 1.0),
-            "weak_iou_3d_gate": self._declare("weak_iou_3d_gate", 0.20),
-            "weak_continuity_max_age": self._declare(
-                "weak_continuity_max_age", 2),
+            "weak_position_gain": self._declare("weak_position_gain", 0.25),
+            "output_prediction_max_misses": self._declare(
+                "output_prediction_max_misses", 2),
+            "enable_occlusion_reasoning": self._declare(
+                "enable_occlusion_reasoning", True),
+            "occlusion_overlap_threshold": self._declare(
+                "occlusion_overlap_threshold", 0.45),
+            "occlusion_depth_margin": self._declare(
+                "occlusion_depth_margin", 0.30),
+            "occlusion_confirmation_frames": self._declare(
+                "occlusion_confirmation_frames", 2),
+            "occlusion_max_age": self._declare("occlusion_max_age", 8),
             "tentative_min_hits": self._declare("tentative_min_hits", 3),
             "strong_confirmation_hits": self._declare("strong_confirmation_hits", 2),
             "max_miss_count": self._declare("max_miss_count", 6),
@@ -90,7 +176,6 @@ class ObservationTrackerNode(JayTrackerNode):
             "enable_camera_observation": self._declare("enable_camera_observation", True),
             "enable_depth_consistency": self._declare("enable_depth_consistency", True),
             "enable_observation_state": self._declare("enable_observation_state", True),
-            "enable_cascaded_association": self._declare("enable_cascaded_association", True),
             "enable_adaptive_lifecycle": self._declare("enable_adaptive_lifecycle", True),
             "enable_temporal_smoothing": self._declare("enable_temporal_smoothing", True),
             "enable_odometry": self._declare("enable_odometry", True),
@@ -107,6 +192,9 @@ class ObservationTrackerNode(JayTrackerNode):
             "aligned_depth_topic": self._declare(
                 "aligned_depth_topic",
                 "/camera/camera/aligned_depth_to_color/image_raw"),
+            "compressed_depth_topic": self._declare(
+                "compressed_depth_topic",
+                "/camera/camera/aligned_depth_to_color/image_raw/compressedDepth"),
             "camera_optical_frame": self._declare(
                 "camera_optical_frame", "camera_color_optical_frame"),
             "lidar_tolerance_sec": self._declare("lidar_tolerance_sec", 0.12),
@@ -169,28 +257,32 @@ class ObservationTrackerNode(JayTrackerNode):
             enable_lidar=bool(p["enable_lidar_observation"]),
             enable_camera=bool(p["enable_camera_observation"]),
             enable_depth=bool(p["enable_depth_consistency"]),
-            enable_state=bool(p["enable_observation_state"]))
+            enable_state=bool(p["enable_observation_state"]),
+            pedestrian_depth_overlap_margin=float(
+                p["pedestrian_depth_overlap_margin"]),
+            pedestrian_depth_overlap_threshold=float(
+                p["pedestrian_depth_overlap_threshold"]))
         association = AssociationConfig(
-            center_distance_weight=float(p["center_distance_weight"]),
             iou_3d_weight=float(p["iou_3d_weight"]),
             motion_weight=float(p["motion_weight"]),
             camera_iou_weight=float(p["camera_iou_weight"]),
             depth_weight=float(p["depth_weight"]),
-            class_penalty=float(p["class_penalty"]),
-            center_distance_gate=float(p["center_distance_gate"]),
-            iou_3d_gate=float(p["iou_3d_gate"]),
-            motion_gate=float(p["motion_gate"]),
+            mahalanobis_gate=float(p["mahalanobis_gate"]),
             maximum_cost=float(p["maximum_association_cost"]),
             camera_recovery_position_gain=float(
                 p["camera_recovery_position_gain"]),
             camera_recovery_max_correction=float(
                 p["camera_recovery_max_correction"]),
-            enable_weak_track_continuity=bool(
-                p["enable_weak_track_continuity"]),
-            weak_center_distance_gate=float(p["weak_center_distance_gate"]),
-            weak_iou_3d_gate=float(p["weak_iou_3d_gate"]),
-            weak_continuity_max_age=int(p["weak_continuity_max_age"]),
-            enable_cascaded_association=bool(p["enable_cascaded_association"]))
+            weak_position_gain=float(p["weak_position_gain"]),
+            output_prediction_max_misses=int(
+                p["output_prediction_max_misses"]),
+            enable_occlusion_reasoning=bool(p["enable_occlusion_reasoning"]),
+            occlusion_overlap_threshold=float(
+                p["occlusion_overlap_threshold"]),
+            occlusion_depth_margin=float(p["occlusion_depth_margin"]),
+            occlusion_confirmation_frames=int(
+                p["occlusion_confirmation_frames"]),
+            occlusion_max_age=int(p["occlusion_max_age"]))
         lifecycle = LifecycleConfig(
             tentative_min_hits=int(p["tentative_min_hits"]),
             strong_confirmation_hits=int(p["strong_confirmation_hits"]),
@@ -269,9 +361,14 @@ class ObservationTrackerNode(JayTrackerNode):
                     self.camera_info_callback, camera_qos),
             ])
         if self.enable_depth_consistency:
-            self.observation_subscriptions.append(self.create_subscription(
-                Image, str(p["aligned_depth_topic"]), self.depth_callback,
-                camera_qos))
+            self.observation_subscriptions.extend([
+                self.create_subscription(
+                    Image, str(p["aligned_depth_topic"]), self.depth_callback,
+                    qos),
+                self.create_subscription(
+                    CompressedImage, str(p["compressed_depth_topic"]),
+                    self.compressed_depth_callback, qos),
+            ])
 
         colors = {
             "MULTIMODAL_STRONG": tuple(p["visualization.multimodal_strong_color"]),
@@ -294,13 +391,12 @@ class ObservationTrackerNode(JayTrackerNode):
                 track_provider=lambda: self.tracker.last_debug_tracks)
         self.get_logger().info(
             "observation_tracker ready: lidar=%s camera=%s depth=%s "
-            "odom=%s imu=%s cascaded=%s lifecycle=%s smoothing=%s" % (
+            "odom=%s imu=%s association=unified lifecycle=%s smoothing=%s" % (
                 self.enable_lidar_support,
                 self.enable_camera_support,
                 self.enable_depth_consistency,
                 p["enable_odometry"],
                 p["enable_imu"],
-                p["enable_cascaded_association"],
                 p["enable_adaptive_lifecycle"],
                 p["enable_temporal_smoothing"]))
 
@@ -308,6 +404,17 @@ class ObservationTrackerNode(JayTrackerNode):
         self.rgb_cache.append((
             message_stamp_seconds(message),
             (int(message.width), int(message.height))))
+
+    def compressed_depth_callback(self, message):
+        depth = decode_compressed_depth(message)
+        if depth is None:
+            self.get_logger().warning(
+                "compressed depth decode failed", throttle_duration_sec=2.0)
+            return
+        encoding = "16UC1" if depth.dtype == np.uint16 else "32FC1"
+        raw = self.cv_bridge.cv2_to_imgmsg(depth, encoding=encoding)
+        raw.header = message.header
+        self.depth_cache.append((message_stamp_seconds(message), raw))
 
     def build_observation_provider(self, header, timestamp):
         # An RGB frame means the camera was available even when the 2-D detector
@@ -382,46 +489,22 @@ class ObservationTrackerNode(JayTrackerNode):
                 matched_tracks[observation.camera_detection_index] = track
 
         candidates = []
-        image_height, image_width = depth.shape[:2]
         for index, detection in enumerate(camera_item[1]):
             if float(detection.score) < self.parameters["detector_2d_threshold"]:
                 continue
-            x1, y1, x2, y2 = map(float, detection.bbox)
-            scale = float(np.clip(cfg.roi_inner_scale, 0.05, 1.0))
-            center_u, center_v = (x1 + x2) * 0.5, (y1 + y2) * 0.5
-            half_width = (x2 - x1) * scale * 0.5
-            half_height = (y2 - y1) * scale * 0.5
-            left = max(0, min(image_width - 1, int(center_u - half_width)))
-            right = max(0, min(image_width, int(center_u + half_width)))
-            top = max(0, min(image_height - 1, int(center_v - half_height)))
-            bottom = max(0, min(image_height, int(center_v + half_height)))
-            if right <= left or bottom <= top:
-                continue
-            values = np.asarray(depth[top:bottom, left:right]).reshape(-1)
-            values = values.astype(np.float32)
-            if depth.dtype == np.uint16:
-                values *= cfg.depth_scale
-            valid = values[
-                np.isfinite(values) &
-                (values >= cfg.min_depth_m) &
-                (values <= cfg.max_depth_m)]
-            if len(valid) < cfg.min_valid_pixels:
-                continue
-            depth_m = float(np.median(valid))
-            point_camera = np.array([[
-                (center_u - cx) * depth_m / fx,
-                (center_v - cy) * depth_m / fy,
-                depth_m]], dtype=np.float32)
-            point_source = (
-                point_camera @ source_from_camera[:3, :3].T +
-                source_from_camera[:3, 3])[0]
             track = matched_tracks.get(index)
             if track is not None:
                 continue
+            estimated = depth_detection_box(
+                detection, depth, (fx, fy, cx, cy), source_from_camera, cfg)
+            if estimated is None:
+                continue
+            position, size, depth_m = estimated
             state = "CAMERA_DEPTH_CANDIDATE"
             candidates.append({
                 "id": index,
-                "position": point_source,
+                "position": position,
+                "size": size,
                 "class_name": detection.class_name,
                 "score": float(detection.score),
                 "depth": depth_m,

@@ -1,7 +1,7 @@
 observation_tracker:
   ros__parameters:
     detector_3d_threshold: 0.65
-    detector_2d_threshold: 0.25
+    detector_2d_threshold: 0.70
 
     observation_box_margin_xy: 0.15
     observation_box_margin_z: 0.10
@@ -29,23 +29,28 @@ observation_tracker:
     min_valid_depth_pixels: 20
     depth_roi_inner_scale: 0.60
     min_depth_support_ratio: 0.15
+    # YOLO person depth point must overlap the calibrated 3-D Pedestrian box.
+    pedestrian_depth_overlap_margin: 0.35
+    pedestrian_depth_overlap_threshold: 0.05
 
-    center_distance_weight: 1.25
     iou_3d_weight: 1.25
     motion_weight: 0.75
     camera_iou_weight: 0.5
     depth_weight: 0.25
-    class_penalty: 10.0
-    center_distance_gate: 2.5
-    iou_3d_gate: 0.05
-    motion_gate: 4.0
+    # 99% chi-square gate for a two-dimensional position measurement.
+    mahalanobis_gate: 9.21
     maximum_association_cost: 3.5
     camera_recovery_position_gain: 0.40
     camera_recovery_max_correction: 0.50
-    enable_weak_track_continuity: true
-    weak_center_distance_gate: 1.0
-    weak_iou_3d_gate: 0.20
-    weak_continuity_max_age: 2
+    weak_position_gain: 0.25
+    # Keep identity internally, but publish unsupported predictions briefly.
+    output_prediction_max_misses: 2
+    enable_occlusion_reasoning: true
+    # Nearer pedestrian must cover this fraction of the hidden pedestrian ROI.
+    occlusion_overlap_threshold: 0.45
+    occlusion_depth_margin: 0.30
+    occlusion_confirmation_frames: 2
+    occlusion_max_age: 8
 
     tentative_min_hits: 3
     strong_confirmation_hits: 2
@@ -61,7 +66,6 @@ observation_tracker:
     enable_camera_observation: true
     enable_depth_consistency: true
     enable_observation_state: true
-    enable_cascaded_association: true
     enable_adaptive_lifecycle: true
     enable_temporal_smoothing: true
     enable_odometry: true
@@ -74,6 +78,7 @@ observation_tracker:
     camera_detection_topic: /yolo/detections
     camera_info_topic: /camera/camera/color/camera_info
     aligned_depth_topic: /camera/camera/aligned_depth_to_color/image_raw
+    compressed_depth_topic: /camera/camera/aligned_depth_to_color/image_raw/compressedDepth
     camera_optical_frame: camera_color_optical_frame
     lidar_tolerance_sec: 0.12
     camera_tolerance_sec: 0.15
@@ -88,4 +93,3 @@ observation_tracker:
     visualization.lidar_dominant_color: [0.10, 0.55, 1.00]
     visualization.camera_dominant_color: [0.95, 0.75, 0.10]
     visualization.weak_observation_color: [0.95, 0.15, 0.15]
-

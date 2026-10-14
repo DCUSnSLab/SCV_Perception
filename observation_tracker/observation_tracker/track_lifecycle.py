@@ -57,6 +57,9 @@ class TrackLifecycleManager:
         memory.age += 1
         memory.hit_count = int(track.hits)
         memory.miss_count = 0
+        memory.occlusion_count = 0
+        memory.occluded_by_track_id = -1
+        memory.occlusion_ratio = 0.0
         state = memory.observe(
             observation, self.config.enable_temporal_smoothing,
             self.config.smoothing_switch_count)
@@ -93,7 +96,11 @@ class TrackLifecycleManager:
     def recovered(self, track, observation):
         memory = self._memory(track, observation)
         memory.age += 1
+        memory.miss_count = 0
         memory.recovery_count += 1
+        memory.occlusion_count = 0
+        memory.occluded_by_track_id = -1
+        memory.occlusion_ratio = 0.0
         memory.observe(
             observation, self.config.enable_temporal_smoothing,
             self.config.smoothing_switch_count)
@@ -102,8 +109,55 @@ class TrackLifecycleManager:
             1.0, memory.track_confidence + 0.03)
         return memory
 
+    def weak_matched(self, track, observation):
+        """Keep identity and position continuity without confirming a weak hit."""
+        memory = self._memory(track, observation)
+        previous_status = memory.current_track_status
+        memory.age += 1
+        memory.miss_count = 0
+        memory.occlusion_count = 0
+        memory.occluded_by_track_id = -1
+        memory.occlusion_ratio = 0.0
+        memory.observe(
+            observation, self.config.enable_temporal_smoothing,
+            self.config.smoothing_switch_count)
+        if previous_status == TrackStatus.CONFIRMED:
+            memory.current_track_status = TrackStatus.CONFIRMED
+        elif previous_status in {
+                TrackStatus.RECOVERING, TrackStatus.OCCLUDED,
+                TrackStatus.LOST}:
+            memory.current_track_status = TrackStatus.RECOVERING
+        else:
+            memory.current_track_status = previous_status
+        return memory
+
+    def occluded(self, track, observation, occluder_id, overlap,
+                 confirmation_frames, max_age):
+        """Retain a missed track while a nearer tracked object blocks its ROI."""
+        memory = self._memory(track, observation)
+        memory.age += 1
+        memory.miss_count += 1
+        memory.observe(
+            observation, self.config.enable_temporal_smoothing,
+            self.config.smoothing_switch_count)
+        memory.occlusion_count += 1
+        memory.occluded_by_track_id = int(occluder_id)
+        memory.occlusion_ratio = float(overlap)
+        memory.track_confidence = max(
+            0.0, memory.track_confidence - 0.25 * self.config.confidence_decay)
+        if memory.miss_count >= max(1, int(max_age)):
+            memory.current_track_status = TrackStatus.TERMINATED
+        elif memory.occlusion_count >= max(1, int(confirmation_frames)):
+            memory.current_track_status = TrackStatus.OCCLUDED
+        else:
+            memory.current_track_status = TrackStatus.LOST
+        return memory
+
     def missed(self, track, observation):
         memory = self._memory(track, observation)
+        memory.occlusion_count = 0
+        memory.occluded_by_track_id = -1
+        memory.occlusion_ratio = 0.0
         memory.age += 1
         state = memory.observe(
             observation, self.config.enable_temporal_smoothing,
@@ -115,20 +169,22 @@ class TrackLifecycleManager:
                 if memory.miss_count >= self.config.max_miss_count
                 else TrackStatus.LOST)
             return memory
+        memory.miss_count += 1
         sensor_support = (
             observation is not None and
             (observation.lidar_supported or observation.camera_supported))
-        if self.config.enable_adaptive_lifecycle and sensor_support:
-            memory.current_track_status = TrackStatus.RECOVERING
+        observable = (
+            observation is not None and
+            ((observation.lidar_available and observation.lidar_visible) or
+             (observation.camera_available and observation.camera_visible)))
+        if sensor_support:
             memory.track_confidence = max(
                 memory.track_confidence, float(observation.observation_score))
-            return memory
-
-        memory.miss_count += 1
-        memory.track_confidence = max(
-            0.0, memory.track_confidence - self.config.confidence_decay)
-        if memory.miss_count > self.config.recovery_max_age:
-            memory.current_track_status = TrackStatus.LOST
+        else:
+            decay = self.config.confidence_decay * (
+                1.0 if observable else 0.25)
+            memory.track_confidence = max(
+                0.0, memory.track_confidence - decay)
         terminate = (
             memory.miss_count >= self.config.max_miss_count or
             (memory.weak_count >= self.config.weak_observation_max_frames and
@@ -137,6 +193,10 @@ class TrackLifecycleManager:
              memory.miss_count > self.config.recovery_max_age))
         if terminate:
             memory.current_track_status = TrackStatus.TERMINATED
+        elif sensor_support:
+            memory.current_track_status = TrackStatus.RECOVERING
+        elif memory.miss_count > self.config.recovery_max_age:
+            memory.current_track_status = TrackStatus.LOST
         elif state == ObservationClass.WEAK_OBSERVATION.value:
             memory.current_track_status = TrackStatus.LOST
         return memory

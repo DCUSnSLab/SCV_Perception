@@ -6,7 +6,8 @@ import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from pcdet_tracker.jay_tracker import KittiHzTracker, TimeAwareTrack, bev_iou
+from pcdet_tracker.jay_tracker import (
+    KittiHzTracker, TimeAwareTrack, bev_iou, compensate_body_frame_motion)
 
 from .observation_state import (
     DepthState, ObservationClass, TrackStatus)
@@ -15,23 +16,81 @@ from .track_lifecycle import LifecycleConfig, TrackLifecycleManager
 
 @dataclass
 class AssociationConfig:
-    center_distance_weight: float = 1.0
     iou_3d_weight: float = 1.0
     motion_weight: float = 0.5
     camera_iou_weight: float = 0.5
     depth_weight: float = 0.25
-    class_penalty: float = 10.0
-    center_distance_gate: float = 4.0
-    iou_3d_gate: float = 0.0
-    motion_gate: float = 6.0
+    mahalanobis_gate: float = 9.21
     maximum_cost: float = 5.0
-    enable_cascaded_association: bool = True
     camera_recovery_position_gain: float = 0.25
     camera_recovery_max_correction: float = 1.0
-    enable_weak_track_continuity: bool = True
-    weak_center_distance_gate: float = 1.5
-    weak_iou_3d_gate: float = 0.10
-    weak_continuity_max_age: int = 3
+    weak_position_gain: float = 0.25
+    output_prediction_max_misses: int = 2
+    enable_occlusion_reasoning: bool = True
+    occlusion_overlap_threshold: float = 0.45
+    occlusion_depth_margin: float = 0.30
+    occlusion_confirmation_frames: int = 2
+    occlusion_max_age: int = 8
+
+
+class StaticCvTrack(TimeAwareTrack):
+    """Blend stationary and constant-velocity predictions from their evidence."""
+
+    _transition = np.asarray([[0.95, 0.05], [0.05, 0.95]], dtype=np.float32)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.motion_mode_probabilities = np.asarray(
+            [0.5, 0.5], dtype=np.float32)
+        self._mode_predictions = np.vstack((self.box[:2], self.box[:2]))
+
+    def predict(self, timestamp, ego_motion=None, ego_comp_gain=1.0):
+        previous_xy = self.x[:2, 0].copy()
+        previous_yaw = float(self.box[6])
+        dt = super().predict(timestamp, ego_motion, ego_comp_gain)
+        cv_xy = self.x[:2, 0].copy()
+        static_xy, _ = compensate_body_frame_motion(
+            previous_xy, previous_yaw, dt, ego_motion or {}, ego_comp_gain)
+        self.motion_mode_probabilities = (
+            self._transition.T @ self.motion_mode_probabilities)
+        self.motion_mode_probabilities /= np.sum(self.motion_mode_probabilities)
+        self._mode_predictions = np.vstack((static_xy, cv_xy))
+        mixed_xy = (
+            self.motion_mode_probabilities[:, None] *
+            self._mode_predictions).sum(axis=0)
+        spread = self._mode_predictions - mixed_xy
+        self.P[:2, :2] += sum(
+            probability * np.outer(delta, delta)
+            for probability, delta in zip(
+                self.motion_mode_probabilities, spread))
+        self.x[:2, 0] = mixed_xy
+        self.x[2:4, 0] *= float(self.motion_mode_probabilities[1])
+        self.box[:2] = mixed_xy
+        return dt
+
+    def update(self, det, timestamp, static_hold_time, static_yaw_alpha,
+               dynamic_yaw_alpha, ego_motion=None, observation=None,
+               measurement_noise_scale=1.0):
+        measurement = np.asarray(det[:2], dtype=np.float32)
+        innovation_cov = (
+            self.H @ self.P @ self.H.T +
+            self.R * max(float(measurement_noise_scale), 1e-3))
+        inverse_cov = np.linalg.pinv(innovation_cov)
+        likelihoods = []
+        for prediction in self._mode_predictions:
+            residual = measurement - prediction
+            distance_squared = float(residual.T @ inverse_cov @ residual)
+            likelihoods.append(math.exp(-0.5 * min(distance_squared, 50.0)))
+        posterior = self.motion_mode_probabilities * np.asarray(
+            likelihoods, dtype=np.float32)
+        total = float(np.sum(posterior))
+        if total > 1e-12:
+            self.motion_mode_probabilities = posterior / total
+        super().update(
+            det, timestamp, static_hold_time, static_yaw_alpha,
+            dynamic_yaw_alpha, ego_motion, observation,
+            measurement_noise_scale)
+        self.x[2:4, 0] *= float(self.motion_mode_probabilities[1])
 
 
 def iou_3d(box_a, box_b):
@@ -48,10 +107,11 @@ def iou_3d(box_a, box_b):
 
 
 class CascadedTracker(KittiHzTracker):
-    """Reuse the baseline KF/track object and replace only association/lifecycle."""
+    """Observation-aware tracker with unified uncertainty-based association."""
 
     def __init__(self, *args, association_config=None, lifecycle_config=None,
                  **kwargs):
+        kwargs.setdefault("enable_adaptive_kf", True)
         super().__init__(*args, adaptive_policy=None, **kwargs)
         self.association_config = association_config or AssociationConfig()
         self.lifecycle = TrackLifecycleManager(
@@ -65,53 +125,53 @@ class CascadedTracker(KittiHzTracker):
             not observation.lidar_available and
             not observation.camera_available)
 
-    def _pair_cost(self, track, detection, track_observation,
-                   detection_observation, multimodal):
+    @staticmethod
+    def _supports_prediction(observation):
+        if observation is None:
+            return False
+        camera_support = (
+            observation.camera_supported and
+            observation.depth_state in {
+                DepthState.CONSISTENT, DepthState.UNAVAILABLE})
+        return bool(observation.lidar_supported or camera_support)
+
+    def _pair_cost(self, track, detection, detection_observation):
         cfg = self.association_config
-        class_mismatch = (
-            track.cls_id > 0 and int(detection[7]) > 0 and
-            track.cls_id != int(detection[7]))
-        if class_mismatch and cfg.class_penalty >= cfg.maximum_cost:
+        if (track.cls_id > 0 and int(detection[7]) > 0 and
+                track.cls_id != int(detection[7])):
             return np.inf
-        center = float(np.linalg.norm(track.box[:3] - detection[:3]))
-        if center > cfg.center_distance_gate:
+        innovation = np.asarray(
+            detection[:2] - track.box[:2], dtype=np.float32)
+        measurement_noise = track.R * self._measurement_noise_scale(
+            detection_observation)
+        innovation_covariance = (
+            track.H @ track.P @ track.H.T + measurement_noise)
+        mahalanobis_squared = float(
+            innovation.T @ np.linalg.pinv(innovation_covariance) @ innovation)
+        if mahalanobis_squared > cfg.mahalanobis_gate:
             return np.inf
         overlap = iou_3d(track.box, detection)
-        if overlap < cfg.iou_3d_gate:
-            return np.inf
-        innovation = detection[:2] - track.box[:2]
-        covariance = np.maximum(np.diag(track.P)[:2], 1e-3)
-        motion = float(math.sqrt(np.sum(innovation * innovation / covariance)))
-        if motion > cfg.motion_gate:
-            return np.inf
         cost = (
-            cfg.center_distance_weight * center / max(cfg.center_distance_gate, 1e-3) +
             cfg.iou_3d_weight * (1.0 - overlap) +
-            cfg.motion_weight * motion / max(cfg.motion_gate, 1e-3))
-        if class_mismatch:
-            cost += cfg.class_penalty
-        if multimodal and detection_observation is not None:
+            cfg.motion_weight * mahalanobis_squared /
+            max(cfg.mahalanobis_gate, 1e-3))
+        if (detection_observation is not None and
+                detection_observation.camera_available and
+                detection_observation.camera_visible):
             cost += cfg.camera_iou_weight * (
                 1.0 - float(detection_observation.camera_iou))
+        if (detection_observation is not None and
+                detection_observation.depth_available):
             if detection_observation.depth_state == DepthState.CONSISTENT:
                 depth_cost = 1.0 - float(np.clip(
                     detection_observation.depth_consistency, 0.0, 1.0))
-            elif detection_observation.depth_state == DepthState.UNAVAILABLE:
-                depth_cost = 0.5
             else:
                 depth_cost = 1.0
             cost += cfg.depth_weight * depth_cost
-            if (track_observation is not None and
-                    track_observation.camera_detection_index >= 0 and
-                    detection_observation.camera_detection_index >= 0 and
-                    track_observation.camera_detection_index !=
-                    detection_observation.camera_detection_index):
-                return np.inf
         return float(cost) if cost <= cfg.maximum_cost else np.inf
 
-    def _match_stage(self, track_indices, detection_indices, detections,
-                     track_observations, detection_observations, multimodal,
-                     stage_name):
+    def _match(self, track_indices, detection_indices, detections,
+               detection_observations):
         if not track_indices or not detection_indices:
             return []
         costs = np.full(
@@ -121,8 +181,7 @@ class CascadedTracker(KittiHzTracker):
             for column, detection_index in enumerate(detection_indices):
                 costs[row, column] = self._pair_cost(
                     self.tracks[track_index], detections[detection_index],
-                    track_observations[track_index],
-                    detection_observations[detection_index], multimodal)
+                    detection_observations[detection_index])
         finite = np.isfinite(costs)
         if not finite.any():
             return []
@@ -131,61 +190,55 @@ class CascadedTracker(KittiHzTracker):
         rows, columns = linear_sum_assignment(safe)
         return [
             (track_indices[row], detection_indices[column],
-             float(costs[row, column]), stage_name)
+             float(costs[row, column]), "UNIFIED_ASSOCIATION")
             for row, column in zip(rows, columns)
             if np.isfinite(costs[row, column])]
 
-    def _match_weak_continuity(self, track_indices, detection_indices,
-                               detections, detection_observations):
-        """Attach weak detections to recent established tracks without a KF hit."""
+    @staticmethod
+    def _roi_coverage(front_roi, back_roi):
+        left = max(float(front_roi[0]), float(back_roi[0]))
+        top = max(float(front_roi[1]), float(back_roi[1]))
+        right = min(float(front_roi[2]), float(back_roi[2]))
+        bottom = min(float(front_roi[3]), float(back_roi[3]))
+        intersection = max(0.0, right - left) * max(0.0, bottom - top)
+        back_area = max(
+            1e-3,
+            (float(back_roi[2]) - float(back_roi[0])) *
+            (float(back_roi[3]) - float(back_roi[1])))
+        return float(intersection / back_area)
+
+    def _find_pedestrian_occlusions(self, track_indices, track_observations):
+        """Map hidden pedestrian indices to the nearer pedestrian and overlap."""
         cfg = self.association_config
-        if not cfg.enable_weak_track_continuity:
-            return []
-        eligible_tracks = []
-        for track_index in track_indices:
-            memory = self.lifecycle.memories.get(self.tracks[track_index].id)
-            if (memory is not None and
-                    memory.current_track_status in {
-                        TrackStatus.CONFIRMED, TrackStatus.RECOVERING} and
-                    memory.miss_count <= cfg.weak_continuity_max_age):
-                eligible_tracks.append(track_index)
-        weak_detections = [
-            index for index in detection_indices
-            if (detection_observations[index] is not None and
-                detection_observations[index].state ==
-                ObservationClass.WEAK_OBSERVATION.value)]
-        if not eligible_tracks or not weak_detections:
-            return []
-
-        costs = np.full(
-            (len(eligible_tracks), len(weak_detections)), np.inf,
-            dtype=np.float32)
-        for row, track_index in enumerate(eligible_tracks):
-            track = self.tracks[track_index]
-            for column, detection_index in enumerate(weak_detections):
-                detection = detections[detection_index]
-                if track.cls_id != int(detection[7]):
+        if not cfg.enable_occlusion_reasoning:
+            return {}
+        occlusions = {}
+        for back_index in track_indices:
+            back_track = self.tracks[back_index]
+            back = track_observations[back_index]
+            if (back_track.cls_id != 2 or back is None or
+                    back.projected_roi is None or
+                    back.depth_state != DepthState.OCCLUDED):
+                continue
+            best = None
+            for front_index, front_track in enumerate(self.tracks):
+                if front_index == back_index or front_track.cls_id != 2:
                     continue
-                distance = float(np.linalg.norm(
-                    track.box[:3] - detection[:3]))
-                overlap = iou_3d(track.box, detection)
-                if (distance > cfg.weak_center_distance_gate or
-                        overlap < cfg.weak_iou_3d_gate):
+                front = track_observations[front_index]
+                if (front is None or front.projected_roi is None or
+                        not (front.lidar_supported or front.camera_supported) or
+                        front.object_range + cfg.occlusion_depth_margin >=
+                        back.object_range):
                     continue
-                costs[row, column] = (
-                    distance / max(cfg.weak_center_distance_gate, 1e-3) +
-                    1.0 - overlap)
-        finite = np.isfinite(costs)
-        if not finite.any():
-            return []
-        safe = costs.copy()
-        safe[~finite] = 1e6
-        rows, columns = linear_sum_assignment(safe)
-        return [
-            (eligible_tracks[row], weak_detections[column],
-             float(costs[row, column]), "STAGE_4_WEAK_CONTINUITY")
-            for row, column in zip(rows, columns)
-            if np.isfinite(costs[row, column])]
+                coverage = self._roi_coverage(
+                    front.projected_roi, back.projected_roi)
+                if coverage < cfg.occlusion_overlap_threshold:
+                    continue
+                if best is None or coverage > best[1]:
+                    best = (front_track.id, coverage)
+            if best is not None:
+                occlusions[back_index] = best
+        return occlusions
 
     def _allow_spawn(self, observation):
         if observation is None or self._unavailable(observation):
@@ -232,84 +285,44 @@ class CascadedTracker(KittiHzTracker):
 
         unmatched_tracks = list(range(len(self.tracks)))
         unmatched_detections = list(range(len(detections)))
-        matches = []
         self.last_events = []
-        if self.association_config.enable_cascaded_association:
-            stage1_detections = [
-                index for index in unmatched_detections
-                if (detection_observations[index] is not None and
-                    detection_observations[index].state ==
-                    ObservationClass.MULTIMODAL_STRONG.value)]
-            stage1 = self._match_stage(
-                unmatched_tracks, stage1_detections, detections,
-                track_observations, detection_observations, True, "STAGE_1")
-            matches.extend(stage1)
-            used_tracks = {item[0] for item in stage1}
-            used_detections = {item[1] for item in stage1}
-            unmatched_tracks = [i for i in unmatched_tracks if i not in used_tracks]
-            unmatched_detections = [
-                i for i in unmatched_detections if i not in used_detections]
-
-            stage2_detections = [
-                index for index in unmatched_detections
-                if (self._unavailable(detection_observations[index]) or
-                    detection_observations[index].state in {
-                        ObservationClass.MULTIMODAL_STRONG.value,
-                        ObservationClass.LIDAR_DOMINANT.value})]
-            stage2 = self._match_stage(
-                unmatched_tracks, stage2_detections, detections,
-                track_observations, detection_observations, False, "STAGE_2")
-            matches.extend(stage2)
-            used_tracks = {item[0] for item in stage2}
-            used_detections = {item[1] for item in stage2}
-            unmatched_tracks = [i for i in unmatched_tracks if i not in used_tracks]
-            unmatched_detections = [
-                i for i in unmatched_detections if i not in used_detections]
-        else:
-            matches = self._match_stage(
-                unmatched_tracks, unmatched_detections, detections,
-                track_observations, detection_observations, False, "BASELINE")
-            used_tracks = {item[0] for item in matches}
-            used_detections = {item[1] for item in matches}
-            unmatched_tracks = [i for i in unmatched_tracks if i not in used_tracks]
-            unmatched_detections = [
-                i for i in unmatched_detections if i not in used_detections]
-
-        weak_matches = self._match_weak_continuity(
+        matches = self._match(
             unmatched_tracks, unmatched_detections, detections,
             detection_observations)
-        weak_track_indices = {item[0] for item in weak_matches}
-        weak_detection_indices = {item[1] for item in weak_matches}
+        matched_track_indices = {item[0] for item in matches}
+        matched_detection_indices = {item[1] for item in matches}
         unmatched_tracks = [
-            i for i in unmatched_tracks if i not in weak_track_indices]
+            i for i in unmatched_tracks if i not in matched_track_indices]
         unmatched_detections = [
-            i for i in unmatched_detections if i not in weak_detection_indices]
-        for track_index, detection_index, cost, stage in weak_matches:
-            track = self.tracks[track_index]
-            observation = detection_observations[detection_index]
-            track.record_observation(observation)
-            track.last_association_cost = cost
-            memory = self.lifecycle.missed(track, observation)
-            self.last_events.append({
-                "track_id": track.id,
-                "detection_index": detection_index,
-                "matched": False,
-                "association_stage": stage,
-                "association_cost": cost,
-                "track_status": memory.current_track_status.value,
-            })
+            i for i in unmatched_detections
+            if i not in matched_detection_indices]
+        track_occlusions = self._find_pedestrian_occlusions(
+            unmatched_tracks, track_observations)
 
         for track_index, detection_index, cost, stage in matches:
             track = self.tracks[track_index]
             observation = detection_observations[detection_index]
-            track.update(
-                detections[detection_index], timestamp,
-                self.static_hold_time, self.static_yaw_alpha,
-                self.dynamic_yaw_alpha, ego_motion=self.current_ego_motion,
-                observation=observation,
-                measurement_noise_scale=self._measurement_noise_scale(observation))
+            weak = (
+                observation is not None and observation.state ==
+                ObservationClass.WEAK_OBSERVATION.value)
+            if weak:
+                detection = detections[detection_index]
+                gain = float(np.clip(
+                    self.association_config.weak_position_gain, 0.0, 1.0))
+                track.box[:3] += gain * (detection[:3] - track.box[:3])
+                track.x[:2, 0] = track.box[:2]
+                track.record_observation(observation)
+                memory = self.lifecycle.weak_matched(track, observation)
+            else:
+                track.update(
+                    detections[detection_index], timestamp,
+                    self.static_hold_time, self.static_yaw_alpha,
+                    self.dynamic_yaw_alpha, ego_motion=self.current_ego_motion,
+                    observation=observation,
+                    measurement_noise_scale=self._measurement_noise_scale(
+                        observation))
+                memory = self.lifecycle.matched(track, observation)
             track.last_association_cost = cost
-            memory = self.lifecycle.matched(track, observation)
             self.last_events.append({
                 "track_id": track.id,
                 "detection_index": detection_index,
@@ -322,10 +335,8 @@ class CascadedTracker(KittiHzTracker):
         recovered_tracks = set()
         for track_index in unmatched_tracks:
             observation = track_observations[track_index]
-            if (observation is not None and
-                    observation.state == ObservationClass.CAMERA_DOMINANT.value and
-                    observation.camera_supported and
-                    observation.depth_state == DepthState.CONSISTENT):
+            if (track_index not in track_occlusions and
+                    self._supports_prediction(observation)):
                 track = self.tracks[track_index]
                 if observation.camera_depth_center is not None:
                     measured = np.asarray(
@@ -345,7 +356,7 @@ class CascadedTracker(KittiHzTracker):
                     "track_id": track.id,
                     "detection_index": -1,
                     "matched": False,
-                    "association_stage": "STAGE_3",
+                    "association_stage": "SUPPORTED_PREDICTION",
                     "association_cost": float("nan"),
                     "track_status": memory.current_track_status.value,
                 })
@@ -357,12 +368,21 @@ class CascadedTracker(KittiHzTracker):
             observation = track_observations[track_index]
             track.record_observation(observation)
             track.last_association_cost = float("nan")
-            memory = self.lifecycle.missed(track, observation)
+            occlusion = track_occlusions.get(track_index)
+            if occlusion is None:
+                memory = self.lifecycle.missed(track, observation)
+                stage = "PREDICTION_MISSED"
+            else:
+                memory = self.lifecycle.occluded(
+                    track, observation, occlusion[0], occlusion[1],
+                    self.association_config.occlusion_confirmation_frames,
+                    self.association_config.occlusion_max_age)
+                stage = "PREDICTION_OCCLUDED_BY_TRACK"
             self.last_events.append({
                 "track_id": track.id,
                 "detection_index": -1,
                 "matched": False,
-                "association_stage": "STAGE_4",
+                "association_stage": stage,
                 "association_cost": float("nan"),
                 "track_status": memory.current_track_status.value,
             })
@@ -371,10 +391,9 @@ class CascadedTracker(KittiHzTracker):
             detection = detections[detection_index]
             observation = detection_observations[detection_index]
             if (float(detection[8]) < self.min_spawn_score or
-                    not self._allow_spawn(observation) or
-                    not self._should_spawn_track(detection, observation)):
+                    not self._allow_spawn(observation)):
                 continue
-            track = TimeAwareTrack(
+            track = StaticCvTrack(
                 detection, timestamp, self.expected_dt, self.confirm_time,
                 self.static_speed_thresh, observation,
                 self.observation_history_size)
@@ -428,6 +447,9 @@ class CascadedTracker(KittiHzTracker):
                 "hit_count": memory.hit_count,
                 "miss_count": memory.miss_count,
                 "recovery_count": memory.recovery_count,
+                "occlusion_count": memory.occlusion_count,
+                "occluded_by_track_id": memory.occluded_by_track_id,
+                "occlusion_ratio": memory.occlusion_ratio,
                 "camera_support_age": track.camera_support_age,
                 "lidar_support_age": track.lidar_support_age,
                 "association_cost": event.get("association_cost", float("nan")),
@@ -436,9 +458,19 @@ class CascadedTracker(KittiHzTracker):
                 "matched": bool(event.get("matched", False)),
             }
             debug_results.append(result)
-            if memory.current_track_status not in {
-                    TrackStatus.TENTATIVE, TrackStatus.SUPPRESSED,
-                    TrackStatus.TERMINATED}:
+            observation = track.last_observation
+            camera_depth_verified = (
+                observation is not None and
+                observation.camera_supported and
+                observation.depth_state == DepthState.CONSISTENT)
+            output_supported = (
+                result["was_detected"] or camera_depth_verified or
+                memory.miss_count <=
+                self.association_config.output_prediction_max_misses)
+            if (memory.current_track_status in {
+                    TrackStatus.CONFIRMED, TrackStatus.RECOVERING,
+                    TrackStatus.OCCLUDED} and
+                    output_supported):
                 results.append(result)
         self.last_debug_tracks = debug_results
         return results

@@ -70,6 +70,23 @@ def _disable_unused_bevfusion() -> None:
     sys.modules[module_name] = stub
 
 
+def _disable_unused_argo2() -> None:
+    """Avoid importing Argoverse2's incompatible optional Kornia helpers."""
+
+    module_name = "pcdet.datasets.argo2.argo2_dataset"
+    if module_name in sys.modules:
+        return
+    stub = types.ModuleType(module_name)
+
+    class Argo2Dataset:  # pragma: no cover - only guards accidental use
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError(
+                "Argoverse2 is disabled in the CODA PointPillars runtime")
+
+    stub.Argo2Dataset = Argo2Dataset
+    sys.modules[module_name] = stub
+
+
 def prepare_openpcdet_runtime(openpcdet_path: Path,
                               cuda_ops_path: Path) -> list[str]:
     """Prepare and return the names of preloaded CUDA extension modules."""
@@ -89,6 +106,7 @@ def prepare_openpcdet_runtime(openpcdet_path: Path,
         _load_extension(module_name, ops / relative_path)
         loaded.append(module_name)
     _disable_unused_bevfusion()
+    _disable_unused_argo2()
     return loaded
 
 

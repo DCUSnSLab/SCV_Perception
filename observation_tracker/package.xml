@@ -17,8 +17,10 @@
   <depend>tracking_msgs</depend>
   <depend>perception_interface</depend>
   <depend>pcdet_tracker</depend>
+  <exec_depend>rviz2</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
 
   <test_depend>python3-pytest</test_depend>
 

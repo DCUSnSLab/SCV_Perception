@@ -35,6 +35,7 @@ class TrackStatus(str, Enum):
     TENTATIVE = "TENTATIVE"
     CONFIRMED = "CONFIRMED"
     RECOVERING = "RECOVERING"
+    OCCLUDED = "OCCLUDED"
     SUPPRESSED = "SUPPRESSED"
     LOST = "LOST"
     TERMINATED = "TERMINATED"
@@ -73,6 +74,7 @@ class ObservationResult:
     depth_support_pixel_count: int = 0
     depth_support_ratio: float = 0.0
     camera_depth_center: Optional[Tuple[float, float, float]] = None
+    camera_depth_overlap: float = 0.0
 
     object_range: float = 0.0
     state: str = ObservationClass.WEAK_OBSERVATION.value

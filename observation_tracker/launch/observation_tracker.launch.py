@@ -2,6 +2,7 @@
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
+from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
@@ -17,7 +18,7 @@ def generate_launch_description():
         DeclareLaunchArgument("detection_topic", default_value="/detected_objects_3d"),
         DeclareLaunchArgument("tracked_topic", default_value="/tracked_objects_3d"),
         DeclareLaunchArgument("bbox_topic", default_value="/pcdet/observation_tracks"),
-        DeclareLaunchArgument("odom_topic", default_value="/odometry/wheel"),
+        DeclareLaunchArgument("odom_topic", default_value="/odom"),
         DeclareLaunchArgument("imu_topic", default_value="/vectornav/imu"),
         DeclareLaunchArgument("sequence_id", default_value="seq01"),
         DeclareLaunchArgument("use_sim_time", default_value="false"),
@@ -39,8 +40,19 @@ def generate_launch_description():
             "aligned_depth_topic",
             default_value="/camera/camera/aligned_depth_to_color/image_raw"),
         DeclareLaunchArgument(
+            "compressed_depth_topic",
+            default_value=(
+                "/camera/camera/aligned_depth_to_color/"
+                "image_raw/compressedDepth")),
+        DeclareLaunchArgument(
             "fused_detection_marker_topic",
             default_value="/observation_tracker/fused_detection_markers"),
+        DeclareLaunchArgument("launch_rviz", default_value="false"),
+        DeclareLaunchArgument(
+            "rviz_config",
+            default_value=PathJoinSubstitution([
+                FindPackageShare("observation_tracker"), "config",
+                "observation_tracker_bev.rviz"])),
     ]
     tracker = Node(
         package="observation_tracker",
@@ -72,6 +84,8 @@ def generate_launch_description():
                 "camera_detection_topic": LaunchConfiguration("camera_detection_topic"),
                 "camera_info_topic": LaunchConfiguration("camera_info_topic"),
                 "aligned_depth_topic": LaunchConfiguration("aligned_depth_topic"),
+                "compressed_depth_topic": LaunchConfiguration(
+                    "compressed_depth_topic"),
                 "fused_detection_marker_topic": LaunchConfiguration(
                     "fused_detection_marker_topic"),
             },
@@ -85,4 +99,12 @@ def generate_launch_description():
             "--sequence_id", LaunchConfiguration("sequence_id"),
         ],
     )
-    return LaunchDescription(arguments + [tracker])
+    rviz = Node(
+        package="rviz2",
+        executable="rviz2",
+        name="observation_tracker_bev",
+        output="screen",
+        arguments=["-d", LaunchConfiguration("rviz_config")],
+        condition=IfCondition(LaunchConfiguration("launch_rviz")),
+    )
+    return LaunchDescription(arguments + [tracker, rviz])

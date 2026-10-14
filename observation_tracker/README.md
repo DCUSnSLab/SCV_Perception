@@ -13,16 +13,17 @@ The added policy is intentionally deterministic and lightweight for ablation.
   -> raw LiDAR point count + centroid consistency
   -> D555 projection + 2-D detection match + aligned-depth consistency
   -> MULTIMODAL_STRONG / LIDAR_DOMINANT / CAMERA_DOMINANT / WEAK_OBSERVATION
-  -> cascaded association stages 1/2/3/4
+  -> unified uncertainty-based Hungarian association
   -> observation-aware lifecycle and temporal memory
   -> existing DetectedObjectArray + state markers + CSV
 ```
 
-Stage 1 associates multimodal candidates. Stage 2 uses only 3-D LiDAR/motion
-terms. Stage 3 keeps an unmatched existing 3-D track when camera and depth
-support its prediction. It never initializes a 3-D track from camera-only
-evidence. Stage 4 predicts without forced association and delegates deletion
-to the lifecycle history.
+Active, lost and occluded tracks share one association pass. Its only spatial
+hard gate is the full Kalman innovation covariance (`H P H^T + R`); 3-D IoU,
+camera overlap and depth consistency remain soft costs. Thus the admissible
+region grows with prediction uncertainty instead of using a fixed distance.
+Camera-depth evidence may retain an unmatched existing 3-D track, but never
+initializes a camera-only track.
 
 Depth does not move the calibrated projection. The analyzer samples the center
 of each projected ROI, counts pixels within the configured tolerance of the
@@ -31,7 +32,8 @@ association cost. A closer median depth is treated as occlusion.
 
 ## Reused implementation
 
-- `pcdet_tracker.jay_tracker.TimeAwareTrack`: KF, ID and motion prediction
+- `pcdet_tracker.jay_tracker.TimeAwareTrack`: KF, ID and motion history
+- local `StaticCvTrack`: evidence-weighted stationary/CV prediction mixture
 - Jay odometry/IMU interpolation and body-frame ego-motion compensation
 - current `tracking_msgs/DetectedObjectArray` parsing and publication
 - TF lookup, PointCloud2 parsing, sensor caches and RViz baseline markers
@@ -50,7 +52,7 @@ A0 baseline or run this package for the adaptive path.
 | 2-D detection | `/yolo/detections` | `perception_interface/DetectionArray` |
 | CameraInfo | `/camera/camera/color/camera_info` | `sensor_msgs/CameraInfo` |
 | aligned depth | `/camera/camera/aligned_depth_to_color/image_raw` | `sensor_msgs/Image` |
-| wheel odometry | `/odometry/wheel` | `nav_msgs/Odometry` |
+| wheel odometry | `/odom` | `nav_msgs/Odometry` |
 | IMU | `/vectornav/imu` | `sensor_msgs/Imu` |
 | tracks | `/tracked_objects_3d` | `tracking_msgs/DetectedObjectArray` |
 | state markers | `/observation_tracker/debug_markers` | `visualization_msgs/MarkerArray` |
@@ -112,15 +114,30 @@ The text shows both detector classes/confidences and Camera IoU. A 3-D
 detection associated with a track is prefixed with its stable `ID n`.
 Unassociated raw detections do not display a temporary detection number. An
 unmatched 2-D detection with valid aligned depth is also back-projected into
-the 3-D grid as a magenta `CAMERA_DEPTH_CANDIDATE` sphere. Camera-only
+the 3-D grid as a magenta `CAMERA_DEPTH_CANDIDATE` box. Its visible width and
+height come from the 2-D bounds and median aligned depth. Camera-only
 candidates never initialize a new track ID. The fused topic removes a 3-D box
 as soon as it no longer has a current detector match; the internal track and
 its ID may still be retained for later recovery.
 
-A weak 3-D detection can retain an existing confirmed/recovering ID when its
-class, predicted center, and 3-D IoU pass the stricter weak-continuity gates.
-This association does not count as a Kalman-filter hit, increase confidence,
-or create a new track, so the false-positive suppression policy remains active.
+A weak 3-D detection participates in the same covariance-aware assignment but
+does not count as a normal Kalman-filter hit or confirm a tentative track.
+There is no pedestrian-only recovery gate: all classes reconnect through the
+same uncertainty policy even when their predicted and detected boxes do not
+overlap.
+
+When the 3-D detector misses but LiDAR box support or class-compatible camera
+support with non-conflicting depth still confirms the predicted object, the
+track enters `SUPPORTED_PREDICTION`. This resets the detector-miss streak
+without counting a detector hit, so `max_miss_count` only terminates tracks
+that also lose independent sensor evidence.
+
+For pedestrian crossings, a missed rear track becomes `OCCLUDED` when its
+depth ROI is blocked and a nearer supported pedestrian covers at least 45% of
+its projected ROI for two frames. The hidden ID is retained for up to eight
+frames and participates in the same global assignment before an unmatched
+detection can create a replacement ID. The occluding track ID and overlap
+ratio are logged.
 
 The 2-D detector defaults to the D555 compressed color image
 (`/camera/camera/color/image_raw/compressed`) and publishes raw detector
@@ -140,9 +157,9 @@ Important flags are:
 - `enable_camera_observation`
 - `enable_depth_consistency`
 - `enable_observation_state`
-- `enable_cascaded_association`
 - `enable_adaptive_lifecycle`
 - `enable_temporal_smoothing`
+- `enable_occlusion_reasoning`
 
 LiDAR strong thresholds are class- and distance-specific. Their initial values
 are prototype values, not validated VLP-32C operating thresholds. CSV output
@@ -165,5 +182,5 @@ track ID, class, score, center, dimensions and yaw. Observation state and
 lifecycle status are published through RViz text/colors and the experiment CSV
 instead of changing downstream message definitions.
 
-The initial implementation has no learned fusion, Re-ID, camera-only 3-D
-initialization or adaptive Kalman model. Those are outside the research core.
+The implementation has no learned fusion, appearance Re-ID or camera-only 3-D
+initialization. Those are outside the research core.

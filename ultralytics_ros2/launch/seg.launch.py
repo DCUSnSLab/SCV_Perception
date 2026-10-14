@@ -34,7 +34,7 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_tracking", default_value="false"),
         DeclareLaunchArgument("publish_source_image", default_value="false"),
         DeclareLaunchArgument("publish_masks", default_value="false"),
-        DeclareLaunchArgument("conf_thres", default_value="0.25"),
+        DeclareLaunchArgument("conf_thres", default_value="0.70"),
         DeclareLaunchArgument("iou_thres", default_value="0.45"),
         DeclareLaunchArgument("max_det", default_value="300"),
         DeclareLaunchArgument("device", default_value=""),

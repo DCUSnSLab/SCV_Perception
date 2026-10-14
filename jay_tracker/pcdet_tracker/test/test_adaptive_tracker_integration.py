@@ -84,3 +84,23 @@ def test_adaptive_kf_trusts_high_confidence_measurement_more():
         det1, 0.1, 0.2, 0.04, 0.2, observation=low,
         measurement_noise_scale=2.0)
     assert track_high.box[0] > track_low.box[0]
+
+
+def test_prediction_moves_once_and_fades_when_detection_is_missing():
+    TimeAwareTrack._next_id = 0
+    tracker = KittiHzTracker(
+        expected_dt=0.1, max_age_frames=9,
+        missed_velocity_decay=0.5, publish_prediction_frames=2)
+    tracker.update(detection(0.0), timestamp=0.0)
+    tracker.update(detection(1.0), timestamp=0.1)
+    track = tracker.tracks[0]
+    track.x[2, 0] = 1.0
+    track.object_velocity[0] = 1.0
+    start_x = float(track.box[0])
+
+    first = tracker.update(np.empty((0, 9)), timestamp=0.2)
+    assert np.isclose(first[0]['box'][0] - start_x, 0.1, atol=1e-5)
+    assert np.isclose(track.x[2, 0], 0.5)
+    assert tracker.update(np.empty((0, 9)), timestamp=0.3)
+    assert tracker.update(np.empty((0, 9)), timestamp=0.4) == []
+    assert tracker.tracks

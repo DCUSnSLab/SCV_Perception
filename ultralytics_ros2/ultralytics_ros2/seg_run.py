@@ -30,7 +30,7 @@ class SegNode(Node):
         self.declare_parameter("publish_source_image", False)
         self.declare_parameter("publish_masks", False)
 
-        self.declare_parameter("conf_thres", 0.25)
+        self.declare_parameter("conf_thres", 0.70)
         self.declare_parameter("iou_thres", 0.45)
         self.declare_parameter("max_det", 300)
         # COCO: person=0, car=2. Observation tracking only needs these classes.

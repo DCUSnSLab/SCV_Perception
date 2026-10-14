@@ -18,6 +18,9 @@ class TrackMemory:
     current_observation_state: str = ObservationClass.WEAK_OBSERVATION.value
     track_confidence: float = 0.5
     recovery_count: int = 0
+    occlusion_count: int = 0
+    occluded_by_track_id: int = -1
+    occlusion_ratio: float = 0.0
     current_track_status: TrackStatus = TrackStatus.TENTATIVE
     consecutive_state_count: int = 0
     weak_count: int = 0

@@ -10,7 +10,10 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
-        ("share/" + package_name + "/config", ["config/observation_tracker.yaml"]),
+        ("share/" + package_name + "/config", [
+            "config/observation_tracker.yaml",
+            "config/observation_tracker_bev.rviz",
+        ]),
         ("share/" + package_name + "/launch", ["launch/observation_tracker.launch.py"]),
     ],
     install_requires=["setuptools", "numpy", "scipy"],

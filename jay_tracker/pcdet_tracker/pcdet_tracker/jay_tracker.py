@@ -517,8 +517,6 @@ class TimeAwareTrack:
         compensated_xy, compensated_yaw = compensate_body_frame_motion(
             self.x[:2, 0], self.box[6], dt, ego_motion, gain=ego_comp_gain
         )
-        if self.is_dynamic:
-            compensated_xy = compensated_xy + self.object_velocity * dt
         self.x[0, 0] = float(compensated_xy[0])
         self.x[1, 0] = float(compensated_xy[1])
         rotated_velocity = rotation_matrix_2d(
@@ -624,15 +622,17 @@ class KittiHzTracker:
     def __init__(
         self,
         expected_dt=0.116,
-        max_age_frames=5,
+        max_age_frames=9,
         confirm_frames=2,
-        match_distance=2.4,
+        match_distance=3.0,
         min_spawn_score=0.20,
         static_speed_thresh=0.60,
         static_yaw_alpha=0.04,
         dynamic_yaw_alpha=0.20,
         ego_motion_match_gain=1.0,
         ego_motion_assoc_bonus=0.35,
+        missed_velocity_decay=0.80,
+        publish_prediction_frames=3,
         adaptive_policy=None,
         observation_history_size=5,
         enable_adaptive_kf=False,
@@ -650,6 +650,9 @@ class KittiHzTracker:
         self.dynamic_yaw_alpha = float(dynamic_yaw_alpha)
         self.ego_motion_match_gain = float(ego_motion_match_gain)
         self.ego_motion_assoc_bonus = float(ego_motion_assoc_bonus)
+        self.missed_velocity_decay = float(missed_velocity_decay)
+        self.publish_prediction_sec = (
+            float(publish_prediction_frames) * self.expected_dt)
         self.adaptive_policy = adaptive_policy
         self.observation_history_size = max(1, int(observation_history_size))
         self.enable_adaptive_kf = bool(enable_adaptive_kf)
@@ -823,9 +826,12 @@ class KittiHzTracker:
             })
 
         for track_idx in unmatched_trks:
-            self.tracks[track_idx].record_observation(
+            track = self.tracks[track_idx]
+            track.record_observation(
                 track_observations[track_idx])
-            self.tracks[track_idx].last_association_cost = float("nan")
+            track.x[2:4, 0] *= self.missed_velocity_decay
+            track.object_velocity *= self.missed_velocity_decay
+            track.last_association_cost = float("nan")
             self.last_events.append({
                 "track_id": self.tracks[track_idx].id,
                 "detection_index": -1,
@@ -871,6 +877,8 @@ class KittiHzTracker:
         results = []
         for track in self.tracks:
             if not track.is_confirmed and track.hits < 2:
+                continue
+            if track.time_since_update_sec > self.publish_prediction_sec:
                 continue
             results.append(
                 {
@@ -1006,6 +1014,8 @@ class JayTrackerNode(Node):
             dynamic_yaw_alpha=args.track_dynamic_yaw_alpha,
             ego_motion_match_gain=args.ego_motion_match_gain,
             ego_motion_assoc_bonus=args.ego_motion_assoc_bonus,
+            missed_velocity_decay=args.track_missed_velocity_decay,
+            publish_prediction_frames=args.track_publish_prediction_frames,
             adaptive_policy=self.adaptive_policy,
             observation_history_size=int(
                 self.adaptive_values.get('temporal', {}).get(
@@ -1766,7 +1776,7 @@ def parse_config():
     parser.add_argument(
         "--track_max_age_frames",
         type=int,
-        default=5,
+        default=9,
         help="how many LiDAR frames a track survives without a detection",
     )
     parser.add_argument(
@@ -1778,7 +1788,7 @@ def parse_config():
     parser.add_argument(
         "--track_match_distance",
         type=float,
-        default=2.4,
+        default=3.0,
         help="maximum XY distance for detection-to-track matching",
     )
     parser.add_argument(
@@ -1804,6 +1814,18 @@ def parse_config():
         type=float,
         default=0.20,
         help="yaw update gain for moving tracks",
+    )
+    parser.add_argument(
+        "--track_missed_velocity_decay",
+        type=float,
+        default=0.80,
+        help="velocity retained after each frame without a matched detection",
+    )
+    parser.add_argument(
+        "--track_publish_prediction_frames",
+        type=int,
+        default=3,
+        help="missed frames still published while retaining the ID internally",
     )
     parser.add_argument(
         "--ego_motion_match_gain",

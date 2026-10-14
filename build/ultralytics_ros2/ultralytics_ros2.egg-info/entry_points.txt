@@ -1,2 +1,3 @@
 [console_scripts]
 seg_run = ultralytics_ros2.seg_run:main
+

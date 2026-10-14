@@ -1,0 +1,69 @@
+[INFO] [1791893607.670302788] [jay_tracker]: listening detections: /detected_objects_3d
+[INFO] [1791893607.670606058] [jay_tracker]: publishing tracked objects: /tracked_objects_3d
+[INFO] [1791893607.670842168] [jay_tracker]: publishing: /pcdet/kitti_based_tracks
+[INFO] [1791893607.671077245] [jay_tracker]: odom: /odom
+[INFO] [1791893607.671323638] [jay_tracker]: imu: /vectornav/imu
+[INFO] [1791893607.671565541] [jay_tracker]: detection csv: /home/jay/SCV_Perception/results/tuning/detections/tracking_test_2_detections.csv
+[INFO] [1791893607.671800398] [jay_tracker]: track csv: /home/jay/SCV_Perception/results/tuning/baseline_tracks/tracking_test_2_tracks.csv
+[INFO] [1791893607.672033634] [jay_tracker]: performance csv: /home/jay/SCV_Perception/results/tuning/perf/tracker_perf.csv
+[INFO] [1791893607.672352851] [jay_tracker]: fixed track box sizes: Vehicle=[4.670000076293945, 2.0399999618530273, 1.7999999523162842] Pedestrian=[0.9800000190734863, 0.7699999809265137, 1.7000000476837158] Cyclist=[1.7599999904632568, 0.6000000238418579, 1.7300000190734863]
+[INFO] [1791893607.672600822] [jay_tracker]: LiDAR timing: 8.6 Hz (0.116 s/frame)
+[INFO] [1791893607.672836055] [jay_tracker]: tracker: max_age=5 frames (0.580 s), confirm=2 frames
+[INFO] [1791893607.673067529] [jay_tracker]: ego compensation: gain=1.00, assoc_bonus=0.35
+[INFO] [1791893607.673308828] [jay_tracker]: adaptive tracking: observation=True camera=True lidar=True depth=False association=False lifecycle=True kf=False
+[INFO] [1791893607.673544806] [jay_tracker]: observability csv: /home/jay/SCV_Perception/results/observability/tracking_test_2_observability.csv
+[INFO] [1791893610.137364680] [jay_tracker]: [perf:tracker] frames=1 wall_fps=0.40 msg_fps=0.00 avg_total=14.9ms max_total=14.9ms avg_in=5.0 avg_out=5.0 parse=2.0ms csv_det=0.1ms ego=0.0ms track=11.0ms csv_track=0.2ms observation=5.3ms association=5.8ms history=0.0ms markers=1.4ms
+[INFO] [1791893610.517118854] [jay_tracker]: frame=10 dets=5 tracks=5 latency=15.1ms ego=0.0km/h
+[INFO] [1791893611.186993834] [jay_tracker]: [perf:tracker] frames=11 wall_fps=10.48 msg_fps=9.98 avg_total=16.0ms max_total=18.2ms avg_in=5.3 avg_out=5.3 parse=2.0ms csv_det=0.1ms ego=0.1ms track=11.9ms csv_track=0.2ms observation=5.8ms association=6.1ms history=0.0ms markers=1.6ms
+[INFO] [1791893611.485714700] [jay_tracker]: frame=20 dets=6 tracks=6 latency=15.8ms ego=0.0km/h
+[INFO] [1791893612.200793908] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.87 msg_fps=9.98 avg_total=17.2ms max_total=28.8ms avg_in=5.6 avg_out=6.0 parse=1.9ms csv_det=0.1ms ego=0.1ms track=12.6ms csv_track=0.2ms observation=5.9ms association=6.7ms history=0.0ms markers=2.1ms
+[INFO] [1791893612.499207248] [jay_tracker]: frame=30 dets=6 tracks=6 latency=29.1ms ego=0.0km/h
+[INFO] [1791893613.289800909] [jay_tracker]: [perf:tracker] frames=11 wall_fps=10.10 msg_fps=9.98 avg_total=17.7ms max_total=29.1ms avg_in=5.8 avg_out=6.0 parse=1.9ms csv_det=0.1ms ego=0.1ms track=13.4ms csv_track=0.2ms observation=6.2ms association=7.2ms history=0.0ms markers=1.9ms
+[INFO] [1791893613.491747275] [jay_tracker]: frame=40 dets=6 tracks=6 latency=16.3ms ego=0.0km/h
+[INFO] [1791893614.384309880] [jay_tracker]: [perf:tracker] frames=11 wall_fps=10.05 msg_fps=9.98 avg_total=16.5ms max_total=17.4ms avg_in=5.9 avg_out=6.0 parse=1.7ms csv_det=0.1ms ego=0.1ms track=12.4ms csv_track=0.2ms observation=5.9ms association=6.5ms history=0.0ms markers=1.9ms
+[INFO] [1791893614.491206159] [jay_tracker]: frame=50 dets=5 tracks=6 latency=15.8ms ego=0.0km/h
+[INFO] [1791893615.396382309] [jay_tracker]: [perf:tracker] frames=9 wall_fps=8.90 msg_fps=8.87 avg_total=16.2ms max_total=16.7ms avg_in=5.8 avg_out=6.0 parse=1.7ms csv_det=0.1ms ego=0.1ms track=12.1ms csv_track=0.2ms observation=5.8ms association=6.3ms history=0.0ms markers=1.8ms
+[INFO] [1791893615.606780660] [jay_tracker]: frame=60 dets=5 tracks=6 latency=14.9ms ego=0.0km/h
+[INFO] [1791893616.409462155] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.87 msg_fps=9.98 avg_total=15.0ms max_total=16.0ms avg_in=5.2 avg_out=6.0 parse=1.7ms csv_det=0.1ms ego=0.1ms track=11.0ms csv_track=0.2ms observation=5.4ms association=5.6ms history=0.0ms markers=1.7ms
+[INFO] [1791893616.603792258] [jay_tracker]: frame=70 dets=6 tracks=6 latency=15.9ms ego=0.0km/h
+[INFO] [1791893617.490145035] [jay_tracker]: [perf:tracker] frames=11 wall_fps=10.18 msg_fps=9.98 avg_total=16.1ms max_total=17.0ms avg_in=5.9 avg_out=6.0 parse=1.7ms csv_det=0.1ms ego=0.1ms track=11.9ms csv_track=0.2ms observation=5.7ms association=6.2ms history=0.0ms markers=1.9ms
+[INFO] [1791893617.599387118] [jay_tracker]: frame=80 dets=5 tracks=6 latency=14.9ms ego=0.0km/h
+[INFO] [1791893618.498567785] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.92 msg_fps=9.98 avg_total=15.7ms max_total=17.5ms avg_in=5.8 avg_out=6.0 parse=1.6ms csv_det=0.1ms ego=0.1ms track=11.8ms csv_track=0.2ms observation=5.5ms association=6.2ms history=0.0ms markers=1.8ms
+[INFO] [1791893618.614985693] [jay_tracker]: frame=90 dets=6 tracks=6 latency=16.0ms ego=0.0km/h
+[INFO] [1791893619.515438323] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.84 msg_fps=9.98 avg_total=15.7ms max_total=16.2ms avg_in=5.9 avg_out=6.0 parse=1.5ms csv_det=0.1ms ego=0.1ms track=11.8ms csv_track=0.2ms observation=5.7ms association=6.1ms history=0.0ms markers=1.8ms
+[INFO] [1791893619.618416162] [jay_tracker]: frame=100 dets=6 tracks=6 latency=16.6ms ego=0.0km/h
+[INFO] [1791893620.524243186] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.92 msg_fps=9.98 avg_total=15.6ms max_total=16.6ms avg_in=5.6 avg_out=6.0 parse=1.6ms csv_det=0.1ms ego=0.1ms track=11.6ms csv_track=0.2ms observation=5.5ms association=6.1ms history=0.0ms markers=1.8ms
+[INFO] [1791893620.623033346] [jay_tracker]: frame=110 dets=6 tracks=6 latency=16.0ms ego=0.0km/h
+[INFO] [1791893621.622433671] [jay_tracker]: [perf:tracker] frames=11 wall_fps=10.02 msg_fps=9.98 avg_total=16.2ms max_total=19.0ms avg_in=5.4 avg_out=6.0 parse=1.6ms csv_det=0.1ms ego=0.1ms track=12.1ms csv_track=0.2ms observation=5.7ms association=6.4ms history=0.0ms markers=1.9ms
+[INFO] [1791893621.622701284] [jay_tracker]: frame=120 dets=6 tracks=6 latency=15.2ms ego=0.0km/h
+[INFO] [1791893622.614970301] [jay_tracker]: frame=130 dets=6 tracks=6 latency=16.0ms ego=0.0km/h
+[INFO] [1791893622.712863736] [jay_tracker]: [perf:tracker] frames=11 wall_fps=10.09 msg_fps=9.98 avg_total=15.9ms max_total=18.1ms avg_in=5.5 avg_out=6.0 parse=1.7ms csv_det=0.1ms ego=0.1ms track=11.8ms csv_track=0.2ms observation=5.7ms association=6.1ms history=0.0ms markers=1.8ms
+[INFO] [1791893623.627619530] [jay_tracker]: frame=140 dets=6 tracks=6 latency=16.8ms ego=0.0km/h
+[INFO] [1791893623.746109931] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.68 msg_fps=9.98 avg_total=16.9ms max_total=29.2ms avg_in=5.3 avg_out=6.0 parse=1.8ms csv_det=0.1ms ego=0.1ms track=12.5ms csv_track=0.2ms observation=5.9ms association=6.7ms history=0.0ms markers=1.9ms
+[INFO] [1791893624.623574023] [jay_tracker]: frame=150 dets=6 tracks=6 latency=16.0ms ego=0.0km/h
+[INFO] [1791893624.817328127] [jay_tracker]: [perf:tracker] frames=11 wall_fps=10.27 msg_fps=9.98 avg_total=15.8ms max_total=16.8ms avg_in=5.6 avg_out=6.0 parse=1.7ms csv_det=0.1ms ego=0.1ms track=11.8ms csv_track=0.2ms observation=5.6ms association=6.2ms history=0.0ms markers=1.8ms
+[INFO] [1791893625.620450611] [jay_tracker]: frame=160 dets=6 tracks=6 latency=16.1ms ego=0.0km/h
+[INFO] [1791893625.824374712] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.94 msg_fps=9.98 avg_total=16.2ms max_total=19.2ms avg_in=5.7 avg_out=6.0 parse=1.7ms csv_det=0.1ms ego=0.1ms track=11.9ms csv_track=0.2ms observation=5.6ms association=6.3ms history=0.0ms markers=2.0ms
+[INFO] [1791893626.711878558] [jay_tracker]: frame=170 dets=6 tracks=6 latency=15.9ms ego=0.0km/h
+[INFO] [1791893626.914085189] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.18 msg_fps=8.98 avg_total=15.9ms max_total=16.9ms avg_in=5.8 avg_out=6.0 parse=1.7ms csv_det=0.1ms ego=0.1ms track=11.9ms csv_track=0.2ms observation=5.8ms association=6.1ms history=0.0ms markers=1.8ms
+[INFO] [1791893627.736507683] [jay_tracker]: frame=180 dets=5 tracks=6 latency=15.0ms ego=0.0km/h
+[INFO] [1791893627.940708779] [jay_tracker]: [perf:tracker] frames=10 wall_fps=9.74 msg_fps=9.98 avg_total=15.6ms max_total=17.1ms avg_in=5.2 avg_out=6.0 parse=1.9ms csv_det=0.1ms ego=0.1ms track=11.3ms csv_track=0.2ms observation=5.5ms association=5.9ms history=0.0ms markers=1.8ms
+[INFO] [1791893628.728639968] [jay_tracker]: frame=190 dets=6 tracks=6 latency=16.0ms ego=0.0km/h
+[INFO] [1791893629.026467674] [jay_tracker]: [perf:tracker] frames=11 wall_fps=10.13 msg_fps=9.98 avg_total=15.8ms max_total=17.0ms avg_in=5.7 avg_out=5.6 parse=1.8ms csv_det=0.1ms ego=0.1ms track=11.8ms csv_track=0.2ms observation=5.6ms association=6.2ms history=0.0ms markers=1.7ms
+Traceback (most recent call last):
+  File "/home/jay/SCV_Perception/install/pcdet_tracker/lib/pcdet_tracker/jay_tracker", line 33, in <module>
+    sys.exit(load_entry_point('pcdet-tracker', 'console_scripts', 'jay_tracker')())
+  File "/home/jay/SCV_Perception/build/pcdet_tracker/pcdet_tracker/jay_tracker.py", line 1877, in main
+    rclpy.spin(node)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/__init__.py", line 229, in spin
+    executor.spin_once()
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/executors.py", line 751, in spin_once
+    self._spin_once_impl(timeout_sec)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/executors.py", line 740, in _spin_once_impl
+    handler, entity, node = self.wait_for_ready_callbacks(timeout_sec=timeout_sec)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/executors.py", line 723, in wait_for_ready_callbacks
+    return next(self._cb_iter)
+  File "/opt/ros/humble/local/lib/python3.10/dist-packages/rclpy/executors.py", line 624, in _wait_for_ready_callbacks
+    raise ExternalShutdownException()
+rclpy.executors.ExternalShutdownException
+[ros2run]: Process exited with failure 1

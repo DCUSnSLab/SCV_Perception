@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
@@ -7,6 +9,7 @@ from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
+    home = Path.home()
     return LaunchDescription([
         DeclareLaunchArgument("input_topic", default_value="/velodyne_points"),
         DeclareLaunchArgument("detection_topic", default_value="/detected_objects_3d"),
@@ -16,20 +19,17 @@ def generate_launch_description():
         DeclareLaunchArgument("perf_output_dir", default_value="results/perf"),
         DeclareLaunchArgument(
             "openpcdet_path",
-            default_value=(
-                "/home/scv/ws/SCV_Perception/third_party/OpenPCDet"),
+            default_value=str(home / "OpenPCDet-restored"),
             description="Path containing the OpenPCDet pcdet Python package",
         ),
         DeclareLaunchArgument(
             "ckpt_file",
-            default_value="/home/scv/SCV/src/perception/jay_tracker/models/pointpillars_coda.pth",
+            default_value=str(
+                home / "pcdet_ros2_ws/models/pointpillars_coda.pth"),
         ),
         DeclareLaunchArgument(
             "cuda_ops_path",
-            default_value=(
-                "/home/scv/SCV/src/perception/jay_tracker/third_party/"
-                "OpenPCDet/pcdet/ops"
-            ),
+            default_value=str(home / "OpenPCDet-restored/pcdet/ops"),
             description="CUDA 12 OpenPCDet extension directory",
         ),
         DeclareLaunchArgument("run_tracker", default_value="false"),

@@ -177,21 +177,24 @@ class ObservationVisualizer:
             color = self.colors.get(
                 state, (0.95, 0.20, 0.95))
 
-            point = Marker()
-            point.header = header
-            point.ns = "camera_depth_candidates"
-            point.id = candidate_id
-            point.type = Marker.SPHERE
-            point.action = Marker.ADD
-            point.pose.position.x = float(position[0])
-            point.pose.position.y = float(position[1])
-            point.pose.position.z = float(position[2])
-            point.pose.orientation.w = 1.0
-            point.scale.x = point.scale.y = point.scale.z = 0.55
-            point.color.r, point.color.g, point.color.b = color
-            point.color.a = 0.90
-            point.lifetime = lifetime
-            output.markers.append(point)
+            size = candidate["size"]
+            box = Marker()
+            box.header = header
+            box.ns = "camera_depth_candidates"
+            box.id = candidate_id
+            box.type = Marker.CUBE
+            box.action = Marker.ADD
+            box.pose.position.x = float(position[0])
+            box.pose.position.y = float(position[1])
+            box.pose.position.z = float(position[2])
+            box.pose.orientation.w = 1.0
+            box.scale.x = float(size[0])
+            box.scale.y = float(size[1])
+            box.scale.z = float(size[2])
+            box.color.r, box.color.g, box.color.b = color
+            box.color.a = self.alpha
+            box.lifetime = lifetime
+            output.markers.append(box)
 
             text = Marker()
             text.header = header

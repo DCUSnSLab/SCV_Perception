@@ -249,8 +249,8 @@ PYTHON_LIBRARY:FILEPATH=/usr/lib/x86_64-linux-gnu/libpython3.10.so
 //Path to a library.
 PYTHON_LIBRARY_DEBUG:FILEPATH=PYTHON_LIBRARY_DEBUG-NOTFOUND
 
-//Path to a program.
-Python3_EXECUTABLE:FILEPATH=/usr/bin/python3
+//No help, variable specified on the command line.
+Python3_EXECUTABLE:UNINITIALIZED=/usr/bin/python3
 
 //Name of the computer/site where compile is being run
 SITE:STRING=D02-521-39
@@ -478,7 +478,7 @@ sensor_msgs_DIR:PATH=/opt/ros/humble/share/sensor_msgs/cmake
 std_msgs_DIR:PATH=/opt/ros/humble/share/std_msgs/cmake
 
 //Path to a program.
-xmllint_BIN:FILEPATH=/usr/bin/xmllint
+xmllint_BIN:FILEPATH=/home/jay/anaconda3/bin/xmllint
 
 
 ########################

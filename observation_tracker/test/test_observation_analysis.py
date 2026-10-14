@@ -107,6 +107,82 @@ def test_multimodal_state_uses_raw_sensor_evidence():
     assert result.depth_state == DepthState.CONSISTENT
 
 
+def test_person_depth_projection_selects_overlapping_pedestrian():
+    analyzer = ObservationAnalyzer()
+    box = np.array([5.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0])
+    transform = camera_from_lidar()
+    initial = analyzer.analyze(
+        [box], ["Pedestrian"], camera_from_source=transform,
+        intrinsics=(100, 100, 50, 50), image_size=(100, 100),
+        camera_available=True)[0]
+    detection = CameraDetection(initial.projected_roi, "person", 0.9)
+    depth = np.full((100, 100), 5000, np.uint16)
+    result = analyzer.analyze(
+        [box], ["Pedestrian"], camera_detections=[detection],
+        camera_from_source=transform, intrinsics=(100, 100, 50, 50),
+        image_size=(100, 100), camera_available=True,
+        depth_image=depth)[0]
+    assert result.camera_supported
+    assert result.camera_detection_class == "person"
+    assert result.camera_depth_overlap > 0.0
+
+
+def test_person_depth_projection_rejects_non_overlapping_pedestrian():
+    analyzer = ObservationAnalyzer()
+    box = np.array([5.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0])
+    transform = camera_from_lidar()
+    initial = analyzer.analyze(
+        [box], ["Pedestrian"], camera_from_source=transform,
+        intrinsics=(100, 100, 50, 50), image_size=(100, 100),
+        camera_available=True)[0]
+    detection = CameraDetection(initial.projected_roi, "person", 0.9)
+    result = analyzer.analyze(
+        [box], ["Pedestrian"], camera_detections=[detection],
+        camera_from_source=transform, intrinsics=(100, 100, 50, 50),
+        image_size=(100, 100), camera_available=True,
+        depth_image=np.full((100, 100), 9000, np.uint16))[0]
+    assert not result.camera_supported
+    assert result.camera_depth_overlap == 0.0
+
+
+def test_one_person_detection_supports_only_one_3d_pedestrian():
+    analyzer = ObservationAnalyzer()
+    boxes = np.array([
+        [5.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0],
+        [5.0, 0.2, 0.0, 1.0, 1.0, 2.0, 0.0],
+    ])
+    transform = camera_from_lidar()
+    initial = analyzer.analyze(
+        boxes[:1], ["Pedestrian"], camera_from_source=transform,
+        intrinsics=(100, 100, 50, 50), image_size=(100, 100),
+        camera_available=True)[0]
+    results = analyzer.analyze(
+        boxes, ["Pedestrian", "Pedestrian"],
+        camera_detections=[CameraDetection(initial.projected_roi, "person", 0.9)],
+        camera_from_source=transform, intrinsics=(100, 100, 50, 50),
+        image_size=(100, 100), camera_available=True,
+        depth_image=np.full((100, 100), 5000, np.uint16))
+    assert sum(result.camera_supported for result in results) == 1
+
+
+def test_missing_person_depth_falls_back_to_2d_camera_support():
+    analyzer = ObservationAnalyzer()
+    box = np.array([5.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0])
+    transform = camera_from_lidar()
+    initial = analyzer.analyze(
+        [box], ["Pedestrian"], camera_from_source=transform,
+        intrinsics=(100, 100, 50, 50), image_size=(100, 100),
+        camera_available=True)[0]
+    result = analyzer.analyze(
+        [box], ["Pedestrian"],
+        camera_detections=[CameraDetection(initial.projected_roi, "person", 0.9)],
+        camera_from_source=transform, intrinsics=(100, 100, 50, 50),
+        image_size=(100, 100), camera_available=True,
+        depth_image=np.zeros((100, 100), np.uint16))[0]
+    assert result.camera_supported
+    assert result.depth_state == DepthState.UNAVAILABLE
+
+
 def test_fused_marker_contains_3d_and_matched_2d_result():
     visualizer = ObservationVisualizer()
     detection = np.array(
@@ -171,6 +247,7 @@ def test_fused_marker_contains_camera_depth_candidate():
     candidate = {
         "id": 3,
         "position": np.array([5.0, 1.0, 0.5]),
+        "size": np.array([0.6, 0.8, 1.7]),
         "class_name": "car",
         "score": 0.8,
         "depth": 5.2,
@@ -181,6 +258,8 @@ def test_fused_marker_contains_camera_depth_candidate():
         [], [], ["Vehicle", "Pedestrian"], Header(), [candidate])
     assert len(markers.markers) == 2
     assert markers.markers[0].ns == "camera_depth_candidates"
+    assert markers.markers[0].type == Marker.CUBE
+    assert markers.markers[0].scale.z == 1.7
     assert "CAMERA_DEPTH_CANDIDATE" in markers.markers[1].text
 
 
