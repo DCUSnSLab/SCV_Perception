@@ -67,7 +67,7 @@ For the recorded traversability bag use `odom_topic:=/odom use_sim_time:=true`.
 ## Build and run
 
 ```bash
-cd /home/jay/SCV_Perception_2
+cd /home/jay/SCV_Perception
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install \
   --packages-up-to observation_tracker
