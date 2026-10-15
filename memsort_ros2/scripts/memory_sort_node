@@ -1,3 +1,0 @@
-#!/usr/bin/env bash
-# ros2 run 이 호출하는 진입점
-exec python3 -m memsort_ros2.memory_sort_node "$@"

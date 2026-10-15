@@ -2,11 +2,14 @@
 # SCV_Perception - ROS 2 (Humble) package collection
 # ---------------------------------------------------------------------------
 
-# --- colcon / ament workspace artifacts (any depth: root, nested *_ws, per-pkg)
-build/
-install/
-log/
-test_results/
+# --- colcon / ament workspace artifacts (root and any nested workspace)
+/build/
+/install/
+/log/
+**/build/
+**/install/
+**/log/
+**/test_results/
 compile_commands.json
 .cache/
 

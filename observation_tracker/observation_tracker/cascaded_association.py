@@ -6,12 +6,25 @@ import math
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from pcdet_tracker.jay_tracker import (
+from .tracking_core import (
     KittiHzTracker, TimeAwareTrack, bev_iou, compensate_body_frame_motion)
 
 from .observation_state import (
     DepthState, ObservationClass, TrackStatus)
 from .track_lifecycle import LifecycleConfig, TrackLifecycleManager
+
+
+def mahalanobis_squared_2d(delta, covariance):
+    """Evaluate a 2-D quadratic form without a general-purpose SVD."""
+    x, y = map(float, delta)
+    a, b = map(float, covariance[0])
+    c, d = map(float, covariance[1])
+    determinant = a * d - b * c
+    if abs(determinant) < 1e-12:
+        inverse = np.linalg.pinv(covariance)
+        return float(delta.T @ inverse @ delta)
+    return float((d * x * x - (b + c) * x * y + a * y * y) /
+                 determinant)
 
 
 @dataclass
@@ -31,6 +44,11 @@ class AssociationConfig:
     occlusion_depth_margin: float = 0.30
     occlusion_confirmation_frames: int = 2
     occlusion_max_age: int = 8
+    enable_static_fast_path: bool = True
+    static_observation_interval: int = 3
+    static_fast_match_distance: float = 0.75
+    static_fast_max_yaw_rate: float = 0.20
+    static_fast_max_ego_delta: float = 0.75
 
 
 class StaticCvTrack(TimeAwareTrack):
@@ -75,11 +93,11 @@ class StaticCvTrack(TimeAwareTrack):
         innovation_cov = (
             self.H @ self.P @ self.H.T +
             self.R * max(float(measurement_noise_scale), 1e-3))
-        inverse_cov = np.linalg.pinv(innovation_cov)
         likelihoods = []
         for prediction in self._mode_predictions:
             residual = measurement - prediction
-            distance_squared = float(residual.T @ inverse_cov @ residual)
+            distance_squared = mahalanobis_squared_2d(
+                residual, innovation_cov)
             likelihoods.append(math.exp(-0.5 * min(distance_squared, 50.0)))
         posterior = self.motion_mode_probabilities * np.asarray(
             likelihoods, dtype=np.float32)
@@ -118,6 +136,8 @@ class CascadedTracker(KittiHzTracker):
             lifecycle_config or LifecycleConfig())
         self.last_debug_tracks = []
         self.last_detection_observations = []
+        self.frame_index = 0
+        self.previous_ego_motion = {"vx": 0.0, "vy": 0.0, "yaw_rate": 0.0}
 
     @staticmethod
     def _unavailable(observation):
@@ -135,19 +155,23 @@ class CascadedTracker(KittiHzTracker):
                 DepthState.CONSISTENT, DepthState.UNAVAILABLE})
         return bool(observation.lidar_supported or camera_support)
 
-    def _pair_cost(self, track, detection, detection_observation):
+    def _pair_cost(self, track, detection, detection_observation,
+                   projected_covariance=None, noise_scale=None):
         cfg = self.association_config
         if (track.cls_id > 0 and int(detection[7]) > 0 and
                 track.cls_id != int(detection[7])):
             return np.inf
         innovation = np.asarray(
             detection[:2] - track.box[:2], dtype=np.float32)
-        measurement_noise = track.R * self._measurement_noise_scale(
-            detection_observation)
+        measurement_noise = track.R * (
+            self._measurement_noise_scale(detection_observation)
+            if noise_scale is None else noise_scale)
         innovation_covariance = (
-            track.H @ track.P @ track.H.T + measurement_noise)
-        mahalanobis_squared = float(
-            innovation.T @ np.linalg.pinv(innovation_covariance) @ innovation)
+            track.H @ track.P @ track.H.T
+            if projected_covariance is None else projected_covariance)
+        innovation_covariance = innovation_covariance + measurement_noise
+        mahalanobis_squared = mahalanobis_squared_2d(
+            innovation, innovation_covariance)
         if mahalanobis_squared > cfg.mahalanobis_gate:
             return np.inf
         overlap = iou_3d(track.box, detection)
@@ -177,11 +201,20 @@ class CascadedTracker(KittiHzTracker):
         costs = np.full(
             (len(track_indices), len(detection_indices)), np.inf,
             dtype=np.float32)
+        projected_covariances = {
+            index: self.tracks[index].H @ self.tracks[index].P @
+            self.tracks[index].H.T
+            for index in track_indices}
+        noise_scales = {
+            index: self._measurement_noise_scale(detection_observations[index])
+            for index in detection_indices}
         for row, track_index in enumerate(track_indices):
             for column, detection_index in enumerate(detection_indices):
                 costs[row, column] = self._pair_cost(
                     self.tracks[track_index], detections[detection_index],
-                    detection_observations[detection_index])
+                    detection_observations[detection_index],
+                    projected_covariances[track_index],
+                    noise_scales[detection_index])
         finite = np.isfinite(costs)
         if not finite.any():
             return []
@@ -255,11 +288,57 @@ class CascadedTracker(KittiHzTracker):
             observation.camera_available and observation.camera_visible)
         return not both_observable
 
+    def _static_fast_matches(self, detections):
+        """Return unambiguous ego-compensated static track/detection pairs."""
+        cfg = self.association_config
+        if (not cfg.enable_static_fast_path or not len(detections) or
+                self.frame_index % max(1, cfg.static_observation_interval) == 0):
+            return []
+        ego = self.current_ego_motion
+        previous = self.previous_ego_motion
+        ego_delta = math.hypot(
+            float(ego.get("vx", 0.0)) - float(previous.get("vx", 0.0)),
+            float(ego.get("vy", 0.0)) - float(previous.get("vy", 0.0)))
+        if (abs(float(ego.get("yaw_rate", 0.0))) > cfg.static_fast_max_yaw_rate or
+                ego_delta > cfg.static_fast_max_ego_delta):
+            return []
+
+        distances = np.full(
+            (len(self.tracks), len(detections)), np.inf, dtype=np.float32)
+        for track_index, track in enumerate(self.tracks):
+            memory = self.lifecycle.memories.get(track.id)
+            if (track.last_observation is None or track.is_dynamic or
+                    track.static_time_sec < self.static_hold_time or
+                    memory is None or memory.current_track_status !=
+                    TrackStatus.CONFIRMED):
+                continue
+            gate = cfg.static_fast_match_distance * (
+                0.65 if track.cls_id == 2 else 1.0)
+            for detection_index, detection in enumerate(detections):
+                if (track.cls_id > 0 and int(detection[7]) > 0 and
+                        track.cls_id != int(detection[7])):
+                    continue
+                distance = float(np.linalg.norm(
+                    track.box[:2] - detection[:2]))
+                if distance <= gate:
+                    distances[track_index, detection_index] = distance
+
+        pairs = []
+        for track_index, detection_index in enumerate(np.argmin(distances, axis=1)):
+            distance = distances[track_index, detection_index]
+            if (np.isfinite(distance) and
+                    int(np.argmin(distances[:, detection_index])) == track_index):
+                pairs.append((
+                    track_index, int(detection_index), float(distance),
+                    "STATIC_EGO_ASSOCIATION"))
+        return pairs
+
     def update(self, detections, timestamp=None, ego_motion=None,
                observation_provider=None, detection_observations=None):
         detections = np.asarray(detections, dtype=np.float32)
         if detections.size == 0:
             detections = np.empty((0, 9), dtype=np.float32)
+        self.frame_index += 1
         self.current_ego_motion = ego_motion or {
             "vx": 0.0, "vy": 0.0, "yaw_rate": 0.0}
         for track in self.tracks:
@@ -268,25 +347,33 @@ class CascadedTracker(KittiHzTracker):
                 ego_comp_gain=self.ego_motion_match_gain)
             track.was_matched = False
 
-        if observation_provider is not None:
-            boxes = np.asarray(
-                [track.box for track in self.tracks], dtype=np.float32
-            ) if self.tracks else np.empty((0, 7), dtype=np.float32)
-            track_observations = observation_provider(
-                boxes, [track.cls_id for track in self.tracks])
-            if detection_observations is None:
-                detection_observations = observation_provider(
-                    detections[:, :7], detections[:, 7].astype(np.int32))
-        else:
-            track_observations = [None] * len(self.tracks)
-        if detection_observations is None:
-            detection_observations = [None] * len(detections)
-        self.last_detection_observations = list(detection_observations)
-
         unmatched_tracks = list(range(len(self.tracks)))
         unmatched_detections = list(range(len(detections)))
         self.last_events = []
-        matches = self._match(
+        static_matches = (
+            self._static_fast_matches(detections)
+            if observation_provider is not None and detection_observations is None
+            else [])
+        static_tracks = {item[0] for item in static_matches}
+        static_detections = {item[1] for item in static_matches}
+        unmatched_tracks = [i for i in unmatched_tracks if i not in static_tracks]
+        unmatched_detections = [
+            i for i in unmatched_detections if i not in static_detections]
+
+        if detection_observations is None:
+            detection_observations = [None] * len(detections)
+            for track_index, detection_index, _, _ in static_matches:
+                detection_observations[detection_index] = (
+                    self.tracks[track_index].last_observation)
+            if observation_provider is not None and unmatched_detections:
+                observations = observation_provider(
+                    detections[unmatched_detections, :7],
+                    detections[unmatched_detections, 7].astype(np.int32))
+                for detection_index, observation in zip(
+                        unmatched_detections, observations):
+                    detection_observations[detection_index] = observation
+
+        matches = static_matches + self._match(
             unmatched_tracks, unmatched_detections, detections,
             detection_observations)
         matched_track_indices = {item[0] for item in matches}
@@ -296,6 +383,37 @@ class CascadedTracker(KittiHzTracker):
         unmatched_detections = [
             i for i in unmatched_detections
             if i not in matched_detection_indices]
+
+        track_observations = [None] * len(self.tracks)
+        for track_index, detection_index, _, _ in matches:
+            track_observations[track_index] = detection_observations[detection_index]
+        if observation_provider is not None and unmatched_tracks:
+            observations = observation_provider(
+                np.asarray(
+                    [self.tracks[index].box for index in unmatched_tracks],
+                    dtype=np.float32),
+                [self.tracks[index].cls_id for index in unmatched_tracks])
+            for track_index, observation in zip(unmatched_tracks, observations):
+                track_observations[track_index] = observation
+        needs_occluders = any(
+            self.tracks[index].cls_id == 2 and
+            track_observations[index] is not None and
+            track_observations[index].depth_state == DepthState.OCCLUDED
+            for index in unmatched_tracks)
+        if observation_provider is not None and needs_occluders:
+            front_indices = [
+                index for index in matched_track_indices
+                if self.tracks[index].cls_id == 2]
+            if front_indices:
+                observations = observation_provider(
+                    np.asarray(
+                        [self.tracks[index].box for index in front_indices],
+                        dtype=np.float32),
+                    [self.tracks[index].cls_id for index in front_indices])
+                for track_index, observation in zip(
+                        front_indices, observations):
+                    track_observations[track_index] = observation
+        self.last_detection_observations = list(detection_observations)
         track_occlusions = self._find_pedestrian_occlusions(
             unmatched_tracks, track_observations)
 
@@ -473,4 +591,5 @@ class CascadedTracker(KittiHzTracker):
                     output_supported):
                 results.append(result)
         self.last_debug_tracks = debug_results
+        self.previous_ego_motion = dict(self.current_ego_motion)
         return results

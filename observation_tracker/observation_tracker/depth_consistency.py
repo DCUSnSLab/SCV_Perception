@@ -5,7 +5,7 @@ import math
 
 import numpy as np
 
-from pcdet_tracker.observation_analyzer import box_corners_3d, transform_points
+from .geometry import box_corners_3d, transform_points
 
 from .observation_state import DepthState
 

@@ -26,7 +26,7 @@
 - Middleware: ROS 2 Humble
 - 3D Detector: CODa PointPillars
 - 2D Detector: Ultralytics YOLO11 segmentation model의 bounding box 출력
-- Base Tracker: 기존 Jay Tracker
+- Tracker: 독립 실행형 Observation Tracker
 - Calibration: 기존 TF 및 CameraInfo 사용
 - Ego-motion: 기존 wheel odometry 및 IMU interface 재사용
 
@@ -50,15 +50,15 @@
 | Track 결과 | `/tracked_objects_3d` | `tracking_msgs/DetectedObjectArray` | 기존 downstream interface 유지 |
 | Observation debug | `/observation_tracker/debug_markers` | `visualization_msgs/MarkerArray` | 상태, lifecycle, confidence 표시 |
 | 통합 detection | `/observation_tracker/fused_detection_markers` | `visualization_msgs/MarkerArray` | 3D detection과 2D/depth evidence 통합 표시 |
-| 기존 Track marker | `/pcdet/observation_tracks` | `visualization_msgs/MarkerArray` | Jay Tracker 기반 Track 결과 |
+| Track marker | `/pcdet/observation_tracks` | `visualization_msgs/MarkerArray` | Observation Tracker 결과 |
 
-## 4. 기존 코드 재사용 범위
+## 4. Tracker 내부 구현 범위
 
-- `pcdet_tracker.jay_tracker.TimeAwareTrack`
+- `observation_tracker.tracking_core.TimeAwareTrack`
   - Kalman Filter state prediction 및 update
   - Track ID 생성 및 관리
   - 객체 속도, 정적/동적 상태, yaw smoothing
-- 기존 Jay Tracker ROS interface
+- Observation Tracker ROS interface
   - `DetectedObjectArray` parsing 및 publication
   - PointCloud2 parsing
   - Camera, Depth, Odometry, IMU sensor cache
@@ -542,8 +542,8 @@ Cost =
 ## 22. 현재 구현 검증 상태
 
 - `observation_tracker` package build 성공
-- `pcdet_tracker`와 함께 build 성공
-- Unit test: `30 passed`
+- `pcdet_tracker` 없이 독립 build 성공
+- Unit test: `37 passed`
 - 검증 항목
   - Class × Distance LiDAR threshold
   - LiDAR centroid consistency
@@ -602,6 +602,7 @@ Cost =
 | 기능 | 파일 |
 |---|---|
 | ROS node, parameter, sensor cache 연동 | `observation_tracker/observation_tracker_node.py` |
+| Kalman Filter, Track ID, ego-motion, 기본 ROS I/O | `observation_tracker/tracking_core.py` |
 | Observation region | `observation_tracker/observation_region.py` |
 | LiDAR evidence | `observation_tracker/lidar_observation.py` |
 | Camera projection 및 2D matching | `observation_tracker/camera_observation.py` |
@@ -615,7 +616,7 @@ Cost =
 | 실험 CSV | `observation_tracker/csv_logging.py` |
 | 전체 threshold 및 enable flag | `config/observation_tracker.yaml` |
 | 기본 실행 | `launch/observation_tracker.launch.py` |
-| BEV IoU 방향 수정 | `jay_tracker/pcdet_tracker/pcdet_tracker/jay_tracker.py` |
-| 3D Detector 기본 launch | `jay_tracker/pointpillars_coda_detector/launch/coda_pointpillar.launch.py` |
+| 공통 3D geometry/BEV IoU | `observation_tracker/geometry.py` |
+| 3D Detector 기본 launch | `pointpillars_coda_detector/launch/coda_pointpillar.launch.py` |
 | 2D Detector 입력 및 class 설정 | `ultralytics_ros2/ultralytics_ros2/seg_run.py` |
 | 2D Detector 기본 launch | `ultralytics_ros2/launch/seg.launch.py` |

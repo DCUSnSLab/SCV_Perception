@@ -26,7 +26,8 @@ setup(
     entry_points={
         "console_scripts": [
             "observation_tracker_node = observation_tracker.observation_tracker_node:main",
+            "evaluate_sustech_tracking = observation_tracker.evaluate_sustech_tracking:main",
+            "evaluate_tracking_extended = observation_tracker.evaluate_tracking_extended:main",
         ],
     },
 )
-

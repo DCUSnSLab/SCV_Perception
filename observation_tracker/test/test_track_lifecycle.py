@@ -1,6 +1,6 @@
 import numpy as np
 
-from pcdet_tracker.jay_tracker import TimeAwareTrack
+from observation_tracker.tracking_core import TimeAwareTrack
 
 from observation_tracker.observation_state import (
     ObservationClass, ObservationResult, TrackStatus)

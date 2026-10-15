@@ -86,15 +86,23 @@ class LidarObservationAnalyzer:
         length = max(1e-3, float(box[3]) + 2.0 * self.config.margin_xy)
         width = max(1e-3, float(box[4]) + 2.0 * self.config.margin_xy)
         height = max(1e-3, float(box[5]) + 2.0 * self.config.margin_z)
-        delta = points[:, :3] - center
+        # Reject obviously unrelated points before rotating them.  The XY
+        # radius circumscribes the oriented box, so this preserves the exact
+        # set of points accepted by the test below.
+        radius = math.hypot(length, width) * 0.5
+        candidate = (
+            (np.abs(points[:, 0] - center[0]) <= radius) &
+            (np.abs(points[:, 1] - center[1]) <= radius) &
+            (np.abs(points[:, 2] - center[2]) <= height * 0.5))
+        candidates = points[candidate, :3]
+        delta = candidates - center
         cosine, sine = math.cos(float(box[6])), math.sin(float(box[6]))
         local_x = cosine * delta[:, 0] + sine * delta[:, 1]
         local_y = -sine * delta[:, 0] + cosine * delta[:, 1]
         inside = (
             (np.abs(local_x) <= length * 0.5) &
-            (np.abs(local_y) <= width * 0.5) &
-            (np.abs(delta[:, 2]) <= height * 0.5))
-        selected = points[inside, :3]
+            (np.abs(local_y) <= width * 0.5))
+        selected = candidates[inside]
         count = int(len(selected))
         density = float(count / max(length * width * height, 1e-3))
         centroid_error = (

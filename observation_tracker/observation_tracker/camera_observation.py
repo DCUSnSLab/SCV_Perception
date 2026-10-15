@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 import math
 
-from pcdet_tracker.observation_analyzer import bbox_iou, project_box
+from .geometry import bbox_iou, project_box
 
 from .observation_state import CameraState
 

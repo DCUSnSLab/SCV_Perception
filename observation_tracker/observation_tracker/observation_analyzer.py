@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from pcdet_tracker.observation_analyzer import box_corners_3d, transform_points
+from .geometry import box_corners_3d, transform_points
 
 from .camera_observation import CameraObservationAnalyzer
 from .depth_consistency import DepthConsistencyAnalyzer
@@ -30,8 +30,8 @@ class ObservationAnalyzer:
             pedestrian_depth_overlap_threshold)
 
     def _back_project_detection(self, detection, depth_image, intrinsics,
-                                camera_from_source):
-        if depth_image is None or intrinsics is None or camera_from_source is None:
+                                source_from_camera):
+        if depth_image is None or intrinsics is None or source_from_camera is None:
             return None
         image = np.asarray(depth_image)
         height, width = image.shape[:2]
@@ -60,7 +60,7 @@ class ObservationAnalyzer:
         if fx <= 0.0 or fy <= 0.0:
             return None
         point_camera = np.asarray([[(u - cx) * z / fx, (v - cy) * z / fy, z]])
-        return transform_points(point_camera, np.linalg.inv(camera_from_source))[0]
+        return transform_points(point_camera, source_from_camera)[0]
 
     def _point_box_overlap(self, point, box):
         delta = np.asarray(point, dtype=np.float32) - np.asarray(box[:3])
@@ -75,7 +75,8 @@ class ObservationAnalyzer:
         return max(0.0, 1.0 - float(np.max(normalized)))
 
     @staticmethod
-    def _box_center_from_depth_point(point, box, camera_from_source):
+    def _box_center_from_depth_point(
+            point, box, camera_from_source, source_from_camera):
         point_camera = transform_points(
             np.asarray(point).reshape(1, 3), camera_from_source)[0]
         center_camera = transform_points(
@@ -88,23 +89,25 @@ class ObservationAnalyzer:
         center_z = center_camera[2] + point_camera[2] - float(np.min(visible))
         centered_camera = point_camera * (center_z / point_camera[2])
         return transform_points(
-            centered_camera.reshape(1, 3), np.linalg.inv(camera_from_source))[0]
+            centered_camera.reshape(1, 3), source_from_camera)[0]
 
     def _match_pedestrians(self, regions, class_names, detections, depth_image,
                            camera_from_source, intrinsics, image_size,
-                           camera_available):
+                           camera_available, source_from_camera):
         candidates = []
         projected = set()
+        depth_points = []
+        for detection_index, detection in enumerate(detections or ()):
+            if not self.camera.class_compatible("pedestrian", detection.class_name):
+                continue
+            point = self._back_project_detection(
+                detection, depth_image, intrinsics, source_from_camera)
+            if point is not None:
+                depth_points.append((detection_index, detection, point))
         for box_index, (region, class_name) in enumerate(zip(regions, class_names)):
             if str(class_name).lower() not in {"pedestrian", "person"}:
                 continue
-            for detection_index, detection in enumerate(detections or ()):
-                if not self.camera.class_compatible(class_name, detection.class_name):
-                    continue
-                point = self._back_project_detection(
-                    detection, depth_image, intrinsics, camera_from_source)
-                if point is None:
-                    continue
+            for detection_index, detection, point in depth_points:
                 evidence = self.camera.analyze(
                     region, class_name, [detection], camera_from_source,
                     intrinsics, image_size, camera_available)
@@ -150,6 +153,9 @@ class ObservationAnalyzer:
                 intrinsics=None, image_size=None, camera_available=False,
                 depth_image=None):
         boxes = np.asarray(boxes)
+        source_from_camera = (
+            np.linalg.inv(camera_from_source)
+            if camera_from_source is not None else None)
         regions = [expanded_box(
             box, self.lidar.config.margin_xy, self.lidar.config.margin_z)
             for box in boxes]
@@ -157,7 +163,8 @@ class ObservationAnalyzer:
         if self.enable_camera and self.enable_depth:
             pedestrian_matches, depth_projected = self._match_pedestrians(
                 regions, class_names, camera_detections, depth_image,
-                camera_from_source, intrinsics, image_size, camera_available)
+                camera_from_source, intrinsics, image_size, camera_available,
+                source_from_camera)
 
         results = []
         for box_index, (box, class_name, region) in enumerate(zip(
@@ -190,7 +197,8 @@ class ObservationAnalyzer:
             camera_depth_overlap = 0.0
             if pedestrian_match:
                 estimated_center = self._box_center_from_depth_point(
-                    pedestrian_match[1], region, camera_from_source)
+                    pedestrian_match[1], region, camera_from_source,
+                    source_from_camera)
                 camera_depth_center = tuple(map(float, estimated_center))
                 camera_depth_overlap = float(pedestrian_match[2])
             elif (camera.detection_index >= 0 and
@@ -214,7 +222,7 @@ class ObservationAnalyzer:
                         (v - cy) * center_z / fy,
                         center_z]])
                     point_source = transform_points(
-                        point_camera, np.linalg.inv(camera_from_source))[0]
+                        point_camera, source_from_camera)[0]
                     camera_depth_center = tuple(map(float, point_source))
             raw_state = self._classify(lidar, camera, depth)
             state = raw_state if self.enable_state else (

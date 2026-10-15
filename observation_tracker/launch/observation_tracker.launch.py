@@ -1,4 +1,4 @@
-"""Launch the observation-adaptive tracker without changing Jay Tracker."""
+"""Launch the standalone observation-adaptive tracker."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
@@ -29,7 +29,9 @@ def generate_launch_description():
         DeclareLaunchArgument("enable_imu", default_value="true"),
         DeclareLaunchArgument("enable_csv_logging", default_value="true"),
         DeclareLaunchArgument(
-            "enable_fused_detection_visualization", default_value="true"),
+            "enable_debug_visualization", default_value="false"),
+        DeclareLaunchArgument(
+            "enable_fused_detection_visualization", default_value="false"),
         DeclareLaunchArgument("lidar_points_topic", default_value="/velodyne_points"),
         DeclareLaunchArgument(
             "camera_rgb_topic", default_value="/camera/camera/color/image_raw"),
@@ -76,6 +78,9 @@ def generate_launch_description():
                     LaunchConfiguration("enable_imu"), value_type=bool),
                 "enable_csv_logging": ParameterValue(
                     LaunchConfiguration("enable_csv_logging"), value_type=bool),
+                "enable_debug_visualization": ParameterValue(
+                    LaunchConfiguration("enable_debug_visualization"),
+                    value_type=bool),
                 "enable_fused_detection_visualization": ParameterValue(
                     LaunchConfiguration("enable_fused_detection_visualization"),
                     value_type=bool),

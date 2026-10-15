@@ -51,6 +51,12 @@ observation_tracker:
     occlusion_depth_margin: 0.30
     occlusion_confirmation_frames: 2
     occlusion_max_age: 8
+    # Revalidate ego-compensated static tracks every third frame.
+    enable_static_fast_path: true
+    static_observation_interval: 3
+    static_fast_match_distance: 0.75
+    static_fast_max_yaw_rate: 0.20
+    static_fast_max_ego_delta: 0.75
 
     tentative_min_hits: 3
     strong_confirmation_hits: 2
@@ -71,7 +77,9 @@ observation_tracker:
     enable_odometry: true
     enable_imu: true
     enable_csv_logging: true
-    enable_fused_detection_visualization: true
+    # Debug markers are expensive and do not affect tracking output.
+    enable_debug_visualization: false
+    enable_fused_detection_visualization: false
 
     lidar_points_topic: /velodyne_points
     camera_rgb_topic: /camera/camera/color/image_raw

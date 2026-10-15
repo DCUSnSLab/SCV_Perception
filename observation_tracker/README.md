@@ -1,14 +1,14 @@
 # observation_tracker
 
-`observation_tracker` extends the existing ROS 2 Humble Jay 3-D tracker with
-object-wise VLP-32C/D555 observation states. It keeps the existing Kalman
-filter, track IDs, ego-motion compensation, message parsing and output type.
-The added policy is intentionally deterministic and lightweight for ablation.
+`observation_tracker` is a standalone ROS 2 Humble 3-D tracker with object-wise
+VLP-32C/D555 observation states. It contains its own Kalman filter, track ID,
+ego-motion compensation, message parsing and output implementation. The
+observation policy is intentionally deterministic and lightweight for ablation.
 
 ## Pipeline
 
 ```text
-3-D detections + predicted Jay tracks
+3-D detector output + predicted tracks
   -> object observation region
   -> raw LiDAR point count + centroid consistency
   -> D555 projection + 2-D detection match + aligned-depth consistency
@@ -30,17 +30,21 @@ of each projected ROI, counts pixels within the configured tolerance of the
 predicted camera-frame depth, and uses that support ratio for consistency and
 association cost. A closer median depth is treated as occlusion.
 
-## Reused implementation
+## Architecture
 
-- `pcdet_tracker.jay_tracker.TimeAwareTrack`: KF, ID and motion history
+- `pointpillars_coda_detector` and `observation_tracker` run as separate nodes.
+- They communicate through `tracking_msgs/DetectedObjectArray`; the detector is
+  not imported or launched by the tracker.
+- local `TimeAwareTrack`: Kalman filter, ID and motion history
 - local `StaticCvTrack`: evidence-weighted stationary/CV prediction mixture
-- Jay odometry/IMU interpolation and body-frame ego-motion compensation
+- local odometry/IMU interpolation and body-frame ego-motion compensation
 - current `tracking_msgs/DetectedObjectArray` parsing and publication
 - TF lookup, PointCloud2 parsing, sensor caches and RViz baseline markers
-- SciPy Hungarian assignment already used by Jay Tracker
+- SciPy Hungarian assignment
 
-The existing `pcdet_tracker` package is not modified. Run it separately for an
-A0 baseline or run this package for the adaptive path.
+`tracking_msgs` remains a shared interface package, not a tracker implementation
+dependency. A different detector can be connected by publishing the same input
+message type and topic.
 
 ## Topics
 
@@ -63,11 +67,21 @@ For the recorded traversability bag use `odom_topic:=/odom use_sim_time:=true`.
 ## Build and run
 
 ```bash
-cd /home/scv/SCV
+cd /home/jay/SCV_Perception_2
 source /opt/ros/humble/setup.bash
-colcon build --symlink-install --packages-select observation_tracker
+colcon build --symlink-install \
+  --packages-up-to observation_tracker
 source install/setup.bash
 ros2 launch observation_tracker observation_tracker.launch.py
+```
+
+RViz debug markers are disabled by default to avoid adding marker construction
+to tracking latency. Enable them only when inspecting a run:
+
+```bash
+ros2 launch observation_tracker observation_tracker.launch.py \
+  enable_debug_visualization:=true \
+  enable_fused_detection_visualization:=true
 ```
 
 Only the 3-D detection topic is required. Optional sensor inputs can be

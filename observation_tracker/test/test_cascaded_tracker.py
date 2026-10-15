@@ -1,9 +1,10 @@
 import numpy as np
 
-from pcdet_tracker.jay_tracker import TimeAwareTrack
+from observation_tracker.tracking_core import TimeAwareTrack
 
 from observation_tracker.cascaded_association import (
-    AssociationConfig, CascadedTracker, StaticCvTrack)
+    AssociationConfig, CascadedTracker, StaticCvTrack,
+    mahalanobis_squared_2d)
 from observation_tracker.observation_state import (
     CameraState, DepthState, LidarState, ObservationClass, ObservationResult,
     TrackStatus)
@@ -14,6 +15,14 @@ def detection(x=5.0):
     return np.asarray([
         [x, 0.0, 0.0, 4.0, 2.0, 1.7, 0.0, 1.0, 0.9]
     ], dtype=np.float32)
+
+
+def test_fast_mahalanobis_matches_pseudoinverse():
+    covariance = np.asarray([[2.0, 0.3], [0.3, 1.5]], dtype=np.float32)
+    delta = np.asarray([1.2, -0.7], dtype=np.float32)
+    expected = float(delta.T @ np.linalg.pinv(covariance) @ delta)
+    assert np.isclose(
+        mahalanobis_squared_2d(delta, covariance), expected, rtol=1e-6)
 
 
 def pedestrian_detection(x=5.0):
@@ -209,6 +218,62 @@ def test_repeated_weak_detection_reuses_tentative_track_id():
         assert tracker.last_debug_tracks[0]["miss_count"] == 0
         assert tracker.last_debug_tracks[0]["association_stage"] == (
             "UNIFIED_ASSOCIATION")
+
+
+def test_static_ego_fast_path_skips_redundant_observation_analysis():
+    TimeAwareTrack._next_id = 0
+    tracker = CascadedTracker(
+        expected_dt=0.1,
+        association_config=AssociationConfig(
+            static_observation_interval=10),
+        lifecycle_config=LifecycleConfig(strong_confirmation_hits=2))
+    strong = observation(ObservationClass.MULTIMODAL_STRONG.value)
+    tracker.update(detection(), timestamp=0.0, detection_observations=[strong])
+    tracker.update(detection(), timestamp=0.1, detection_observations=[strong])
+    track = tracker.tracks[0]
+    track.static_time_sec = 1.0
+    calls = []
+
+    def provider(boxes, labels):
+        calls.append(len(boxes))
+        return [observation(ObservationClass.MULTIMODAL_STRONG.value)
+                for _ in labels]
+
+    result = tracker.update(
+        detection(), timestamp=0.2,
+        ego_motion={"vx": 0.0, "vy": 0.0, "yaw_rate": 0.0},
+        observation_provider=provider)
+
+    assert calls == []
+    assert result[0]["association_stage"] == "STATIC_EGO_ASSOCIATION"
+
+
+def test_static_fast_path_wakes_on_ego_rotation():
+    TimeAwareTrack._next_id = 0
+    tracker = CascadedTracker(
+        expected_dt=0.1,
+        association_config=AssociationConfig(
+            static_observation_interval=10,
+            static_fast_max_yaw_rate=0.2),
+        lifecycle_config=LifecycleConfig(strong_confirmation_hits=2))
+    strong = observation(ObservationClass.MULTIMODAL_STRONG.value)
+    tracker.update(detection(), timestamp=0.0, detection_observations=[strong])
+    tracker.update(detection(), timestamp=0.1, detection_observations=[strong])
+    tracker.tracks[0].static_time_sec = 1.0
+    calls = []
+
+    def provider(boxes, labels):
+        calls.append(len(boxes))
+        return [observation(ObservationClass.MULTIMODAL_STRONG.value)
+                for _ in labels]
+
+    result = tracker.update(
+        detection(), timestamp=0.2,
+        ego_motion={"vx": 0.0, "vy": 0.0, "yaw_rate": 0.3},
+        observation_provider=provider)
+
+    assert calls == [1]
+    assert result[0]["association_stage"] == "UNIFIED_ASSOCIATION"
 
 
 def test_final_output_hides_unsupported_prediction_but_keeps_internal_id():

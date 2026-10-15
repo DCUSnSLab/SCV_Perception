@@ -1,4 +1,4 @@
-"""ROS 2 node extending Jay Tracker with observation-adaptive policies."""
+"""Standalone ROS 2 tracker with observation-adaptive policies."""
 
 from collections import deque
 import struct
@@ -12,8 +12,8 @@ from tf2_ros import Buffer, TransformListener
 from visualization_msgs.msg import MarkerArray
 
 from perception_interface.msg import DetectionArray
-from pcdet_tracker.jay_tracker import (
-    JayTrackerNode, message_stamp_seconds, parse_config)
+from .tracking_core import (
+    TrackerNodeBase, message_stamp_seconds, parse_config)
 
 from .camera_observation import CameraObservationConfig, CameraObservationAnalyzer
 from .cascaded_association import AssociationConfig, CascadedTracker
@@ -104,7 +104,7 @@ def depth_detection_box(detection, depth_image, intrinsics,
     return (lower + upper) * 0.5, np.maximum(upper - lower, 0.05), surface_depth
 
 
-class ObservationTrackerNode(JayTrackerNode):
+class ObservationTrackerNode(TrackerNodeBase):
     def __init__(self, args):
         # Empty adaptive_config keeps the original package untouched. This node
         # installs its own analyzer and cascade immediately after construction.
@@ -163,6 +163,16 @@ class ObservationTrackerNode(JayTrackerNode):
             "occlusion_confirmation_frames": self._declare(
                 "occlusion_confirmation_frames", 2),
             "occlusion_max_age": self._declare("occlusion_max_age", 8),
+            "enable_static_fast_path": self._declare(
+                "enable_static_fast_path", True),
+            "static_observation_interval": self._declare(
+                "static_observation_interval", 3),
+            "static_fast_match_distance": self._declare(
+                "static_fast_match_distance", 0.75),
+            "static_fast_max_yaw_rate": self._declare(
+                "static_fast_max_yaw_rate", 0.20),
+            "static_fast_max_ego_delta": self._declare(
+                "static_fast_max_ego_delta", 0.75),
             "tentative_min_hits": self._declare("tentative_min_hits", 3),
             "strong_confirmation_hits": self._declare("strong_confirmation_hits", 2),
             "max_miss_count": self._declare("max_miss_count", 6),
@@ -181,8 +191,10 @@ class ObservationTrackerNode(JayTrackerNode):
             "enable_odometry": self._declare("enable_odometry", True),
             "enable_imu": self._declare("enable_imu", True),
             "enable_csv_logging": self._declare("enable_csv_logging", True),
+            "enable_debug_visualization": self._declare(
+                "enable_debug_visualization", False),
             "enable_fused_detection_visualization": self._declare(
-                "enable_fused_detection_visualization", True),
+                "enable_fused_detection_visualization", False),
             "lidar_points_topic": self._declare("lidar_points_topic", "/velodyne_points"),
             "camera_rgb_topic": self._declare(
                 "camera_rgb_topic", "/camera/camera/color/image_raw"),
@@ -282,7 +294,16 @@ class ObservationTrackerNode(JayTrackerNode):
             occlusion_depth_margin=float(p["occlusion_depth_margin"]),
             occlusion_confirmation_frames=int(
                 p["occlusion_confirmation_frames"]),
-            occlusion_max_age=int(p["occlusion_max_age"]))
+            occlusion_max_age=int(p["occlusion_max_age"]),
+            enable_static_fast_path=bool(p["enable_static_fast_path"]),
+            static_observation_interval=int(
+                p["static_observation_interval"]),
+            static_fast_match_distance=float(
+                p["static_fast_match_distance"]),
+            static_fast_max_yaw_rate=float(
+                p["static_fast_max_yaw_rate"]),
+            static_fast_max_ego_delta=float(
+                p["static_fast_max_ego_delta"]))
         lifecycle = LifecycleConfig(
             tentative_min_hits=int(p["tentative_min_hits"]),
             strong_confirmation_hits=int(p["strong_confirmation_hits"]),
@@ -379,10 +400,15 @@ class ObservationTrackerNode(JayTrackerNode):
         self.observation_visualizer = ObservationVisualizer(
             colors=colors, alpha=float(p["marker_alpha"]),
             lifetime=self.args.marker_lifetime)
-        self.observation_marker_pub = self.create_publisher(
-            MarkerArray, str(p["debug_marker_topic"]), 10)
+        self.enable_debug_visualization = bool(
+            p["enable_debug_visualization"])
+        self.observation_marker_pub = None
         self.fused_detection_marker_pub = None
-        if bool(p["enable_fused_detection_visualization"]):
+        if self.enable_debug_visualization:
+            self.observation_marker_pub = self.create_publisher(
+                MarkerArray, str(p["debug_marker_topic"]), 10)
+        if (self.enable_debug_visualization and
+                bool(p["enable_fused_detection_visualization"])):
             self.fused_detection_marker_pub = self.create_publisher(
                 MarkerArray, str(p["fused_detection_marker_topic"]), 10)
         if bool(p["enable_csv_logging"]):
@@ -435,6 +461,8 @@ class ObservationTrackerNode(JayTrackerNode):
         return super().build_observation_provider(header, timestamp)
 
     def publish_markers(self, detections, tracked_objects, frame_id, stamp):
+        if not self.enable_debug_visualization:
+            return
         super().publish_markers(
             detections, tracked_objects, frame_id, stamp)
         from std_msgs.msg import Header
