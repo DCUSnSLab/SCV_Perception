@@ -1,0 +1,39 @@
+/**:
+  ros__parameters:
+    input_topic: /velodyne_points
+    nonground_topic: /perception/points_nonground
+    ground_topic: /perception/points_ground
+    publish_ground: true
+    base_frame: base_link          # algorithm assumes a vehicle-centred, z-up frame
+    transform_timeout_sec: 0.1
+    input_best_effort: false
+
+    # Road grade plus any pitch the odometry hides lands on top of these.
+    global_slope_max_angle_deg: 15.0
+    local_slope_max_angle_deg: 13.0
+
+    # Cells must be smaller than the step to resolve; 0.5 m hides a 0.15 m curb.
+    radial_divider_angle_deg: 1.0
+    grid_size_m: 0.05
+    gnd_grid_buffer_size: 4
+    # Cell widths to the previous ground cell before the loose branch takes over.
+    # 40 x 0.05 m = 2.0 m covers VLP-16 ground ring spacing inside 15 m.
+    gnd_grid_continual_thresh: 40
+
+    # Also the obstacle horizon: nothing beyond this is classified at all.
+    # 15 m costs 3.2 ms/scan, 10 m costs 2.1 ms.
+    grid_radial_limit_m: 15.0
+
+    # Height above the estimated ground line that makes a point an obstacle.
+    # 0.05 resolves a 0.15 m curb on 1 cm asphalt roughness; raise toward 0.10 if
+    # the road surface starts producing scattered false obstacles.
+    non_ground_height_threshold: 0.05
+    detection_range_z_max: 2.5
+
+    use_recheck_ground_cluster: true
+    recheck_start_distance: 20.0
+    use_lowest_point: true
+
+    # Grid origin sits at the vehicle centre, not at the sensor.
+    wheel_base_m: 0.65
+    center_pcl_shift: 0.0
