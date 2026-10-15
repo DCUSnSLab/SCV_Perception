@@ -1,1 +1,0 @@
-/home/jay/SCV_Perception/perception_interface/msg/DetectionResult.msg

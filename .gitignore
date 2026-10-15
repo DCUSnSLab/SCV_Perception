@@ -1,36 +1,89 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
+# ---------------------------------------------------------------------------
+# SCV_Perception - ROS 2 (Humble) package collection
+# ---------------------------------------------------------------------------
 
-# IDE
-.vscode/
-.idea/
-
-# Experiments / models / datasets / videos / bags
-runs/
-**/runs/
-data/
-datasets/
-*.pt
-*.onnx
-*.engine
-*.trt
-*.mp4
-*.avi
-*.bag
-*.db3
-.pytest_cache/
-
-# colcon workspace artifacts
+# --- colcon / ament workspace artifacts (any depth: root, nested *_ws, per-pkg)
 build/
 install/
 log/
-traversability_ws/build/
-traversability_ws/install/
-traversability_ws/log/
-traversability_ws/test_results/
-rosbag2_*/
+test_results/
+compile_commands.json
+.cache/
 
-# model weights
+# --- Python (ament_python packages)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+.venv/
+venv/
+.env
+
+# --- C/C++ (ament_cmake packages)
+*.o
+*.a
+*.so
+*.so.*
+*.d
+CMakeLists.txt.user
+*.user
+
+# --- Model weights / inference engines (YOLO, PointPillars, TensorRT ...)
+*.pt
 *.pth
+*.onnx
+*.engine
+*.trt
+*.plan
+*.ckpt
+*.safetensors
+*.tflite
+*.h5
+*.weights
+
+# --- Datasets / point clouds / dumps
+data/
+datasets/
+*.pcd
+*.ply
+*.npy
+*.npz
+*.pkl
+*.hdf5
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+
+# --- rosbag2 / video
+*.bag
+*.db3
+*.mcap
+rosbag2_*/
+*.mp4
+*.avi
+*.mkv
+*.mov
+
+# --- Experiment outputs (ultralytics runs, wandb, tensorboard)
+runs/
+wandb/
+tb_logs/
+
+# --- Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.orig
+*.rej
+.DS_Store
+Thumbs.db

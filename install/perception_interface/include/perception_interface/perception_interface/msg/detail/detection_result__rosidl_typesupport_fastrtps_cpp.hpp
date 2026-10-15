@@ -1,1 +1,0 @@
-/home/jay/SCV_Perception/build/perception_interface/rosidl_typesupport_fastrtps_cpp/perception_interface/msg/detail/detection_result__rosidl_typesupport_fastrtps_cpp.hpp
