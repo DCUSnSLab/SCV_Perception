@@ -76,6 +76,7 @@ rosbag2_*/
 *.mov
 
 # --- Experiment outputs (ultralytics runs, wandb, tensorboard)
+/results/
 runs/
 wandb/
 tb_logs/

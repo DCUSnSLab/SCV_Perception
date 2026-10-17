@@ -130,7 +130,7 @@ class ObservationTrackerNode(TrackerNodeBase):
             "centroid_distance_threshold": self._declare("centroid_distance_threshold", 1.25),
             "camera_iou_threshold": self._declare("camera_iou_threshold", 0.20),
             "camera_center_distance_threshold": self._declare(
-                "camera_center_distance_threshold", 100.0),
+                "camera_center_distance_threshold", 65.0),
             "depth_consistency_threshold": self._declare("depth_consistency_threshold", 1.5),
             "occlusion_depth_threshold": self._declare("occlusion_depth_threshold", 1.0),
             "min_valid_depth_pixels": self._declare("min_valid_depth_pixels", 20),
@@ -461,10 +461,11 @@ class ObservationTrackerNode(TrackerNodeBase):
         return super().build_observation_provider(header, timestamp)
 
     def publish_markers(self, detections, tracked_objects, frame_id, stamp):
+        if self.pub_markers.get_subscription_count() > 0:
+            super().publish_markers(
+                detections, tracked_objects, frame_id, stamp)
         if not self.enable_debug_visualization:
             return
-        super().publish_markers(
-            detections, tracked_objects, frame_id, stamp)
         from std_msgs.msg import Header
         marker_header = Header()
         marker_header.frame_id = frame_id

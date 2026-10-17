@@ -151,8 +151,9 @@ class CascadedTracker(KittiHzTracker):
             return False
         camera_support = (
             observation.camera_supported and
-            observation.depth_state in {
-                DepthState.CONSISTENT, DepthState.UNAVAILABLE})
+            (observation.depth_state in {
+                DepthState.CONSISTENT, DepthState.UNAVAILABLE} or
+             observation.lidar_point_count > 0))
         return bool(observation.lidar_supported or camera_support)
 
     def _pair_cost(self, track, detection, detection_observation,
@@ -453,12 +454,27 @@ class CascadedTracker(KittiHzTracker):
         recovered_tracks = set()
         for track_index in unmatched_tracks:
             observation = track_observations[track_index]
+            track = self.tracks[track_index]
+            recent_camera_support = any(
+                item is not None and item.camera_supported
+                for item in track.observation_history)
+            sparse_camera_lidar = bool(
+                track.cls_id == 2 and observation is not None and
+                observation.lidar_point_count > 0 and recent_camera_support)
             if (track_index not in track_occlusions and
-                    self._supports_prediction(observation)):
-                track = self.tracks[track_index]
-                if observation.camera_depth_center is not None:
-                    measured = np.asarray(
-                        observation.camera_depth_center, dtype=np.float32)
+                    (self._supports_prediction(observation) or
+                     sparse_camera_lidar)):
+                measured_center = (
+                    observation.camera_depth_center
+                    if observation.camera_depth_center is not None
+                    else observation.lidar_centroid
+                    if observation.lidar_centroid is not None
+                    else observation.camera_ground_center)
+                if measured_center is not None:
+                    measured = np.asarray(measured_center, dtype=np.float32)
+                    if (observation.lidar_centroid is not None and
+                            observation.camera_depth_center is None):
+                        measured[2] = track.box[2]
                     delta = measured - track.box[:3]
                     distance = float(np.linalg.norm(delta))
                     maximum = self.association_config.camera_recovery_max_correction
@@ -470,11 +486,18 @@ class CascadedTracker(KittiHzTracker):
                 track.record_observation(observation)
                 memory = self.lifecycle.recovered(track, observation)
                 recovered_tracks.add(track_index)
+                stage = (
+                    "CAMERA_LIDAR_RECOVERY"
+                    if sparse_camera_lidar or
+                    (observation.camera_supported and
+                     observation.lidar_point_count > 0 and
+                     not observation.lidar_supported)
+                    else "SUPPORTED_PREDICTION")
                 self.last_events.append({
                     "track_id": track.id,
                     "detection_index": -1,
                     "matched": False,
-                    "association_stage": "SUPPORTED_PREDICTION",
+                    "association_stage": stage,
                     "association_cost": float("nan"),
                     "track_status": memory.current_track_status.value,
                 })

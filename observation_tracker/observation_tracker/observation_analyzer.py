@@ -91,6 +91,48 @@ class ObservationAnalyzer:
         return transform_points(
             centered_camera.reshape(1, 3), source_from_camera)[0]
 
+    @staticmethod
+    def _box_center_from_ground_contact(
+            detection, box, intrinsics, source_from_camera,
+            predicted_roi=None):
+        """Intersect the 2-D box's bottom-center ray with the track ground plane."""
+        if intrinsics is None or source_from_camera is None:
+            return None
+        fx, fy, cx, cy = map(float, intrinsics)
+        if fx <= 0.0 or fy <= 0.0:
+            return None
+        transform = np.asarray(source_from_camera, dtype=np.float64)
+        origin = transform[:3, 3]
+        ground_z = float(box[2] - box[5] * 0.5)
+
+        def ground_contact(bbox):
+            x1, _, x2, y2 = map(float, bbox)
+            ray_camera = np.asarray([
+                ((x1 + x2) * 0.5 - cx) / fx,
+                (y2 - cy) / fy,
+                1.0,
+            ])
+            ray = transform[:3, :3] @ ray_camera
+            if abs(ray[2]) < 1e-3:
+                return None
+            distance = (ground_z - origin[2]) / ray[2]
+            if not np.isfinite(distance) or distance <= 0.0:
+                return None
+            return origin + distance * ray
+
+        measured_contact = ground_contact(detection.bbox)
+        if measured_contact is None:
+            return None
+        center = measured_contact.copy()
+        center[2] = float(box[2])
+        if predicted_roi is not None:
+            predicted_contact = ground_contact(predicted_roi)
+            if predicted_contact is None:
+                return None
+            center = np.asarray(box[:3], dtype=np.float64) + (
+                measured_contact - predicted_contact)
+        return center if np.all(np.isfinite(center)) else None
+
     def _match_pedestrians(self, regions, class_names, detections, depth_image,
                            camera_from_source, intrinsics, image_size,
                            camera_available, source_from_camera):
@@ -143,7 +185,9 @@ class ObservationAnalyzer:
             return ObservationClass.LIDAR_DOMINANT.value
         camera_depth_ok = (
             camera_supported and
-            (not self.enable_depth or depth.state == DepthState.CONSISTENT))
+            (not self.enable_depth or
+             depth.state in {DepthState.CONSISTENT, DepthState.UNAVAILABLE} or
+             lidar.count > 0))
         if camera_depth_ok:
             return ObservationClass.CAMERA_DOMINANT.value
         return ObservationClass.WEAK_OBSERVATION.value
@@ -180,8 +224,16 @@ class ObservationAnalyzer:
                           intrinsics, image_size,
                           camera_available and self.enable_camera))
             if (str(class_name).lower() in {"pedestrian", "person"} and
+                    lidar.count > 0 and camera.detection_index >= 0 and
+                    camera.class_match and camera.center_distance is not None and
+                    camera.center_distance <=
+                    self.camera.config.center_distance_threshold):
+                camera.supported = True
+                camera.state = CameraState.AVAILABLE_SUPPORTED
+            if (str(class_name).lower() in {"pedestrian", "person"} and
                     self.enable_depth and pedestrian_match is None and
-                    box_index in depth_projected and camera.available):
+                    box_index in depth_projected and camera.available and
+                    lidar.count == 0):
                 camera.supported = False
                 camera.state = CameraState.AVAILABLE_UNSUPPORTED
                 camera.class_match = False
@@ -194,6 +246,7 @@ class ObservationAnalyzer:
                 depth_image if self.enable_depth else None,
                 camera_from_source)
             camera_depth_center = None
+            camera_ground_center = None
             camera_depth_overlap = 0.0
             if pedestrian_match:
                 estimated_center = self._box_center_from_depth_point(
@@ -224,6 +277,14 @@ class ObservationAnalyzer:
                     point_source = transform_points(
                         point_camera, source_from_camera)[0]
                     camera_depth_center = tuple(map(float, point_source))
+            if (camera_depth_center is None and camera.supported and
+                    str(class_name).lower() in {"pedestrian", "person"} and
+                    0 <= camera.detection_index < len(camera_detections or ())):
+                estimated_center = self._box_center_from_ground_contact(
+                    camera_detections[camera.detection_index], box,
+                    intrinsics, source_from_camera, camera.roi)
+                if estimated_center is not None:
+                    camera_ground_center = tuple(map(float, estimated_center))
             raw_state = self._classify(lidar, camera, depth)
             state = raw_state if self.enable_state else (
                 ObservationClass.LIDAR_DOMINANT.value
@@ -242,6 +303,7 @@ class ObservationAnalyzer:
                 lidar_point_count=lidar.count,
                 lidar_point_density=lidar.density,
                 lidar_centroid_error=lidar.centroid_error,
+                lidar_centroid=lidar.centroid,
                 lidar_score=lidar.score,
                 lidar_available=lidar.available,
                 lidar_visible=lidar.visible,
@@ -265,6 +327,7 @@ class ObservationAnalyzer:
                 depth_support_pixel_count=depth.support_pixel_count,
                 depth_support_ratio=depth.support_ratio,
                 camera_depth_center=camera_depth_center,
+                camera_ground_center=camera_ground_center,
                 camera_depth_overlap=camera_depth_overlap,
                 object_range=lidar.object_range,
                 state=state,

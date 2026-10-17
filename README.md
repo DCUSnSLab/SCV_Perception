@@ -46,7 +46,7 @@ D555 압축 영상을 받아 `person`과 `car`의 2D detection을 발행한다.
 
 - 입력: `/camera/camera/color/image_raw/compressed`
 - 출력: `/yolo/detections`, `/yolo/seg_image`
-- 기본 confidence threshold: `0.70`
+- 기본 confidence threshold: `0.25` (기존 3D 트랙 지원용이며 단독으로 ID를 생성하지 않음)
 
 ### `observation_tracker`
 
@@ -114,7 +114,6 @@ launch argument로 지정한다.
 
 ```bash
 ros2 launch pointpillars_coda_detector coda_pointpillar.launch.py \
-  run_tracker:=false \
   score_thresh:=0.65
 ```
 
@@ -124,8 +123,7 @@ ros2 launch pointpillars_coda_detector coda_pointpillar.launch.py \
 ros2 launch pointpillars_coda_detector coda_pointpillar.launch.py \
   openpcdet_path:=/absolute/path/to/OpenPCDet \
   cuda_ops_path:=/absolute/path/to/OpenPCDet/pcdet/ops \
-  ckpt_file:=/absolute/path/to/pointpillars_coda.pth \
-  run_tracker:=false
+  ckpt_file:=/absolute/path/to/pointpillars_coda.pth
 ```
 
 ### 2. 2D detector 실행

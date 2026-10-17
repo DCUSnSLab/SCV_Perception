@@ -39,6 +39,7 @@ class LidarEvidence:
     score: float
     available: bool
     visible: bool
+    centroid: tuple | None = None
 
 
 def _class_key(class_name):
@@ -105,9 +106,10 @@ class LidarObservationAnalyzer:
         selected = candidates[inside]
         count = int(len(selected))
         density = float(count / max(length * width * height, 1e-3))
+        centroid = selected.mean(axis=0) if count else None
         centroid_error = (
-            float(np.linalg.norm(selected.mean(axis=0) - center))
-            if count else None)
+            float(np.linalg.norm(centroid - center))
+            if centroid is not None else None)
         strong_points = self.min_points(class_name, distance)
         centroid_ok = (
             centroid_error is not None and
@@ -126,4 +128,5 @@ class LidarObservationAnalyzer:
         score = 0.75 * count_score + 0.25 * centroid_score
         return LidarEvidence(
             state, count, density, centroid_error, distance, float(score),
-            True, visible)
+            True, visible,
+            tuple(map(float, centroid)) if centroid is not None else None)

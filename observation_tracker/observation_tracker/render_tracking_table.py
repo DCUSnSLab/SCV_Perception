@@ -10,7 +10,7 @@ import matplotlib.pyplot as plt
 
 
 METHOD_NAMES = {
-    "observation_tracker": "Observation Tracker",
+    "observation_tracker": "Proposed",
     "ab3dmot": "AB3DMOT",
     "eagermot": "EagerMOT",
     "fusiontrack": "FusionTrack",

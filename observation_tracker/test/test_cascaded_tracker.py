@@ -96,6 +96,77 @@ def test_confirmation_then_camera_supported_prediction_keeps_id():
     assert 5.1 < recovered[0]["box"][0] <= 5.35
 
 
+def test_ground_projected_camera_support_corrects_existing_pedestrian_only():
+    TimeAwareTrack._next_id = 0
+    tracker = CascadedTracker(
+        expected_dt=0.1,
+        lifecycle_config=LifecycleConfig(strong_confirmation_hits=2))
+    strong = observation(ObservationClass.MULTIMODAL_STRONG.value)
+    tracker.update(
+        pedestrian_detection(5.0), timestamp=0.0,
+        detection_observations=[strong])
+    tracker.update(
+        pedestrian_detection(5.0), timestamp=0.1,
+        detection_observations=[strong])
+
+    def camera_provider(boxes, labels):
+        del labels
+        results = [observation(ObservationClass.CAMERA_DOMINANT.value)
+                   for _ in boxes]
+        for result in results:
+            result.depth_state = DepthState.UNAVAILABLE
+            result.camera_ground_center = (6.0, 0.0, 0.0)
+        return results
+
+    recovered = tracker.update(
+        np.empty((0, 9), dtype=np.float32), timestamp=0.2,
+        observation_provider=camera_provider)
+    assert len(recovered) == 1
+    assert recovered[0]["id"] == 0
+    assert recovered[0]["association_stage"] == "SUPPORTED_PREDICTION"
+    assert 5.0 < recovered[0]["box"][0] <= 5.26
+
+
+def test_recent_camera_and_one_lidar_point_recover_during_2d_miss():
+    TimeAwareTrack._next_id = 0
+    tracker = CascadedTracker(
+        expected_dt=0.1,
+        lifecycle_config=LifecycleConfig(strong_confirmation_hits=2))
+    strong = observation(ObservationClass.MULTIMODAL_STRONG.value)
+    tracker.update(
+        pedestrian_detection(5.0), timestamp=0.0,
+        detection_observations=[strong])
+    tracker.update(
+        pedestrian_detection(5.0), timestamp=0.1,
+        detection_observations=[strong])
+
+    def sparse_provider(boxes, labels):
+        del labels
+        results = []
+        for _ in boxes:
+            item = observation(ObservationClass.CAMERA_DOMINANT.value)
+            item.depth_state = DepthState.INCONSISTENT
+            item.camera_supported = False
+            item.lidar_supported = False
+            item.lidar_point_count = 1
+            item.lidar_centroid = (5.5, 0.0, 0.0)
+            results.append(item)
+        return results
+
+    recovered = tracker.update(
+        np.empty((0, 9), dtype=np.float32), timestamp=0.2,
+        observation_provider=sparse_provider)
+    assert len(recovered) == 1
+    assert recovered[0]["id"] == 0
+    assert recovered[0]["miss_count"] == 0
+    assert recovered[0]["association_stage"] == "CAMERA_LIDAR_RECOVERY"
+    assert recovered[0]["box"][0] > 5.0
+
+    camera_only = observation(ObservationClass.CAMERA_DOMINANT.value)
+    camera_only.depth_state = DepthState.INCONSISTENT
+    assert not tracker._supports_prediction(camera_only)
+
+
 def test_sensor_supported_track_survives_long_3d_detector_gap():
     TimeAwareTrack._next_id = 0
     tracker = CascadedTracker(

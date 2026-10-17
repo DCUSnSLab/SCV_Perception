@@ -25,6 +25,13 @@ region grows with prediction uncertainty instead of using a fixed distance.
 Camera-depth evidence may retain an unmatched existing 3-D track, but never
 initializes a camera-only track.
 
+If aligned depth is unavailable for a matched pedestrian, the bottom-center of
+the 2-D box is intersected with the predicted ground plane. The resulting
+offset weakly corrects the existing 3-D track; depth remains preferred and the
+camera fallback still cannot create a new track.
+If depth is unstable, a matched person box plus at least one LiDAR point inside
+the predicted 3-D box keeps that existing track in camera-LiDAR recovery.
+
 Depth does not move the calibrated projection. The analyzer samples the center
 of each projected ROI, counts pixels within the configured tolerance of the
 predicted camera-frame depth, and uses that support ratio for consistency and

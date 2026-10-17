@@ -1,7 +1,8 @@
 observation_tracker:
   ros__parameters:
     detector_3d_threshold: 0.65
-    detector_2d_threshold: 0.70
+    # Camera detections only support an existing 3-D track; they never spawn one.
+    detector_2d_threshold: 0.25
 
     observation_box_margin_xy: 0.15
     observation_box_margin_z: 0.10
@@ -22,7 +23,7 @@ observation_tracker:
     lidar.cyclist.far.min_points: 3
 
     camera_iou_threshold: 0.20
-    camera_center_distance_threshold: 100.0
+    camera_center_distance_threshold: 65.0
 
     depth_consistency_threshold: 1.5
     occlusion_depth_threshold: 1.0

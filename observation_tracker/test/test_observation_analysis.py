@@ -42,6 +42,7 @@ def test_class_distance_lidar_threshold_and_centroid():
     assert evidence.state == LidarState.STRONG
     assert evidence.count == 5
     assert evidence.centroid_error < 0.1
+    assert np.linalg.norm(np.asarray(evidence.centroid) - box[:3]) < 0.1
 
 
 def test_depth_distinguishes_consistent_occluded_and_inconsistent():
@@ -145,6 +146,49 @@ def test_person_depth_projection_rejects_non_overlapping_pedestrian():
     assert result.camera_depth_overlap == 0.0
 
 
+def test_sparse_lidar_and_camera_override_unstable_pedestrian_depth():
+    analyzer = ObservationAnalyzer()
+    box = np.array([5.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0])
+    transform = camera_from_lidar()
+    initial = analyzer.analyze(
+        [box], ["Pedestrian"], camera_from_source=transform,
+        intrinsics=(100, 100, 50, 50), image_size=(100, 100),
+        camera_available=True)[0]
+    result = analyzer.analyze(
+        [box], ["Pedestrian"],
+        lidar_points=np.array([[5.0, 0.0, 0.0]], dtype=np.float32),
+        camera_detections=[CameraDetection(initial.projected_roi, "person", 0.9)],
+        camera_from_source=transform, intrinsics=(100, 100, 50, 50),
+        image_size=(100, 100), camera_available=True,
+        depth_image=np.full((100, 100), 9000, np.uint16))[0]
+    assert result.lidar_point_count == 1
+    assert result.camera_supported
+    assert result.depth_state == DepthState.INCONSISTENT
+    assert result.state == ObservationClass.CAMERA_DOMINANT.value
+    assert result.camera_ground_center is not None
+
+
+def test_sparse_lidar_promotes_nearby_person_when_far_box_iou_is_zero():
+    analyzer = ObservationAnalyzer()
+    box = np.array([5.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0])
+    transform = camera_from_lidar()
+    initial = analyzer.analyze(
+        [box], ["Pedestrian"], camera_from_source=transform,
+        intrinsics=(100, 100, 50, 50), image_size=(200, 100),
+        camera_available=True)[0]
+    x1, y1, x2, y2 = initial.projected_roi
+    result = analyzer.analyze(
+        [box], ["Pedestrian"],
+        lidar_points=np.array([[5.0, 0.0, 0.0]], dtype=np.float32),
+        camera_detections=[CameraDetection(
+            (x1 + 55.0, y1, x2 + 55.0, y2), "person", 0.9)],
+        camera_from_source=transform, intrinsics=(100, 100, 50, 50),
+        image_size=(200, 100), camera_available=True)[0]
+    assert result.camera_iou == 0.0
+    assert 50.0 < result.camera_center_distance < 60.0
+    assert result.camera_supported
+
+
 def test_one_person_detection_supports_only_one_3d_pedestrian():
     analyzer = ObservationAnalyzer()
     boxes = np.array([
@@ -181,6 +225,18 @@ def test_missing_person_depth_falls_back_to_2d_camera_support():
         depth_image=np.zeros((100, 100), np.uint16))[0]
     assert result.camera_supported
     assert result.depth_state == DepthState.UNAVAILABLE
+    assert result.camera_depth_center is None
+    assert result.camera_ground_center is not None
+    assert np.linalg.norm(np.asarray(result.camera_ground_center) - box[:3]) < 1.0
+
+
+def test_person_bottom_center_ray_recovers_3d_center_on_ground_plane():
+    box = np.array([5.0, 0.0, 0.0, 1.0, 1.0, 2.0, 0.0])
+    detection = CameraDetection((40.0, 30.0, 60.0, 70.0), "person", 0.9)
+    center = ObservationAnalyzer._box_center_from_ground_contact(
+        detection, box, (100.0, 100.0, 50.0, 50.0),
+        np.linalg.inv(camera_from_lidar()), detection.bbox)
+    assert np.allclose(center, box[:3])
 
 
 def test_fused_marker_contains_3d_and_matched_2d_result():
