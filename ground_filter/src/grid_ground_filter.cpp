@@ -22,6 +22,12 @@ void GridGroundFilter::convert()
        data_index += in_cloud_point_step) {
     PointXYZ input_point;
     data_accessor_.getPoint(in_cloud_, data_index, input_point);
+    // NaN would pass every range check in Grid and cast to a garbage cell index
+    if (
+      !std::isfinite(input_point.x) || !std::isfinite(input_point.y) ||
+      !std::isfinite(input_point.z)) {
+      continue;
+    }
     grid_ptr_->addPoint(input_point.x, input_point.y, input_point.z, data_index);
   }
 }

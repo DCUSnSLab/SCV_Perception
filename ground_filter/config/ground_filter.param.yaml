@@ -7,6 +7,9 @@
     base_frame: base_link          # algorithm assumes a vehicle-centred, z-up frame
     transform_timeout_sec: 0.1
     input_best_effort: false
+    # Final cut on the non-ground output: drop points with base_frame z <= this.
+    # Also removes curbs and other low obstacles. Comment out to disable.
+    nonground_min_z: 0.3
 
     # Road grade plus any pitch the odometry hides lands on top of these.
     global_slope_max_angle_deg: 15.0
@@ -34,6 +37,7 @@
     recheck_start_distance: 20.0
     use_lowest_point: true
 
-    # Grid origin sits at the vehicle centre, not at the sensor.
-    wheel_base_m: 0.65
-    center_pcl_shift: 0.0
+    # Polar grid origin in base_frame. SCV base_link is already at the vehicle
+    # centre on the ground plane, so no shift.
+    grid_origin_x: 0.0
+    grid_origin_y: 0.0

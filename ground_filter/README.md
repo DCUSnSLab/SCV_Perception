@@ -36,6 +36,7 @@ ros2 launch ground_filter ground_filter.launch.py
 | `non_ground_height_threshold` | 0.05 | 지면선 위 이만큼 솟으면 장애물 [m] |
 | `grid_radial_limit_m` | 15.0 | 처리 반경. 곧 장애물 탐지 거리 |
 | `gnd_grid_continual_thresh` | 40 | 엄격 판정을 유지할 셀 간격. LiDAR 링 간격보다 커야 한다 |
+| `nonground_min_z` | 0.3 | 지면 판정 후 비지면에서 base_frame z가 이 값 이하인 점을 제거 [m]. 기본값 -inf(끔) |
 | `global_slope_max_angle_deg` | 15.0 | 원점 기준 허용 경사 |
 | `local_slope_max_angle_deg` | 13.0 | 셀 사이 허용 경사 |
 

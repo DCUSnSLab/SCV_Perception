@@ -33,7 +33,7 @@ float pseudoArcTan2(const float y, const float x)
   }
   if (x == 0.0f) {
     if (y >= 0.0f) return M_PI_2f;
-    return -M_PI_2f;
+    return 3.0f * M_PI_2f;  // keep [0, 2pi); upstream returns -pi/2 here
   }
 
   const float x_abs = std::abs(x);
@@ -263,7 +263,12 @@ private:
     if (radius < 0) {
       return -1;
     }
-    return static_cast<int>(radius * grid_dist_size_inv_);
+    // radius == limit (or float rounding just below it) maps one past the last ring
+    const int radial_idx = static_cast<int>(radius * grid_dist_size_inv_);
+    if (radial_idx >= grid_radial_max_num_) {
+      return -1;
+    }
+    return radial_idx;
   }
 
   int getGridIdx(const int & radial_idx, const int & azimuth_idx) const

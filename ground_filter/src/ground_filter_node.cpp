@@ -7,9 +7,11 @@
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <tf2_sensor_msgs/tf2_sensor_msgs.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,6 +36,9 @@ public:
     base_frame_ = declare_parameter<std::string>("base_frame", "base_link");
     transform_timeout_sec_ = declare_parameter<double>("transform_timeout_sec", 0.1);
     const bool input_best_effort = declare_parameter<bool>("input_best_effort", false);
+    // Absolute base_frame z; non-ground points at or below it are dropped. -inf disables.
+    nonground_min_z_ = declare_parameter<double>(
+      "nonground_min_z", -std::numeric_limits<double>::infinity());
 
     GridGroundFilterParameter param;
     param.global_slope_max_angle_rad = static_cast<float>(
@@ -59,10 +64,10 @@ public:
     param.gnd_grid_continual_thresh =
       static_cast<uint16_t>(declare_parameter<int>("gnd_grid_continual_thresh", 40));
 
-    const auto wheel_base_m = declare_parameter<double>("wheel_base_m", 0.65);
-    const auto center_pcl_shift = declare_parameter<double>("center_pcl_shift", 0.0);
-    param.virtual_lidar_x = static_cast<float>(wheel_base_m / 2.0 + center_pcl_shift);
-    param.virtual_lidar_y = 0.0f;
+    // Polar grid origin in base_frame. Upstream derives x from wheel_base / 2
+    // because Autoware's base_link sits on the rear axle.
+    param.virtual_lidar_x = static_cast<float>(declare_parameter<double>("grid_origin_x", 0.0));
+    param.virtual_lidar_y = static_cast<float>(declare_parameter<double>("grid_origin_y", 0.0));
 
     validateParameters(param);
     filter_ = std::make_unique<GridGroundFilter>(param);
@@ -167,6 +172,29 @@ private:
     return out;
   }
 
+  void removeLowPoints(const sensor_msgs::msg::PointCloud2 & cloud, PointIndices & offsets) const
+  {
+    if (!std::isfinite(nonground_min_z_)) {
+      return;
+    }
+    const auto z_field = std::find_if(
+      cloud.fields.begin(), cloud.fields.end(), [](const auto & f) { return f.name == "z"; });
+    if (z_field == cloud.fields.end()) {
+      return;
+    }
+    const size_t z_offset = z_field->offset;
+    const auto min_z = static_cast<float>(nonground_min_z_);
+    offsets.erase(
+      std::remove_if(
+        offsets.begin(), offsets.end(),
+        [&](const size_t offset) {
+          float z;
+          std::memcpy(&z, &cloud.data[offset + z_offset], sizeof(float));
+          return z <= min_z;
+        }),
+      offsets.end());
+  }
+
   void cloudCallback(const sensor_msgs::msg::PointCloud2::ConstSharedPtr msg)
   {
     if (msg->data.empty() || msg->point_step == 0) {
@@ -189,6 +217,7 @@ private:
     PointIndices nonground_offsets;
     PointIndices ground_offsets;
     filter_->process(cloud, nonground_offsets, ground_offsets);
+    removeLowPoints(*cloud, nonground_offsets);
 
     nonground_pub_->publish(extractPoints(*cloud, nonground_offsets));
     if (publish_ground_ && ground_pub_->get_subscription_count() > 0) {
@@ -199,6 +228,7 @@ private:
   bool publish_ground_{true};
   std::string base_frame_{"base_link"};
   double transform_timeout_sec_{0.1};
+  double nonground_min_z_{-std::numeric_limits<double>::infinity()};
 
   std::unique_ptr<GridGroundFilter> filter_;
   std::unique_ptr<tf2_ros::Buffer> tf_buffer_;
