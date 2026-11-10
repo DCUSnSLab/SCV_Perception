@@ -30,8 +30,8 @@
     # Height above the estimated ground line that makes a point an obstacle.
     # 0.05 resolves a 0.15 m curb on 1 cm asphalt roughness; raise toward 0.10 if
     # the road surface starts producing scattered false obstacles.
-    non_ground_height_threshold: 0.05
-    detection_range_z_max: 2.5
+    non_ground_height_threshold: 0.1
+    detection_range_z_max: 1.0
 
     use_recheck_ground_cluster: true
     recheck_start_distance: 20.0
