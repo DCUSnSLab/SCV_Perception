@@ -25,10 +25,13 @@ from pointpillars_coda_detector.openpcdet_runtime import (
     prepare_openpcdet_runtime,
 )
 
-OPENPCDET_PATH = Path(os.environ.get("OPENPCDET_PATH", "/home/jay/OpenPCDet")).expanduser().resolve()
+OPENPCDET_PATH = Path(os.environ.get(
+    "OPENPCDET_PATH",
+    Path.home() / "ws/SCV_Perception/third_party/OpenPCDet",
+)).expanduser().resolve()
 OPENPCDET_CUDA_OPS_PATH = Path(os.environ.get(
     "OPENPCDET_CUDA_OPS_PATH",
-    "/home/scv/SCV/src/perception/jay_tracker/third_party/OpenPCDet/pcdet/ops",
+    Path.home() / "SCV/src/perception/jay_tracker/third_party/OpenPCDet/pcdet/ops",
 )).expanduser().resolve()
 PRELOADED_CUDA_EXTENSIONS = prepare_openpcdet_runtime(
     OPENPCDET_PATH, OPENPCDET_CUDA_OPS_PATH)
@@ -167,7 +170,7 @@ class CodaPointPillarNode(Node):
     def __init__(self):
         super().__init__("coda_pointpillar_node")
 
-        self.declare_parameter("input_topic", "/no_ground_points")
+        self.declare_parameter("input_topic", "/velodyne_points")
         self.declare_parameter("detection_topic", "/detected_objects_3d")
         self.declare_parameter("marker_topic", "/detections/visual_markers")
         self.declare_parameter("score_thresh", 0.65)
@@ -187,7 +190,10 @@ class CodaPointPillarNode(Node):
             "ckpt_file",
             str(
                 Path.home()
-                / "pcdet_ros2_ws"
+                / "SCV"
+                / "src"
+                / "perception"
+                / "jay_tracker"
                 / "models"
                 / "pointpillars_coda.pth"
             ),

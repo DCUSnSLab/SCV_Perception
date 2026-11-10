@@ -18,17 +18,19 @@ def generate_launch_description():
         DeclareLaunchArgument("perf_output_dir", default_value="results/perf"),
         DeclareLaunchArgument(
             "openpcdet_path",
-            default_value=str(home / "OpenPCDet-restored"),
+            default_value=str(
+                home / "ws/SCV_Perception/third_party/OpenPCDet"),
             description="Path containing the OpenPCDet pcdet Python package",
         ),
         DeclareLaunchArgument(
             "ckpt_file",
             default_value=str(
-                home / "pcdet_ros2_ws/models/pointpillars_coda.pth"),
+                home / "SCV/src/perception/jay_tracker/models/pointpillars_coda.pth"),
         ),
         DeclareLaunchArgument(
             "cuda_ops_path",
-            default_value=str(home / "OpenPCDet-restored/pcdet/ops"),
+            default_value=str(
+                home / "SCV/src/perception/jay_tracker/third_party/OpenPCDet/pcdet/ops"),
             description="CUDA 12 OpenPCDet extension directory",
         ),
         Node(
