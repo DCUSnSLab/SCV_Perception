@@ -1,0 +1,52 @@
+/**:
+  ros__parameters:
+    input_topic: /velodyne_points
+    output_topic: /perception/traversability/grid   # OccupancyGrid, odom frame
+    input_best_effort: false
+    odom_frame: odom
+    base_frame: base_link
+    transform_timeout_sec: 0.1
+
+    # Input points in base_link. body_box removes the robot's own body:
+    # [x_min, x_max, y_min, y_max, z_min, z_max]
+    range_min: 0.3
+    range_max: 20.0
+    z_max: 2.5
+    body_box: [-0.9, 0.65, -0.45, 0.45, -0.3, 1.3]
+
+    # Output cost: drop-off, obstacle and confirmed step >= step_lethal -> 100,
+    # provisional step (seen only beyond confirm_range) >= step_lethal -> cost_high,
+    # step >= step_high -> cost_high, other observed cells -> 0, unobserved -> -1.
+    # Drop-off occlusion shadows stay -1 (they are unseen, not low).
+    # Obstacles with no ground seen nearby (near blind zone) are measured from the
+    # robot's ground plus the grade allowance.
+    step_high: 0.08
+    step_lethal: 0.12
+    cost_high: 70
+
+    resolution: 0.1
+    window_half_size: 11.0          # output covers +-11 m around the robot
+    ground_expiry_sec: 10.0
+    obstacle_memory_sec: 0.3
+    range_slack: 0.5                # nearer observations win over farther ones
+    overhang_height: 1.3            # robot is ~1.2 m tall: ignore points above this over the ground
+    grade_allowance_max: 0.4
+    ground_max_above_robot: 0.5
+    object_extent: 0.3
+
+    # Per-scan height/slope alignment to the map. The slope is pulled toward
+    # level by slope_pull every scan (not while standing) so it cannot drift.
+    fit_range_min: 1.5
+    fit_range_max: 10.0
+    slope_pull: 0.05
+    freeze_slope_when_standing: true
+
+    confirm_range: 5.0              # steps count as confirmed once seen from within this range
+    median_size: 5
+    fill_gap: 0.3
+    # round(0.15 / 0.1) = 1 cell (floating point): step = max - min over the 4-neighbourhood.
+    step_radius: 0.15
+    ground_radius: 0.5
+    obstacle_height: 0.3
+    drop_min: 0.15
+    drop_min_gap: 0.2
